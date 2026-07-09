@@ -51,7 +51,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 产出文档（`docs/architecture/`）：
 - [ ] 更新 [`overview.md`](architecture/overview.md)：补全组件间接口契约（IDL/协议草稿）；纳入**混合执行模式**（PD 分离/混部/D-direct），替代当前刚性 P→D 描述
-- [ ] `architecture/execution-modes.md` 三模式的资源画像、KV 流转与模式选择决策树（细化 features.md "执行模式"）；失败处理统一归 F4 重路由，不设独立降级阶梯
+- [x] [`architecture/execution-modes.md`](architecture/execution-modes.md) 以 KV 为中心的执行模式与 KV 流转时序（本地完成 / 跨节点传输含正向产出与反向回传）；细化 features.md "执行模式"；失败处理统一归 F4 重路由，不设独立降级阶梯
 - [ ] `architecture/data-flow.md` 请求生命周期详图（含故障分支）
 - [ ] `architecture/consistency.md` 一致性与故障模型（KV 写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点）
 - [ ] `architecture/topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）

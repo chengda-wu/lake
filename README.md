@@ -13,6 +13,8 @@
 
 "彻底"意味着把**所有有状态的东西都从算力路径上剥离出去**：权重放到对象存储 + 内存池，KV cache 作为独立的分布式资源池，Prefill 与 Decode 拆成两个可独立伸缩的算力池，调度器只做无状态路由。算力节点理论上可以随时销毁、随时拉起。
 
+更进一步，本系统**以 KV 为中心**设计，连 GPU HBM / 主机内存 / 本地 NVMe 都不归计算节点私有，而是存储池统一管理的物理载体（L0–L4）。**agent 多轮对话**是首要驱动场景：其"长共享前缀 + 逐步增长"结构使 KV 池化、前缀复用与反向回传增强的价值最大化（见 [`docs/architecture/execution-modes.md`](docs/architecture/execution-modes.md)）。
+
 ## 仓库定位
 
 这是**探索与研究**仓库，不是生产系统。当前阶段以设计文档 + 原型代码为主，验证以下假设：
@@ -42,6 +44,7 @@ lake/
 │   │   └── nonfunctional.md    #   非功能需求
 │   ├── architecture/           # P1 架构设计 — 怎么搭
 │   │   ├── overview.md         #   总体架构
+│   │   ├── execution-modes.md  #   执行模式与 KV 流转时序（以 KV 为中心）
 │   │   ├── storage-layer.md    #   存储层（权重 / KV / 对象存储分层）
 │   │   ├── compute-layer.md    #   计算层（Prefill / Decode 池）
 │   │   ├── kv-cache-pool.md    #   KV cache 分布式池
@@ -56,6 +59,7 @@ lake/
 - **路线图**：见 [`docs/00-plan.md`](docs/00-plan.md)
 - **特性 / SLO / 非功能**：见 [`docs/features/`](docs/features/)
 - **总体架构**：见 [`docs/architecture/overview.md`](docs/architecture/overview.md)
+- **执行模式与 KV 流转**：见 [`docs/architecture/execution-modes.md`](docs/architecture/execution-modes.md)
 - **存储层**：见 [`docs/architecture/storage-layer.md`](docs/architecture/storage-layer.md)
 - **计算层**：见 [`docs/architecture/compute-layer.md`](docs/architecture/compute-layer.md)
 - **KV cache 池**：见 [`docs/architecture/kv-cache-pool.md`](docs/architecture/kv-cache-pool.md)

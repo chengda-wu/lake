@@ -1,6 +1,6 @@
 # 06 — 路由与调度
 
-> ⚠️ 本文档早于 P0 的"混合执行模式"设计。当前路由描述偏向固定 P→D；P1 将补入**模式选择**（PD 分离 / 混部 / D-direct，依存储池本地命中、prompt 规模、传输成本决策），见 [`../features/features.md`](../features/features.md) "执行模式"节。
+> ⚠️ 本文档早于 P0 的"混合执行模式"设计。当前路由描述偏向固定 P→D；执行模式与 KV 流转时序见 [`execution-modes.md`](execution-modes.md)，模式选择依存储池本地命中、prompt 规模、传输成本决策（见 [`../features/features.md`](../features/features.md) "执行模式"节）。
 
 调度是存算分离系统能否兑现弹性与低延迟承诺的控制核心。本系统调度器**无状态**（所有决策依据来自控制面的共享视图），可水平扩展。
 

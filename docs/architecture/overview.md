@@ -1,6 +1,6 @@
 # 02 — 总体架构
 
-> ⚠️ 本文档早于 P0 的"混合执行模式"设计（PD 分离 / 混部 / D-direct），当前仍以刚性 P→D 为主描述。P1 将按 [`../features/features.md`](../features/features.md) 的"执行模式"节重写。阅读时请将下文 "Prefill→Decode 固定流转" 理解为三种模式之一。
+> ⚠️ 本文档早于 P0 的"混合执行模式"设计（PD 分离 / 混部 / D-direct），当前仍以刚性 P→D 为主描述。执行模式与 KV 流转时序的权威描述见 [`execution-modes.md`](execution-modes.md)（以 KV 为中心，两条时序：本地完成 / 跨节点传输含正向产出与反向回传）。阅读时请将下文 "Prefill→Decode 固定流转" 理解为执行模式之一。
 
 ## 分层视图
 
