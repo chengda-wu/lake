@@ -33,27 +33,34 @@
 ```
 lake/
 ├── README.md
-├── docs/                       # 设计文档
-│   ├── 00-plan.md              # 路线图与执行计划（主线）
-│   ├── 01-goals.md             # 目标与非目标
-│   ├── 02-architecture.md      # 总体架构
-│   ├── 03-storage-layer.md     # 存储层（权重 / KV / 对象存储分层）
-│   ├── 04-compute-layer.md     # 计算层（Prefill pool / Decode pool）
-│   ├── 05-kv-cache-pool.md     # KV cache 分布式池
-│   ├── 06-scheduling.md        # 路由与调度
-│   └── 07-references.md        # 相关工作与文献
+├── docs/
+│   ├── 00-plan.md              # 路线图与执行计划（主线入口）
+│   ├── features/               # P0 特性设计 — 做什么
+│   │   ├── goals.md            #   目标与非目标
+│   │   ├── features.md         #   特性清单（Must/Should/Could）
+│   │   ├── slo.md              #   SLO 与衡量指标
+│   │   └── nonfunctional.md    #   非功能需求
+│   ├── architecture/           # P1 架构设计 — 怎么搭
+│   │   ├── overview.md         #   总体架构
+│   │   ├── storage-layer.md    #   存储层（权重 / KV / 对象存储分层）
+│   │   ├── compute-layer.md    #   计算层（Prefill / Decode 池）
+│   │   ├── kv-cache-pool.md    #   KV cache 分布式池
+│   │   └── scheduling.md       #   路由与调度
+│   └── research/               # 相关工作
+│       └── references.md
 └── src/                        # 早期单进程 Python 原型（验证假设用，将被 rust/go/python 子项目取代）
 ```
 
 ## 设计文档速览
 
 - **路线图**：见 [`docs/00-plan.md`](docs/00-plan.md)
-- **总体架构**：见 [`docs/02-architecture.md`](docs/02-architecture.md)
-- **存储层**：见 [`docs/03-storage-layer.md`](docs/03-storage-layer.md)
-- **计算层**：见 [`docs/04-compute-layer.md`](docs/04-compute-layer.md)
-- **KV cache 池**：见 [`docs/05-kv-cache-pool.md`](docs/05-kv-cache-pool.md)
-- **调度**：见 [`docs/06-scheduling.md`](docs/06-scheduling.md)
-- **相关工作**：见 [`docs/07-references.md`](docs/07-references.md)
+- **特性 / SLO / 非功能**：见 [`docs/features/`](docs/features/)
+- **总体架构**：见 [`docs/architecture/overview.md`](docs/architecture/overview.md)
+- **存储层**：见 [`docs/architecture/storage-layer.md`](docs/architecture/storage-layer.md)
+- **计算层**：见 [`docs/architecture/compute-layer.md`](docs/architecture/compute-layer.md)
+- **KV cache 池**：见 [`docs/architecture/kv-cache-pool.md`](docs/architecture/kv-cache-pool.md)
+- **调度**：见 [`docs/architecture/scheduling.md`](docs/architecture/scheduling.md)
+- **相关工作**：见 [`docs/research/references.md`](docs/research/references.md)
 
 ## 状态
 

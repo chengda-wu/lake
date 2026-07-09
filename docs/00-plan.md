@@ -23,20 +23,23 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 **目标**：把系统"要交付哪些能力"讲清楚，作为架构设计的输入。不谈实现。
 
-产出文档（新增/补全 `docs/`）：
-- [ ] `10-features.md` 特性清单：按 Must / Should / Could 分级
-  - [ ] KV cache 池化与前缀复用（内容寻址、radix tree）
-  - [ ] Prefill / Decode 物理隔离
-  - [ ] 分层缓存（HBM→RAM→NVMe→远端内存池→对象存储）
-  - [ ] 投机解码（draft / target 分离）
-  - [ ] 秒级弹性扩缩容
-  - [ ] 故障恢复（基于 KV Pool 续推）
-  - [ ] 多租户隔离与共享前缀
-  - [ ] 模型版本/热更新
-- [ ] `11-slo.md` SLO 与衡量指标定义（TTFT / ITL P50/P99 / 吞吐 / 命中率 / 冷启动时延）
-- [ ] `12-nonfunctional.md` 非功能需求（可观测性、安全、成本模型、部署形态）
+产出文档（`docs/features/`）：
+- [x] [`features.md`](features/features.md) 特性清单：按 Must / Should / Could 分级（每条含输入/输出/失败语义）
+  - [x] F1 KV cache 池化与前缀复用（内容寻址、radix tree）
+  - [x] F2 Prefill / Decode 物理隔离
+  - [x] F3 分层缓存（HBM→RAM→NVMe→远端内存池→对象存储）
+  - [x] F4 故障恢复（基于 KV Pool 续推）
+  - [x] F5 无状态路由
+  - [x] F6 投机解码（draft / target 分离）
+  - [x] F7 秒级弹性扩缩容
+  - [x] F8 多租户隔离与共享前缀
+  - [x] F9 模型版本/热更新（Could）
+  - [x] F10 跨机房（Could）
+- [x] [`slo.md`](features/slo.md) SLO 与衡量指标（TTFT / ITL P50/P99 / 吞吐 / 命中率 / 冷启动时延，初版 draft）
+- [x] [`nonfunctional.md`](features/nonfunctional.md) 非功能需求（可观测性、安全、成本、部署、可维护性、可测试性）
 
-**完成判据**：每条特性有明确的输入/输出/失败语义；SLO 数值化；与 `01-goals.md` 对齐且无矛盾。
+**完成判据**：每条特性有明确的输入/输出/失败语义 ✅；SLO 数值化 ✅；与 [`goals.md`](features/goals.md) 对齐且无矛盾 ✅。
+**P0 状态：done 2026-07-09**
 
 ---
 
@@ -44,11 +47,11 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 **目标**：基于 P0 特性，定下数据流、组件边界、一致性模型、故障域。
 
-产出文档：
-- [ ] 更新 `02-architecture.md`：补全组件间接口契约（IDL/协议草稿）
-- [ ] `20-data-flow.md` 请求生命周期详图（含故障分支）
-- [ ] `21-consistency.md` 一致性与故障模型（KV 写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点）
-- [ ] `22-topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）
+产出文档（`docs/architecture/`）：
+- [ ] 更新 [`overview.md`](architecture/overview.md)：补全组件间接口契约（IDL/协议草稿）
+- [ ] `architecture/data-flow.md` 请求生命周期详图（含故障分支）
+- [ ] `architecture/consistency.md` 一致性与故障模型（KV 写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点）
+- [ ] `architecture/topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）
 
 **完成判据**：任一特性的"数据从哪来、写到哪、谁来调度、失败怎么办"都可在此找到答案。
 
@@ -97,7 +100,7 @@ lake/
 ### 接口边界（P2 定稿）
 - [ ] `proto/lake.proto`：Router↔Worker、Worker↔KVPool、Router↔ControlPlane 的 RPC 定义
 - [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格
-- [ ] KVBlockID / 元数据 schema 定稿（与 `05-kv-cache-pool.md` 对齐）
+- [ ] KVBlockID / 元数据 schema 定稿（与 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) 对齐）
 
 **完成判据**：三个语言仓各自能编译出空壳服务；proto 可双向生成；目录结构落地。
 
