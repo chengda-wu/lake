@@ -25,8 +25,9 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 产出文档（`docs/features/`）：
 - [x] [`features.md`](features/features.md) 特性清单：按 Must / Should / Could 分级（每条含输入/输出/失败语义）
+  - 设计前提：**三种执行模式**（PD 分离 / 混部 / D-direct），Router 按 APC 命中、prompt 规模、传输成本逐请求选路；详见 features.md "执行模式"节
   - [x] F1 KV cache 池化与前缀复用（内容寻址、radix tree）
-  - [x] F2 Prefill / Decode 物理隔离
+  - [x] F2 混合执行模式（PD 分离 / 混部 / D-direct，含模式选择）
   - [x] F3 分层缓存（HBM→RAM→NVMe→远端内存池→对象存储）
   - [x] F4 故障恢复（基于 KV Pool 续推）
   - [x] F5 无状态路由
@@ -48,7 +49,8 @@ P7  性能建模与验证   → 量化各假设，回填设计
 **目标**：基于 P0 特性，定下数据流、组件边界、一致性模型、故障域。
 
 产出文档（`docs/architecture/`）：
-- [ ] 更新 [`overview.md`](architecture/overview.md)：补全组件间接口契约（IDL/协议草稿）
+- [ ] 更新 [`overview.md`](architecture/overview.md)：补全组件间接口契约（IDL/协议草稿）；纳入**混合执行模式**（PD 分离/混部/D-direct），替代当前刚性 P→D 描述
+- [ ] `architecture/execution-modes.md` 三模式的资源画像、KV 流转、降级链与模式选择决策树（细化 features.md "执行模式"）
 - [ ] `architecture/data-flow.md` 请求生命周期详图（含故障分支）
 - [ ] `architecture/consistency.md` 一致性与故障模型（KV 写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点）
 - [ ] `architecture/topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）
