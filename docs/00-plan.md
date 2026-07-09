@@ -50,13 +50,29 @@ P7  性能建模与验证   → 量化各假设，回填设计
 **目标**：基于 P0 特性，定下数据流、组件边界、一致性模型、故障域。
 
 产出文档（`docs/architecture/`）：
-- [ ] 更新 [`overview.md`](architecture/overview.md)：补全组件间接口契约（IDL/协议草稿）；纳入**混合执行模式**（PD 分离/混部/D-direct），替代当前刚性 P→D 描述
-- [x] [`architecture/execution-modes.md`](architecture/execution-modes.md) 以 KV 为中心的执行模式与 KV 流转时序（本地完成 / 跨节点传输含正向产出与反向回传）；细化 features.md "执行模式"；失败处理统一归 F4 重路由，不设独立降级阶梯
-- [ ] `architecture/data-flow.md` 请求生命周期详图（含故障分支）
+- [x] 更新 [`overview.md`](architecture/overview.md)：纳入混合执行模式与 KV 流转视角，替代刚性 P→D；去 ⚠️
+- [x] [`architecture/execution-modes.md`](architecture/execution-modes.md) 以 KV 为中心的执行模式与 KV 流转时序（本地完成 / 跨节点传输含正向产出与反向回传）；失败处理统一归 F4 重路由，不设独立降级阶梯
+- [ ] `architecture/data-flow.md` 请求生命周期详图（含 F4 故障分支、模式选择决策树）
 - [ ] `architecture/consistency.md` 一致性与故障模型（KV 写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点）
 - [ ] `architecture/topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）
 
 **完成判据**：任一特性的"数据从哪来、写到哪、谁来调度、失败怎么办"都可在此找到答案。
+
+### P1 已定决策摘要（跨轮固化）
+
+- **彻底存算分离**：L0–L4 全归存储池统一管理，计算节点不拥有任何内存；APC 概念删除，"本地命中"= 存储池放置决策的结果。
+- **radix tree 归存储池**，按 `model_id` 分命名空间；Router 一次查询拿前缀复用 + 本地命中，守 5ms 模式选择预算。
+- **放置与 batch 职责边界（方案 Z）**：存储池按热度主动预放置 KV 到 HBM + 发布位置视图；调度器读视图组 batch（本地命中优先→D-direct，缺失补拉），不反向指挥放置。单向耦合。
+- **冷热与生命周期**：L0/L1 做副本、L2/L3/L4 间按移动、L4 永久权威；冷热按"引用数>0 冻结 + 热度分(LFU-Aging) + 前缀亲和"；迁移主动为主 + 被动兜底；迁移/GC/碎片整理共享后台带宽池（<10%）。
+- **执行模式时序**（存储池视角不区分 P/D）：时序一本地完成（D-direct/混部共用，入口由本地命中定 prefill 工作量）；时序二跨节点传输——正向（产出→消费，服务本次）+ 反向（消费→池，D 延伸 KV 回传增强未来前缀，agent 多轮核心）。
+- **decode 增量写回双重目的**：容错 + 前缀生长。频率 N 策略留开放。
+
+### P1 待讨论 / 开放点
+
+- decode 写回频率 N：多轮 agent（重前缀增强时效，N 小）vs 单轮（重带宽/容错，N 大），待 P7。
+- 反向回传的 radix 增长时效：写回到 radix 可见的滞后上限。
+- 时序二正向"放置与计算重叠"的流水线深度与 prefill 层数对齐。
+- 模式选择决策树的具体阈值（本地命中判定、传输成本 vs 分离收益）待 P7；决策树本身待 `data-flow.md` 落定。
 
 ---
 
@@ -104,6 +120,15 @@ lake/
 - [ ] `proto/lake.proto`：Router↔Worker、Worker↔KVPool、Router↔ControlPlane 的 RPC 定义
 - [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格
 - [ ] KVBlockID / 元数据 schema 定稿（与 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) 对齐）
+
+### 转 P2 切入建议
+
+P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。建议从 **`proto/lake.proto` 的 RPC 边界草稿**切入，把这几轮定的存储池接口固化：
+
+- **Router ↔ 存储池**：一次查询 RPC，输入 `(model_id, prompt 前缀)`，输出 `可复用 block 列表 + 各自位置（含本地命中判定）`。对应 radix + 位置视图一跳返回。
+- **调度器 ↔ 存储池**：读位置视图（组 batch 用）；补拉放置请求（缺失 KV 放到指定节点 HBM）。
+- **Worker ↔ 存储池**：prefill 产出写回（含反向回传的延伸 KV）；decode 读 KV；增量写回（容错 + 前缀生长）。
+- **元数据 schema**：KVBlockID = `(model_id, layer_idx, block_hash)`；block 的 `locations` 为多层位置集合（L0/L1 缓存副本 + L2/L3/L4 三选一），L4 缺失才视为不存在。
 
 **完成判据**：三个语言仓各自能编译出空壳服务；proto 可双向生成；目录结构落地。
 
