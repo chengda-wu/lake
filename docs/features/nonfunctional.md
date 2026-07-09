@@ -9,7 +9,7 @@
 - **Metrics**：Prometheus 暴露，至少覆盖
   - 延迟：TTFT / ITL 分位（P50/P95/P99）
   - 吞吐：tokens/s、requests/s
-  - KV：命中率、Pool 容量水位、各层缓存命中分布
+  - KV：Pool 命中率、本地命中率（D-direct 信号）、Pool 容量水位、各层缓存命中分布
   - 池：各算力池节点数、队列长度、in-flight 请求数
   - 弹性：扩缩容事件计数、冷启动时延分布
   - **过载信号**：队列长度、in-flight、估算剩余容量实时上报 gateway，供其做准入/限流决策（推理系统自身不做过载拒绝）
