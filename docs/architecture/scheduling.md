@@ -36,7 +36,7 @@
 
 - **Continuous batching**：Decode 节点动态拼接 batch。
 - **PagedAttention** 风格的块状 KV 管理，与存储池的 block 粒度对齐。
-- **放置与 batch 耦合**：彻底存算分离下，同一 batch 各 sequence 的 KV 必须同时在本机 HBM（attention 一次读全部）。因此存储池的 HBM 放置决策实质约束了哪些 sequence 可组进同一 batch——batch 调度与存储池放置需协同（边界 P1 `execution-modes.md` 定）。
+- **放置与 batch 单向耦合（方案 Z）**：同一 batch 各 sequence 的 KV 必须同时在本机 HBM（attention 一次读全部）。存储池按热度主动预放置 KV 到 HBM 并发布位置视图;调度器读视图组 batch（本地命中优先），缺失补拉，不反向指挥放置。见 [`storage-layer.md`](storage-layer.md) / [`execution-modes.md`](execution-modes.md)。
 - **抢占**：高优先级请求可抢占低优先级，被抢占者的 KV 在存储池中保留（不丢失，本机 HBM 放置释放归还存储池）。
 
 ## 4. 弹性调度

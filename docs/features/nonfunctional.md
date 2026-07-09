@@ -15,7 +15,7 @@
   - **过载信号**：队列长度、in-flight、估算剩余容量实时上报 gateway，供其做准入/限流决策（推理系统自身不做过载拒绝）
 - **Tracing**：每请求一条 trace，span 覆盖 gateway → router → prefill → KV transfer → decode，含跨语言边界（gRPC/RDMA）。
 - **Logging**：结构化日志（JSON），含 request_id 贯穿三语言栈。
-- **仪表盘**：Grafana 预置"SLO 总览""KV KV 健康""弹性事件"三块。
+- **仪表盘**：Grafana 预置"SLO 总览""KV 健康""弹性事件"三块。
 
 ## 过载控制（职责边界）
 
