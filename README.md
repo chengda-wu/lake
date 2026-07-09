@@ -22,12 +22,19 @@
 3. 算力节点做到无状态后，秒级扩缩容是否可行，冷启动代价如何压缩？
 4. 以对象存储为单一事实来源（single source of truth）时，权重/KV 的分层缓存策略如何设计？
 
+## 路线图
+
+先看 [`docs/00-plan.md`](docs/00-plan.md) —— 依次要做的事情与技术选型（存储 Rust / 控制 Go / 计算 Python+Triton）。
+
+**当前阶段**：P0 特性设计 → P1 架构设计 → P2 模块划分与技术选型。
+
 ## 目录结构
 
 ```
 lake/
 ├── README.md
 ├── docs/                       # 设计文档
+│   ├── 00-plan.md              # 路线图与执行计划（主线）
 │   ├── 01-goals.md             # 目标与非目标
 │   ├── 02-architecture.md      # 总体架构
 │   ├── 03-storage-layer.md     # 存储层（权重 / KV / 对象存储分层）
@@ -35,11 +42,12 @@ lake/
 │   ├── 05-kv-cache-pool.md     # KV cache 分布式池
 │   ├── 06-scheduling.md        # 路由与调度
 │   └── 07-references.md        # 相关工作与文献
-└── src/                        # 原型代码（Python，用于验证假设）
+└── src/                        # 早期单进程 Python 原型（验证假设用，将被 rust/go/python 子项目取代）
 ```
 
 ## 设计文档速览
 
+- **路线图**：见 [`docs/00-plan.md`](docs/00-plan.md)
 - **总体架构**：见 [`docs/02-architecture.md`](docs/02-architecture.md)
 - **存储层**：见 [`docs/03-storage-layer.md`](docs/03-storage-layer.md)
 - **计算层**：见 [`docs/04-compute-layer.md`](docs/04-compute-layer.md)
