@@ -12,9 +12,16 @@
   - KV：命中率、Pool 容量水位、各层缓存命中分布
   - 池：各算力池节点数、队列长度、in-flight 请求数
   - 弹性：扩缩容事件计数、冷启动时延分布
+  - **过载信号**：队列长度、in-flight、估算剩余容量实时上报 gateway，供其做准入/限流决策（推理系统自身不做过载拒绝）
 - **Tracing**：每请求一条 trace，span 覆盖 gateway → router → prefill → KV transfer → decode，含跨语言边界（gRPC/RDMA）。
 - **Logging**：结构化日志（JSON），含 request_id 贯穿三语言栈。
-- **仪表盘**：Grafana 预置"SLO 总览""KV Pool 健康""弹性事件"三块。
+- **仪表盘**：Grafana 预置"SLO 总览""KV KV 健康""弹性事件"三块。
+
+## 过载控制（职责边界）
+
+- **归 gateway / 外部控制面**：限并发、拒请求、按优先级丢弃、准入控制。
+- **推理系统只管执行**：Worker 不得为保 SLO 自行降 batch size 或丢请求；遇过载只上报指标，由 gateway 决定是否准入。
+- 推理系统对已准入的请求负责执行（含 F4 续推）；过载导致的拒绝不计入推理系统失败率。
 
 ## 安全
 
