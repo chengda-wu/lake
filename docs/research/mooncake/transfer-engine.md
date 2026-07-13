@@ -96,3 +96,29 @@ submitTransfer(BatchID, {TransferRequest{WRITE, source=local_kv_addr,
 ## 元数据插件
 
 `MetadataStoragePlugin`(`transfer_metadata_plugin.h`):etcd / redis / http 后端。维护 `SegmentDesc`/`BufferDesc`/`HandShakeDesc`。
+
+## 代码索引
+
+> 沿代码回溯用。符号名锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
+
+| 机制 | 文件:符号 |
+|------|-----------|
+| 传输核心类型(SegmentID/BatchID/TransferRequest/Slice/TransferTask/BatchDesc) | `mooncake-transfer-engine/include/transport/transport.h` |
+| 用户门面 | `mooncake-transfer-engine/include/transfer_engine.h`::`TransferEngine`(`init`/`installTransport`/`openSegment`/`registerLocalMemory`/`allocateBatchID`/`submitTransfer`/`getTransferStatus`) |
+| 经典实现 | `mooncake-transfer-engine/src/transfer_engine_impl.cpp`::`TransferEngineImpl`(TCP 退化判断:`MC_FORCE_TCP`/无 HCA) |
+| TENT 新引擎 | `mooncake-transfer-engine/src/tent/`(`impl_tent_`) |
+| 元数据(Segment/Buffer/HandShake) | `mooncake-transfer-engine/include/transfer_metadata.h`::`TransferMetadata` |
+| 元数据插件抽象 | `mooncake-transfer-engine/include/transfer_metadata_plugin.h`::`MetadataStoragePlugin`(etcd/redis/http) |
+| RDMA 传输 | `mooncake-transfer-engine/src/transport/rdma_transport/rdma_transport.cpp`::`RdmaTransport`(`registerLocalMemory`/`registerMemoryRegion`/`submitTransferTask`) |
+| RDMA 上下文(per-NIC) | `rdma_transport.cpp`::`RdmaContext`(`ibv_reg_mr`) |
+| RDMA 端点(ibv_post_send) | `mooncake-transfer-engine/src/transport/rdma_transport/rdma_endpoint.cpp`::`RdmaEndPoint`::`submitPostSend`(`ibv_sge`/`ibv_send_wr`/`ibv_post_send`) |
+| CQ 轮询 worker | `rdma_transport.cpp`::`WorkerPool`(`ibv_poll_cq` → `slice->markSuccess/markFailed`) |
+| 多传输路由 | `mooncake-transfer-engine/include/multi_transport.h`::`MultiTransport` |
+| NUMA 拓扑发现 | `mooncake-transfer-engine/src/topology.cpp`::`Topology::discover` / `discoverCpuTopology` / `discoverCudaTopology`(`ibv_get_device_list` + `/sys/.../numa_node`) |
+| 设备选择(多 NIC 聚合核心) | `mooncake-transfer-engine/src/topology.cpp`::`Topology::selectDevice` (L706;random/roundrobin over preferred/avail_hca) |
+| TCP 退化传输 | `mooncake-transfer-engine/src/transport/tcp_transport/tcp_transport.cpp`::`TcpTransport`(ASIO;v2 确认帧 `MC_TCP_PROTO`) |
+| GPU 内存注册路径门控 | `rdma_transport.cpp`(`MC_ENABLE_PARALLEL_REG_MR` / `WITH_NVIDIA_PEERMEM`) |
+| Endpoint 池驱逐(SIEVE) | `rdma_endpoint.cpp`(`MC_ENDPOINT_STORE_TYPE=SIEVE`) |
+| 传输后端清单 | `mooncake-transfer-engine/include/transport/`(rdma/tcp/nvlink/efa/nvmeof/cxl/cxi/hip/ascend/barex/kunpeng/... + `device/`) |
+| Python 零拷贝 API | `mooncake-wheel/mooncake/`(`put_from`/`get_into`/`batch_put_from`/`batch_get_into`/`register_buffer`) |
+| vLLM PD 集成 | `mooncake-wheel/mooncake/mooncake_connector_v1.py`::`MooncakeConnector`(`kv_role=kv_producer/consumer`) |

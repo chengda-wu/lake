@@ -82,6 +82,34 @@ docs/
 - clone 本仓库需 `git submodule update --init --recursive`。
 - 设计/实现遇到分层、传输、复用、放置等问题,先查对应 submodule 源码再动手。
 
+## reference 强制查阅规则（硬性，每次都做）
+
+**每一次**技术讨论（设计决策、机制选型、数据结构/接口设计）或代码修改，**必须**先查阅 `docs/research/` 下的实现参考，并在回复中**显式**告诉用户：reference 里有什么值得参考的地方、参考了什么、按哪段代码回溯。这是硬约束，不是建议。
+
+### 怎么查
+
+1. **先定主题**：本次讨论涉及哪个机制（分层缓存 / KV 传输 / 前缀复用 / 放置调度 / 后端抽象 / HA / GC…）。
+2. **按主题定位文档**：
+   - 分层 + radix 节点记位置 + prefetch/write-back 策略 + 内存布局 + 计算-传输重叠 → `docs/research/sglang/{overview,hicache,storage-backends}.md`
+   - 跨实例复用 + 多存储后端 + 内容寻址 + 控制器元数据 + Rust 裸设备 I/O → `docs/research/lmcache/{overview,sharing-and-backends}.md`
+   - RDMA 零拷贝传输 + 多 NIC 聚合 + 对象级 KV store + 分配策略 + HA → `docs/research/mooncake/{overview,transfer-engine,kv-store}.md`
+   - 跨项目逐层对应与借鉴顺序 → `docs/research/3rdparty-reference.md`
+3. **沿代码回溯**：每个参考文档末尾都有「代码索引」节，把概念/机制映射到 `文件:符号`。符号名是稳定锚点（行号会漂移，找不到时 `grep -n "符号名" 3rdparty/<repo>/<文件路径>`）。需要确认实现细节时，直接读对应符号的源码。
+
+### 必须在回复里给出的内容
+
+- **参考了哪些实现**：点名项目 + 具体 `文件:符号`（至少一条，能定位到代码）。
+- **值得参考的点**：从这些实现里能直接借鉴什么（API 形态、数据结构、算法、布局、策略、失败处理…），并说明**为什么**对当前讨论有用。
+- **关键差异**：reference 这么做，我们要不要照搬？哪里更彻底 / 哪里要改造 / 哪里是它们的局限我们需另设计（如 HiCache L1/L2 实例私有 vs 我们归存储池；Mooncake store 无内容寻址 vs 我们 radix；LMCache 无全局强一致元数据 vs 我们 etcd 强一致）。
+
+### 示例措辞
+
+> 参考实现：SGLang HiCache `hiradix_cache.py::prefetch_from_storage` + `can_terminate_prefetch`。
+> 值得参考：timeout 预算公式 `base + per_ki_token * num_tokens/1024` 可直接用于我们 prefetch 预算模型；三策略（best_effort/wait_complete/timeout）对应我们"被动兜底读 miss 回填"的终止语义。
+> 关键差异：SGLang 实时查后端 `batch_exists`（弱一致），我们由控制面 etcd 维护强一致位置视图，一跳命中，省掉每次访问的 RPC。
+
+不涉及任何参考实现时（纯本项目内部讨论、无对应参考）也要**显式说明**「本项无直接参考实现」，而不是省略——省略会被当成漏查。
+
 ## SLO 是架构硬约束
 
 SLO 数值是 draft（待 P7 校准），但**约束关系是硬的**：TTFT/ITL/冷启动等目标倒逼架构取舍（如 D-direct 模式选择开销 < 5ms，否则吃掉本地命中省传输的收益）。

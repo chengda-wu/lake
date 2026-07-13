@@ -59,3 +59,30 @@ HTTP 端点 `PUT/DELETE/GET /hicache/storage-backend`,经 HTTP Server → Tokeni
 | `--hicache-storage-prefetch-policy` | `best_effort`/`wait_complete`/`timeout` |
 | `--hicache-storage-backend` | `file`/`mooncake`/`hf3fs`/`nixl`/`aibrix`/`eic`/`simm`/`mori`/`dynamic` |
 | `--hicache-storage-backend-extra-config` | JSON 串或 `@file`(toml/yaml/json) |
+
+## 代码索引
+
+> 沿代码回溯用。符号名锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
+
+| 机制 | 文件:符号 |
+|------|-----------|
+| L3 后端统一抽象 | `mem_cache/hicache_storage.py`::`HiCacheStorage` (L141) |
+| v2 多 pool 接口 | `HiCacheStorage.batch_exists_v2` / `batch_get_v2` / `batch_set_v2` |
+| v1 批量零拷贝接口 | `HiCacheStorage.batch_get_v1` / `batch_set_v1` |
+| legacy 抽象接口 | `HiCacheStorage.get` / `set` / `exists` / `batch_get` / `batch_set` / `batch_exists` |
+| 配置/数据类 | `hicache_storage.py`::`HiCacheStorageConfig` / `PoolTransfer` / `PoolHitPolicy` / `PoolName` |
+| 后端注册 + 惰性加载 | `mem_cache/storage/backend_factory.py`::`create_storage_backend`(name→class 映射) |
+| `file` 后端 | `storage/file_storage.py`::`HiCacheFile` |
+| `mooncake` 后端 | `storage/mooncake_store/`(MooncakeStore,`batch_put_from`/`batch_get_into`/`_batch_exist`) |
+| `hf3fs` 后端 | `storage/hf3fs_storage.py`::`HiCacheHF3FS` |
+| `nixl` 后端 | `storage/nixl_storage.py`::`HiCacheNixl` |
+| `aibrix` 后端 | `storage/aibrix.py`::`AibrixKVCacheStorage` |
+| `eic` 后端 | `storage/eic.py`::`EICStorage` |
+| `simm` 后端 | `storage/simm.py`::`HiCacheSiMM` |
+| `mori`/umbp 后端 | `storage/umbp.py`::`UMBPStore` |
+| `dynamic` 自定义 | `storage/dynamic.py` |
+| LMCache 集成(radix 层,非 HiCacheStorage) | `mem_cache/lmcache_radix_cache.py`::`LMCRadixCache` |
+| FlexKV 集成 | `mem_cache/flexkv_radix_cache.py`::`FlexKVRadixCache` |
+| 异构 TP(tp_lcm_size/head split) | `hicache_storage.py`::`_generate_storage_config`(`should_split_heads`/`split_factor`) |
+| 运行时 attach/detach | `hiradix_cache.py`::`attach_storage_backend` / `detach_storage_backend`(经 HTTP `/hicache/storage-backend` → Scheduler `is_fully_idle` 检查) |
+| 相关 server args | `server_args.py`(`--enable-hierarchical-cache`/`--hicache-ratio`/`--hicache-size`/`--page-size`/`--hicache-mem-layout`/`--hicache-io-backend`/`--hicache-write-policy`/`--hicache-storage-prefetch-policy`/`--hicache-storage-backend`) |

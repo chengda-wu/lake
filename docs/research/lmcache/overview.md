@@ -51,6 +51,33 @@ vLLM 集成点:`LMCacheConnectorV1Dynamic`(继承 `KVConnectorBase_V1`),委托 `
 - **关键依赖**:vLLM(`KVConnectorBase_V1`)、NIXL(RDMA/NVLink 传输)、Mooncake(分布式 KV store)、Redis/Valkey、msgspec、ZMQ、PyTorch。
 - **构建**:`pip install -e . --no-build-isolation`(需预装 torch);`NO_NATIVE_EXT=1`(纯源码)/`NO_GPU_EXT=1`(CPU-only C++)/`BUILD_WITH_HIP=1`(ROCm)。CMake + pybind。
 
+## 代码索引
+
+> 沿代码回溯用。符号名稳定锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
+
+| 概念 | 文件:符号 |
+|------|-----------|
+| 主引擎 | `lmcache/v1/cache_engine.py`::`LMCacheEngine` (L83) |
+| 存储管理器(串联 L1/L2) | `lmcache/v1/storage_backend/storage_manager.py`::`StorageManager` (L219) |
+| 后端抽象(Python) | `lmcache/v1/storage_backend/abstract_backend.py`::`StorageBackendInterface` (L27) |
+| 后端工厂 | `lmcache/v1/storage_backend/__init__.py`::`CreateStorageBackends` |
+| 缓存键(non-MP) | `lmcache/utils.py`::`CacheEngineKey` (L399) |
+| token 切分 + 链式哈希 | `lmcache/v1/token_database.py`::`ChunkedTokenDatabase` (L298) |
+| MP 分布式键(内容寻址) | `lmcache/v1/distributed/api.py`::`ObjectKey` |
+| MP 存储管理器(多 L2 adapter) | `lmcache/v1/distributed/storage_manager.py`::`StorageManager` |
+| L2 adapter 抽象 | `lmcache/v1/distributed/l2_adapters/base.py`::`L2AdapterInterface` |
+| P2P 跨实例 | `lmcache/v1/storage_backend/p2p_backend.py`::`P2PBackend` (L160) |
+| 传输通道(NIXL/socket) | `lmcache/v1/transfer_channel/`(`nixl_channel.py`、`py_socket_channel.py`) |
+| 控制器(元数据协调,非数据路径) | `lmcache/v1/cache_controller/worker.py`::`LMCacheWorker` + `controller_manager.py`::`LMCacheControllerManager` + `controllers/kv_controller.py` |
+| 元数据树 | `lmcache/v1/cache_controller/utils.py`::`RegistryTree` |
+| vLLM 集成(拦截 KV) | `lmcache/integration/vllm/lmcache_connector_v1.py`::`LMCacheConnectorV1Dynamic` (L30) |
+| C++ 后端抽象 | `csrc/storage_backends/connector_interface.h`::`IStorageConnector` |
+| C++ 后端基类(SQ/CQ+tiling) | `csrc/storage_backends/connector_base.h`::`ConnectorBase<T>` |
+| C++ 已实现后端 | `csrc/storage_backends/{redis,mooncake,fs,aerospike}/` |
+| Rust 裸设备 I/O | `rust/raw_block/src/lib.rs`::`RawBlockDevice`(posix/io_uring/io_uring_cmd) |
+| serde/压缩 | `lmcache/v1/storage_backend/naive_serde/`(CacheGen/KiVi) + `lmcache/v1/distributed/serde/`(fp8/turboquant) |
+| CacheBlend(non-prefix 复用) | `lmcache/v1/compute/blend/blender.py`::`LMCBlender` |
+
 ## 优势
 
 1. **引擎解耦、无 fate-sharing** — 独立 daemon(MP 模式),引擎崩溃 KV 不丢。

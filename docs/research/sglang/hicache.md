@@ -139,3 +139,35 @@ Consumer(compute stream):`get_key_buffer`/`get_value_buffer` 每层调 `layer_tr
 理由:跨实例 L3 元数据强一致成本高(每实例 radix tree 视角不同、驱逐/写入并发),实时查后端避免分布式一致性问题,代价是每次访问一次 `batch_exists` RPC(后端可缓存)。
 
 **kv_events 旁路**:`BlockStored`/`BlockRemoved`(含 `StorageMedium`)经 `ZmqEventPublisher` 发布,供外部 router/indexer 构建跨实例前缀索引——但这是旁路,不回填树自身的 L3 元数据。
+
+## 代码索引
+
+> 沿代码回溯用。符号名锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
+
+| 机制 | 文件:符号 |
+|------|-----------|
+| TreeNode(L1/L2/L3 字段) | `radix_cache.py`::`TreeNode`(`value`/`host_value`/`hash_value`/`lock_ref`/`host_ref_counter`/`hit_count`/`write_through_pending_id`) |
+| 链式哈希入口 | `hiradix_cache.py`::`get_hash_str` → `cpp_utils/native_hash.py`::`get_native_hash` → `cpp_utils/hash_binding.cpp`::`hash_page` |
+| local match | `hiradix_cache.py`::`match_prefix` / `_match_prefix_helper` / `_split_node` |
+| prefetch from L3 | `hiradix_cache.py`::`prefetch_from_storage` |
+| L3 命中查询(实时 batch_exists) | `cache_controller.py`::`_storage_hit_query` |
+| prefetch I/O(零拷贝页读) | `cache_controller.py`::`_page_get_zero_copy` / `_generic_page_get` / `prefetch_io_aux_func` |
+| prefetch 终止策略 | `hiradix_cache.py`::`can_terminate_prefetch` / `terminate_prefetch` / `check_prefetch_progress` |
+| prefetch 命中段入树 | `hiradix_cache.py`::`_insert_helper_host` |
+| write-back L1→L2 | `hiradix_cache.py`::`write_backup` → `cache_controller.py`::`write` / `backup_from_device_all_layer` / `ack_write_queue` |
+| write-back L2→L3 | `hiradix_cache.py`::`write_backup_storage` → `cache_controller.py`::`write_storage` / `backup_thread_func` |
+| hit_count 累计(write_through_selective) | `hiradix_cache.py`::`_inc_hit_count` |
+| 驱逐回写(write_back) | `hiradix_cache.py`::`_evict_write_back` |
+| 内存布局定义 | `pool_host/mha.py`(tensor shape:`layer_first`/`page_first`/`page_first_direct`/`page_head`) |
+| 布局/io 兼容性裁决 | `server_args.py`::`_resolve_layout_io_compatibility` |
+| 零拷贝页元数据(裸指针) | `pool_host/base.py`::`HostKVCache.get_page_buffer_meta` |
+| 计算-传输重叠 producer | `hiradix_cache.py`::`start_loading` / `load_to_device_per_layer` + `LayerDoneCounter` |
+| 计算-传输重叠 consumer | `hiradix_cache.py`::`get_key_buffer` / `get_value_buffer_meta` / `LayerLoadingEvent.wait` |
+| GPU 辅助 I/O 核 | `sgl-kernel/csrc/kvcacheio/transfer.cu`::`transfer_kv_per_layer` / `transfer_kv_all_layer` |
+| JIT 核 | `jit_kernel/hicache.py` |
+| MLA write-back 去重(rank 0) | `cache_controller.py`(`backup_skip = is_mla_model and tp_rank != 0`)+ Mooncake 后端 `batch_set_v1`::`_batch_exist` |
+| Multi-Rank 同步 | `hiradix_cache.py`::`_all_reduce_attn_groups`(命中数 MIN / 完成数 MIN / terminate MAX / ack MIN) |
+| PP 同步 | `hiradix_cache.py`::`_pp_sync` / `_drain_async_work`(`P2PTag.HIRADIX_PP_SYNC`) |
+| PD decode 卸载 mixin | `disaggregation/decode_hicache_mixin.py`::`DecodeHiCachePreallocMixin` / `DecodeHiCacheTransferMixin` |
+| 跨实例事件发布 | `disaggregation/kv_events.py`::`BlockStored` / `BlockRemoved` + `ZmqEventPublisher` |
+| 设计文档 | `docs/advanced_features/hicache_design.md` |

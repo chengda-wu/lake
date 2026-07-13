@@ -56,6 +56,50 @@ Mooncake 是 **KVCache-centric 的存算分离架构**:将 prefill/decode 集群
 | **NIXL** | 后端插件 |
 | **vLLM-Ascend / LMDeploy / xLLM / LightX2V** | 各自集成 |
 
+## 代码索引
+
+> 沿代码回溯用。符号名稳定锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
+
+### 传输引擎(`mooncake-transfer-engine/`)
+
+| 概念 | 文件:符号 |
+|------|-----------|
+| 用户门面 | `include/transfer_engine.h`::`TransferEngine` (L52;`submitTransfer` L116、`registerLocalMemory` L109、`allocateBatchID` L148) |
+| 传输抽象 | `include/transport/transport.h`::`Transport` (L44;`TransferRequest`/`Slice`/`TransferTask`/`BatchDesc`) |
+| 多传输路由(按 segment 协议) | `include/multi_transport.h`::`MultiTransport` (L25) |
+| NUMA 拓扑 + 多 NIC 选择 | `include/topology.h`::`Topology` (L62) + `src/topology.cpp`::`selectDevice` (L706) |
+| 元数据(Segment/Buffer/HandShake) | `include/transfer_metadata.h`::`TransferMetadata` (L43) |
+| 元数据插件(etcd/redis/http) | `include/transfer_metadata_plugin.h`::`MetadataStoragePlugin` |
+| RDMA 传输(零拷贝注册+分片) | `src/transport/rdma_transport/rdma_transport.cpp`::`RdmaTransport` |
+| RDMA 端点(ibv_post_send) | `src/transport/rdma_transport/rdma_endpoint.cpp`::`RdmaEndPoint` |
+| TCP 退化 | `src/transport/tcp_transport/tcp_transport.cpp`::`TcpTransport` |
+| 传输后端集 | `include/transport/`(rdma/tcp/nvlink/efa/nvmeof/cxl/ascend/hip/... 16+) |
+
+### KV 存储(`mooncake-store/`)
+
+| 概念 | 文件:符号 |
+|------|-----------|
+| 对象键/切片/副本配置 | `include/types.h`(`ObjectKey`/`Slice`/`Segment`/`ErrorCode`/`UUID`) |
+| 副本配置 | `include/replica.h`::`ReplicateConfig`/`Replica` |
+| 客户端接口 | `include/client_service.h`::`Client` (L63) |
+| 资源持有者 | `include/real_client.h`::`RealClient` (L73) |
+| 无资源转发 | `include/dummy_client.h`::`DummyClient` (L17) |
+| 元数据权威(1024 shard) | `include/master_service.h`::`MasterService` (L88) + `src/master_service.cpp` |
+| 分配策略(5 种) | `include/allocation_strategy.h`::`AllocationStrategy` |
+| Allocator(低碎片 offset) | `include/allocator.h`::`OffsetBufferAllocator` |
+| HA 选主(etcd/redis/k8s) | `include/ha/leadership/leader_coordinator.h`::`LeaderCoordinator` |
+| P2P store(无 master,Go) | `mooncake-p2p-store/src/`(BitTorrent 式,经 cgo 调 Transfer Engine C API) |
+| Conductor(cache-aware router,外部) | `docs/source/design/conductor/` |
+
+### 构建与集成
+
+| 概念 | 位置 |
+|------|------|
+| 顶层构建 | `CMakeLists.txt`(option:`WITH_TE`/`WITH_STORE`/`WITH_STORE_GO`/`WITH_STORE_RUST`/`USE_ETCD`...) |
+| Python 绑定 | `mooncake-integration/`(pybind11)+ `mooncake-wheel/`(pip 包) |
+| Go/Rust 绑定 | `mooncake-store/go/`、`mooncake-store/rust/`(均 FFI 到 C ABI `store_c.h`) |
+| vLLM 集成 | `mooncake-wheel/mooncake/mooncake_connector_v1.py`::`MooncakeConnector` |
+
 ## 优势
 
 1. **传输引擎极强** — 16+ 传输后端(RDMA/TCP/NVLink/EFA/NVMe-oF/CXL/Ascend/HIP/CXI...),统一 `submitTransfer` API;RDMA 零拷贝经 `ibv_post_send` 硬件 offload;多 NIC 带宽聚合经 NUMA 感知随机分片;自动 TCP 退化。4×200Gbps RoCE 达 87GB/s,8×400Gbps 达 190GB/s。这是 Mooncake 最硬核的工程价值。

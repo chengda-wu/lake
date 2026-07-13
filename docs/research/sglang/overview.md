@@ -43,6 +43,31 @@ HiCache 是在 RadixAttention 之上构建的三层(GPU HBM / 主机内存 / 分
 - **关键依赖**:torch、NCCL/gloo(TP/PP 同步)、zmq(跨实例 kv_events)、各 L3 后端 SDK。
 - **构建**:sgl-kernel AOT 编译 CUDA;JIT 核运行时编译;原生 SHA256 经 OpenSSL + AVX2。
 
+## 代码索引
+
+> 沿代码回溯用。符号名稳定锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
+
+| 概念 | 文件:符号 |
+|------|-----------|
+| 主入口 | `python/sglang/srt/mem_cache/hiradix_cache.py`::`HiRadixCache` (L75) |
+| 控制器(DMA/prefetch/backup 线程) | `python/sglang/srt/managers/cache_controller.py`::`HiCacheController` (L202) |
+| L3 后端统一抽象 | `python/sglang/srt/mem_cache/hicache_storage.py`::`HiCacheStorage` (L141) |
+| 后端工厂(注册+惰性加载) | `python/sglang/srt/mem_cache/storage/backend_factory.py` |
+| L2 内存池抽象 | `python/sglang/srt/mem_cache/pool_host/base.py`::`HostKVCache` (L81) |
+| L2 MHA 布局实现 | `python/sglang/srt/mem_cache/pool_host/mha.py`::`get_page_buffer_meta` (L535,零拷贝页元数据) |
+| radix 树节点(L1/L2/L3 字段) | `python/sglang/srt/mem_cache/radix_cache.py`::`TreeNode` (L217) |
+| local match | `hiradix_cache.py`::`match_prefix` (L1557) |
+| prefetch from L3 | `hiradix_cache.py`::`prefetch_from_storage` (L1590) |
+| prefetch 终止策略 | `hiradix_cache.py`::`can_terminate_prefetch` (L1443) |
+| L3 命中查询(实时查后端) | `cache_controller.py`::`_storage_hit_query` (L993) |
+| write-back(L1→L2→L3) | `hiradix_cache.py`::`write_backup` (L789) |
+| 链式哈希(Merkle-like key) | `python/sglang/srt/mem_cache/cpp_utils/native_hash.py` + `cpp_utils/hash_binding.cpp`::`hash_page` |
+| CUDA I/O 核 | `sgl-kernel/csrc/kvcacheio/transfer.cu`(`transfer_kv_per_layer` 等) |
+| JIT 核 | `python/sglang/jit_kernel/hicache.py` |
+| PD 集成(decode 卸载) | `python/sglang/srt/disaggregation/decode_hicache_mixin.py` |
+| 跨实例事件(旁路索引) | `python/sglang/srt/disaggregation/kv_events.py`(`BlockStored`/`BlockRemoved`) |
+| 设计文档 | `docs/advanced_features/hicache_design.md` |
+
 ## 优势
 
 1. **分层扩容,低成本提命中率** — L2 主机内存 + L3 分布式存储大幅扩容,尤利于多 QA / 长上下文。
