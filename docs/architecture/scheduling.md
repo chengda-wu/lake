@@ -1,13 +1,13 @@
 # 06 — 路由与调度
 
-> ⚠️ 本文档早于 P0 的"混合执行模式"设计。当前路由描述偏向固定 P→D；执行模式与 KV 流转时序见 [`execution-modes.md`](execution-modes.md)，模式选择依存储池本地命中、prompt 规模、传输成本决策（见 [`../features/features.md`](../features/features.md) "执行模式"节）。
+> ⚠️ 第 1 节"请求级路由"已按 P0 混合执行模式更新;**第 2–4 节(池间/节点级/弹性调度)仍偏固定 P→D 视角**,待与 [`execution-modes.md`](execution-modes.md) 两条时序(本地完成 / 跨节点传输)对齐。执行模式与 KV 流转时序见 [`execution-modes.md`](execution-modes.md),模式选择依存储池本地命中、prompt 规模、传输成本决策(见 [`../features/features.md`](../features/features.md) "执行模式"节)。
 
 调度是存算分离系统能否兑现弹性与低延迟承诺的控制核心。本系统调度器**无状态**（所有决策依据来自控制面的共享视图），可水平扩展。
 
 ## 调度层次
 
 ```
-1. 请求级路由 (Gateway/Router)
+1. 请求级路由 (Gateway 准入 / Router 选路)
 2. 池间调度 (Prefill ↔ Decode ↔ Draft)
 3. 节点级调度 (continuous batching、内存分配)
 4. 弹性调度 (扩缩容)
@@ -29,9 +29,9 @@
 
 ## 2. 池间调度
 
-- Prefill → Decode 的 KV 传递通过 Transfer Bus，需在 Prefill 完成时序上对齐 Decode 就绪。
+- Prefill → Decode 的 KV 传递通过 Transfer Bus，需在 Prefill 完成时序上对齐 Decode 就绪（**仅 PD 分离模式**;混部/D-direct 为本地完成、无跨节点传输,见 [`execution-modes.md`](execution-modes.md)）。
 - 投机解码：Draft 池在 Decode 侧生成候选，验证失败回退到标准 decode。
-- 反压：Decode 池拥塞时，减缓 Prefill 速率（背压），避免 KV Pool 堆积。
+- 反压：Decode 池拥塞时，减缓 Prefill 速率（背压），避免 KV Pool 堆积。属池间内部流控（不丢请求、不降 batch），区别于 gateway 的请求级 shedding。
 
 ## 3. 节点级调度
 

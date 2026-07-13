@@ -1,6 +1,6 @@
 # 04 — 计算层
 
-计算层由若干**算力池（compute pool）**组成，每个池是一组同质、可互换的算力节点。节点无状态，可随时销毁/拉起。
+计算层由若干**算力池（compute pool）**组成，每个池是一组同质、可互换的算力节点。节点无状态，可随时销毁/拉起。池是按**角色**划分的逻辑分组(角色由调度器动态分配,非物理固定,见 [`overview.md`](overview.md) / [`execution-modes.md`](execution-modes.md));下文按角色画像描述资源与扩缩特征,物理节点在角色间转换(带权重迁移成本)见"开放问题"。
 
 ## 池划分
 
@@ -8,7 +8,7 @@
 - 任务：处理长 prompt，产出 KV cache。
 - 特征：计算密集（高 FLOPS 利用率），对 HBM 容量敏感（长序列 KV 大）。
 - 调度目标：最大化吞吐（batch 大、并行度高），容忍较高 TTFT。
-- 产物：KV block → 写入 KV Pool + Transfer Bus。
+- 产物：KV block → 写入 KV Pool；跨节点模式经 Transfer Bus 推送（混部/D-direct 本地完成,无需 Transfer Bus,见 [`execution-modes.md`](execution-modes.md)）。
 
 ### Decode Pool
 - 任务：逐 token 自回归生成。
