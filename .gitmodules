@@ -1,0 +1,9 @@
+[submodule "3rdparty/sglang"]
+	path = 3rdparty/sglang
+	url = https://github.com/sgl-project/sglang
+[submodule "3rdparty/lmcache"]
+	path = 3rdparty/lmcache
+	url = https://github.com/LMCache/LMCache
+[submodule "3rdparty/mooncake"]
+	path = 3rdparty/mooncake
+	url = https://github.com/kvcache-ai/Mooncake

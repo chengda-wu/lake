@@ -50,9 +50,16 @@ lake/
 │   │   ├── kv-cache-pool.md    #   KV cache 分布式池
 │   │   └── scheduling.md       #   路由与调度
 │   └── research/               # 相关工作
-│       └── references.md
+│       ├── references.md
+│       └── 3rdparty-reference.md  # 3rdparty 源码与本设计的逐层对应
+├── 3rdparty/                   # 参考源码（git submodule，只读）
+│   ├── sglang/                 #   SGLang（HiCache 分层 KV）
+│   ├── lmcache/                #   LMCache（跨实例 KV 复用）
+│   └── mooncake/               #   Mooncake（KVCache-centric 分离架构）
 └── src/                        # 早期单进程 Python 原型（验证假设用，将被 rust/go/python 子项目取代）
 ```
+
+> 首次 clone 后执行 `git submodule update --init --recursive` 拉取 `3rdparty/`。三个参考项目与本系统设计的逐层对应见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。
 
 ## 设计文档速览
 

@@ -64,6 +64,24 @@ docs/
 
    目录划分见 [`docs/00-plan.md`](docs/00-plan.md) P2 节。`src/` 是早期单进程原型，**不要**在三语言子项目就位后继续往 `src/` 加功能。
 
+## 3rdparty 参考源码（submodule）
+
+`3rdparty/` 以 git submodule 引入三个项目源码,作为设计与实现的直接参考:
+
+| 路径 | 来源 | 主要参考点 |
+|------|------|-----------|
+| `3rdparty/sglang` | sgl-project/sglang | **HiCache**:L1/L2/L3 分层、HiRadixTree(节点记 KV 位置)、prefetch/write-back 策略、page-first 布局、计算-传输重叠 |
+| `3rdparty/mooncake` | kvcache-ai/Mooncake | **transfer-engine**(RDMA 零拷贝)→ Transfer Bus;**mooncake-store** → KV Pool(L3) |
+| `3rdparty/lmcache` | LMCache/LMCache | 跨请求/跨实例 KV 复用、多存储后端、`rust/` 工程模式 |
+
+逐层对应、借鉴点与**关键差异**(我们更彻底:L1/L2 也归存储池而非实例私有)见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。
+
+约定:
+- `3rdparty/` **只读**,不修改 submodule 内代码。要改造先 fork 换 URL。
+- 三个 submodule 各带自己的 `.claude/` 规则——那是改它们自身代码的约束,与本项目无关,**忽略**。
+- clone 本仓库需 `git submodule update --init --recursive`。
+- 设计/实现遇到分层、传输、复用、放置等问题,先查对应 submodule 源码再动手。
+
 ## SLO 是架构硬约束
 
 SLO 数值是 draft（待 P7 校准），但**约束关系是硬的**：TTFT/ITL/冷启动等目标倒逼架构取舍（如 D-direct 模式选择开销 < 5ms，否则吃掉本地命中省传输的收益）。
