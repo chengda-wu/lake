@@ -51,7 +51,10 @@ lake/
 │   │   └── scheduling.md       #   路由与调度
 │   └── research/               # 相关工作
 │       ├── references.md
-│       └── 3rdparty-reference.md  # 3rdparty 源码与本设计的逐层对应
+│       ├── 3rdparty-reference.md  # 3rdparty 源码与本设计的逐层对应(汇总)
+│       ├── sglang/                #   SGLang HiCache 深度分析
+│       ├── lmcache/               #   LMCache 深度分析
+│       └── mooncake/              #   Mooncake 深度分析
 ├── 3rdparty/                   # 参考源码（git submodule，只读）
 │   ├── sglang/                 #   SGLang（HiCache 分层 KV）
 │   ├── lmcache/                #   LMCache（跨实例 KV 复用）

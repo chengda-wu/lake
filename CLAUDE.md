@@ -74,7 +74,7 @@ docs/
 | `3rdparty/mooncake` | kvcache-ai/Mooncake | **transfer-engine**(RDMA 零拷贝)→ Transfer Bus;**mooncake-store** → KV Pool(L3) |
 | `3rdparty/lmcache` | LMCache/LMCache | 跨请求/跨实例 KV 复用、多存储后端、`rust/` 工程模式 |
 
-逐层对应、借鉴点与**关键差异**(我们更彻底:L1/L2 也归存储池而非实例私有)见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。
+逐层对应、借鉴点与**关键差异**(我们更彻底:L1/L2 也归存储池而非实例私有)见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。各项目的深度分析(设计/架构/技术栈/优劣)见分目录:`docs/research/{sglang,lmcache,mooncake}/`。
 
 约定:
 - `3rdparty/` **只读**,不修改 submodule 内代码。要改造先 fork 换 URL。

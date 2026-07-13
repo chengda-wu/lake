@@ -2,6 +2,21 @@
 
 本仓库的设计大量借鉴以下工作。理解它们是评估本系统假设的基础。
 
+## 源码深度参考(3rdparty submodule)
+
+三个项目源码已引入 `3rdparty/`(submodule),各有分目录的深度分析文档:
+
+- **SGLang HiCache** → [`sglang/`](sglang/):[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md)
+  - L1/L2/L3 三层(L1/L2 私有、L3 共享)、HiRadixTree、prefetch/write-back 策略。
+- **LMCache** → [`lmcache/`](lmcache/):[总览](lmcache/overview.md) · [跨实例复用与后端](lmcache/sharing-and-backends.md)
+  - 跨实例 KV 复用、内容寻址去重、多存储后端、Rust 裸设备 I/O。
+- **Mooncake** → [`mooncake/`](mooncake/):[总览](mooncake/overview.md) · [传输引擎](mooncake/transfer-engine.md) · [KV 存储与池化](mooncake/kv-store.md)
+  - RDMA 零拷贝传输引擎、对象级 KV 池、PD 分离。
+
+三者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
+
+---
+
 ## 存算分离 / Disaggregated Serving
 
 - **Mooncake** (Moonshot AI): KVCache-centric disaggregated architecture，把 KV cache 作为独立分离资源池。本仓库 KV Pool 的直接灵感来源。**源码已作为 submodule 引入** `3rdparty/mooncake`,逐层对应见 [`3rdparty-reference.md`](3rdparty-reference.md)。

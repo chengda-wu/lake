@@ -1,0 +1,61 @@
+# SGLang HiCache — 存储后端与统一接口
+
+> 源码:`python/sglang/srt/mem_cache/hicache_storage.py`、`python/sglang/srt/mem_cache/storage/backend_factory.py`。
+
+## 统一接口 `HiCacheStorage(ABC)`
+
+L3 后端统一抽象,位于 `hicache_storage.py:141`。三套接口代际并存:
+
+| 代际 | 方法 | 特点 |
+|------|------|------|
+| **v2**(新,多 pool) | `batch_exists_v2` / `batch_get_v2` / `batch_set_v2` | 接收 `List[PoolTransfer]`,支持 hybrid/multi-pool(Mamba/SWA/DSA/Draft) |
+| **v1**(批量,host_indices) | `batch_get_v1` / `batch_set_v1` | 零拷贝路径用(`_page_get_zero_copy`/`_page_set_zero_copy`) |
+| **legacy**(抽象,必须实现) | `get` / `set` / `exists` / `batch_get` / `batch_set` / `batch_exists` | 返回连续命中数 |
+
+辅助:`register_mem_pool_host`、`clear`、`get_stats`。
+
+关键数据类:`HiCacheStorageConfig`(`tp_rank/tp_size/pp_rank/pp_size/attn_cp_rank/attn_cp_size/is_mla_model/tp_lcm_size/should_split_heads/extra_config`)、`PoolTransfer`、`PoolHitPolicy`(`ALL_PAGES`/`TRAILING_PAGES`)、`PoolName`。
+
+## 已注册后端
+
+`backend_factory.py` 注册的后端:
+
+| name | 类 | 传输 | 零拷贝 | MLA 去重 | head split |
+|------|----|------|--------|----------|------------|
+| `file` | `HiCacheFile` | 本地文件 `.bin` | 否(memoryview) | 是(rank 共享 key) | 否 |
+| `mooncake` | `MooncakeStore` | RDMA/TCP(Mooncake TransferEngine) | 是(`batch_put_from`/`batch_get_into`) | 是(rank-agnostic key) | 是(`tp_lcm_size`) |
+| `hf3fs` | `HiCacheHF3FS` | 3FS filesystem(usrbio) | 是(page_first/direct) | 是(rank 0 only) | 否 |
+| `nixl` | `HiCacheNixl` | NIXL 插件(POSIX/GDS/3FS/OBJ) | 是(整 buffer 注册) | 是(`backup_skip`) | 否 |
+| `aibrix` | `AibrixKVCacheStorage` | AIBrix KVCache(进程内) | 否 | **不支持 MLA** | 否 |
+| `eic` | `EICStorage` | EIC KV(GPU-direct RDMA) | 是(page_first) | 否(全 rank 写) | 否 |
+| `simm` | `HiCacheSiMM` | SiMM RDMA(NUMA-aware) | 是(register_mr) | 否 | 否 |
+| `mori`(umbp) | `UMBPStore` | UMBP(DRAM+SSD,SPDK/io_uring) | 是(RDMA IOEngine) | 是(SharedSSDLeader/Follower) | 是 |
+| `dynamic` | 用户自定义 | 任意 | 取决实现 | 取决实现 | 取决实现 |
+
+## 非后端注册的替代方案
+
+- `lmcache`(`LMCRadixCache` 继承 `RadixCache`,非 `HiCacheStorage`)— radix-cache 层集成,`--enable-lmcache` + `--lmcache-config-file`。见 [../lmcache/overview.md](../lmcache/overview.md)。
+- `flexkv`(`FlexKVRadixCache` 继承 `RadixCache`)— `--enable-flexkv`,rank-0 leader 模式 + eventfd layerwise。
+
+## 异构 TP(`tp_lcm_size`)
+
+`_generate_storage_config`:`tp_lcm_size` 为所有共享存储的 TP size 的 LCM;`should_split_heads = not is_rank_replicated and layout=="page_head" and tp_lcm_size > tp_size`。Mooncake/UMBP 据此 `split_factor = tp_lcm_size // tp_size` 生成 `2*split_factor` 个 key/页,使不同 TP size 集群可复用 KV。
+
+## 运行时 attach/detach
+
+HTTP 端点 `PUT/DELETE/GET /hicache/storage-backend`,经 HTTP Server → TokenizerManager → Scheduler(严格 idle 检查 `is_fully_idle`)→ `HiRadixCache.attach_storage_backend`/`detach_storage_backend`。无需重启;DP 时全体 rank 须成功。
+
+## 关键参数
+
+| 参数 | 语义 |
+|------|------|
+| `--enable-hierarchical-cache` | 总开关 |
+| `--hicache-ratio` | host pool / device pool 容量比,必须 >1 |
+| `--hicache-size` | host pool GB 数(1GB=1e9 bytes),per rank,覆盖 ratio |
+| `--page-size` | 每页 token 数,决定存储/检索粒度 |
+| `--hicache-mem-layout` | `layer_first`/`page_first`/`page_first_direct` |
+| `--hicache-io-backend` | `direct`/`kernel` |
+| `--hicache-write-policy` | `write_back`/`write_through`/`write_through_selective` |
+| `--hicache-storage-prefetch-policy` | `best_effort`/`wait_complete`/`timeout` |
+| `--hicache-storage-backend` | `file`/`mooncake`/`hf3fs`/`nixl`/`aibrix`/`eic`/`simm`/`mori`/`dynamic` |
+| `--hicache-storage-backend-extra-config` | JSON 串或 `@file`(toml/yaml/json) |
