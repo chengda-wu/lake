@@ -7,3 +7,6 @@
 [submodule "3rdparty/mooncake"]
 	path = 3rdparty/mooncake
 	url = https://github.com/kvcache-ai/Mooncake
+[submodule "3rdparty/vllm"]
+	path = 3rdparty/vllm
+	url = https://github.com/vllm-project/vllm

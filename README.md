@@ -54,15 +54,17 @@ lake/
 │       ├── 3rdparty-reference.md  # 3rdparty 源码与本设计的逐层对应(汇总)
 │       ├── sglang/                #   SGLang HiCache 深度分析
 │       ├── lmcache/               #   LMCache 深度分析
-│       └── mooncake/              #   Mooncake 深度分析
+│       ├── mooncake/              #   Mooncake 深度分析
+│       └── vllm/                  #   vLLM 深度分析（计算层参考）
 ├── 3rdparty/                   # 参考源码（git submodule，只读）
 │   ├── sglang/                 #   SGLang（HiCache 分层 KV）
 │   ├── lmcache/                #   LMCache（跨实例 KV 复用）
-│   └── mooncake/               #   Mooncake（KVCache-centric 分离架构）
+│   ├── mooncake/               #   Mooncake（KVCache-centric 分离架构）
+│   └── vllm/                   #   vLLM（计算层：PagedAttention/KV connector）
 └── src/                        # 早期单进程 Python 原型（验证假设用，将被 rust/go/python 子项目取代）
 ```
 
-> 首次 clone 后执行 `git submodule update --init --recursive` 拉取 `3rdparty/`。三个参考项目与本系统设计的逐层对应见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。
+> 首次 clone 后执行 `git submodule update --init --recursive` 拉取 `3rdparty/`。四个参考项目与本系统设计的逐层对应见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。
 
 ## 设计文档速览
 

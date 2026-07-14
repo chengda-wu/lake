@@ -1,22 +1,24 @@
 # 3rdparty 源码参考
 
-本仓库在 `3rdparty/` 以 git submodule 引入三个项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
+本仓库在 `3rdparty/` 以 git submodule 引入四个项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
 
 - [`sglang/`](sglang/) — SGLang HiCache:[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md)
 - [`lmcache/`](lmcache/) — LMCache:[总览](lmcache/overview.md) · [跨实例复用与后端](lmcache/sharing-and-backends.md)
 - [`mooncake/`](mooncake/) — Mooncake:[总览](mooncake/overview.md) · [传输引擎](mooncake/transfer-engine.md) · [KV 存储与池化](mooncake/kv-store.md)
+- [`vllm/`](vllm/) — vLLM:[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md)
 
 本文把它们的关键组件与本系统(`docs/architecture/`)逐层对应,并标注**借鉴点**与**关键差异**(我们的设计更彻底)。
 
 ## submodule 清单
 
-| 路径 | 来源 | 检出 |
-|------|------|------|
-| `3rdparty/sglang` | [sgl-project/sglang](https://github.com/sgl-project/sglang) | main HEAD |
-| `3rdparty/lmcache` | [LMCache/LMCache](https://github.com/LMCache/LMCache) | nightly |
-| `3rdparty/mooncake` | [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake) | main HEAD |
+| 路径 | 来源 | 检出 | 主要参考 |
+|------|------|------|----------|
+| `3rdparty/sglang` | [sgl-project/sglang](https://github.com/sgl-project/sglang) | main HEAD | 分层 + HiRadixTree + prefetch/write-back |
+| `3rdparty/lmcache` | [LMCache/LMCache](https://github.com/LMCache/LMCache) | nightly | 跨实例复用 + 多后端 + Rust I/O |
+| `3rdparty/mooncake` | [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake) | main HEAD | 传输引擎 + 对象级 KV 池 |
+| `3rdparty/vllm` | [vllm-project/vllm](https://github.com/vllm-project/vllm) | main HEAD (ab132ee98) | **计算层**(PagedAttention/worker/connector/spec decode) |
 
-> 三者本就生态相连:SGLang 的 HiCache 把 Mooncake 作为 L3 存储后端之一(`python/sglang/srt/mem_cache/storage/mooncake_store/`),LMCache 也是 HiCache 的可选 L3 后端。我们站在三者之上做更彻底的存算分离。
+> 四者本就生态相连:vLLM 是计算引擎,其 `KVConnectorBase_V1` 接口被 LMCache/Mooncake/NIXL/FlexKV 实现为 connector;SGLang HiCache 把 Mooncake 作为 L3 后端之一。vLLM 提供计算面,另三者提供存储/传输面——我们站在四者之上做更彻底的存算分离:把 vLLM 的状态面(KV/调度/元数据)剥离给存储池与控制面,把 connector 接口从可选插件升为存储池必经路径。
 
 ---
 
@@ -88,10 +90,40 @@
 
 ---
 
-## 设计取舍:站在三者之上
+## 4. vLLM → 计算层(PagedAttention / worker / KV connector 接口)
+
+源码入口:`3rdparty/vllm/vllm/v1/`、`vllm/distributed/kv_transfer/kv_connector/`、`vllm/model_executor/`。
+
+vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目(SGLang/LMCache/Mooncake)提供存储/传输面,vLLM 提供计算面——四者恰好覆盖我们三语言子项目的参考来源(计算层 Python / 存储层 Rust / 传输与池化)。详见 [`vllm/`](vllm/)。
+
+### 借鉴点
+
+| vLLM 设计 | 我们对应 | 说明 |
+|-----------|----------|------|
+| **PagedAttention**(block 分页 + block table) | 存储池 KV block + worker block table | 见 compute-layer。block 粒度对齐,worker 仍用 block table 做 paged attention,物理位置由存储池元数据定 |
+| **`KVConnectorBase_V1`** 外部 KV 插件接口(scheduler/worker 双侧 + metadata + layer-wise mixin) | 计算层 worker ↔ 存储池 client | 见 vllm/compute.md。接口形态直接参考;LMCache/Mooncake/NIXL/FlexKV 均已实现为 connector,印证接入路径可行 |
+| **`SupportsHMA`**(host-managed-address 能力标记) | 方案 Z(存储池放置 KV 到 HBM,worker 消费) | vLLM 已为"外部管 HBM"预留能力标记,正是方案 Z 的雏形 |
+| **`ExternalBlockHash`**(跨实例外部哈希) | 存储池内容寻址 `(model_id,layer,block_hash)` | worker 向存储池查前缀的自然键,与存储池内容寻址直接对接 |
+| **`GPUModelRunner`**(load_model + execute_model + block table 维护) | 计算层 worker 生命周期与执行循环 | worker 生命周期(Warm→Serving→Drain)、execute_model、block table 维护直接借鉴 |
+| **权重 offloader**(UVA + `_prefetch_checkpoint`) | 权重归存储池 + 计算层流式加载 | vLLM 的权重流式喂 GPU 是"权重存算分离"的原型 |
+| **spec decode**(proposer↔speculator + rejection sampling) | Draft 池↔Decode 池 | proposer/speculator 划分参考 |
+
+### 关键差异
+
+- vLLM 的 KV/调度/元数据**进程私有、单实例视角**(`KVCacheManager`/`BlockPool`/`Scheduler` 全在引擎进程内);我们归存储池/控制面**集群权威**。
+- vLLM **无 radix tree**(APC 用 hash 顺序匹配,断链即停)、**无位置视图/本地命中概念**;我们 radix + 位置视图 + D-direct。
+- vLLM connector 是**可选 per-instance 插件**;我们是**必经集群级路径**(存储池 client 常驻)。
+- vLLM attention 主路径 **C++/CUDA**(FlashAttention);我们选 **Python + Triton**(自定义核门槛与生态不同)。
+- vLLM worker **有状态**(加载模型 + HBM KV,崩溃丢 KV);我们 **无状态**(状态全剥离,秒级伸缩,F4 续推)。
+
+---
+
+## 设计取舍:站在四者之上
 
 | 我们的设计层 | 主要参考 | 我们多做的(更彻底) |
 |--------------|----------|---------------------|
+| **计算层**(worker/attention/runner) | **vLLM**(PagedAttention/`GPUModelRunner`/spec decode) | worker 无状态化(模型/KV 从存储池读写);attention 核用 Triton |
+| **worker↔存储池接入** | **vLLM `KVConnectorBase_V1`** + `SupportsHMA` | connector 从可选插件升为存储池必经路径;集群级权威 |
 | L0-L4 分层 | SGLang HiCache | L1/L2 也归存储池(非实例私有);统一冷热/生命周期 |
 | KV Pool 数据面 | Mooncake transfer-engine + store | 内容寻址 + radix + 多模型配额/GC/碎片整理 |
 | 前缀复用 | SGLang RadixAttention + LMCache | radix 归存储池 + 位置视图一跳 + 反向回传生长 |
@@ -106,8 +138,9 @@ P4(KV Pool 原型,Rust)时按此顺序参考源码:
 3. **SGLang HiCache HiRadixTree + page_first_direct**:radix 节点记位置 + 布局 → 我们 `locations` 元数据 + 分块流水线。
 4. **SGLang HiCache prefetch/write-back 策略**:迁移触发与写回频率 → 我们冷热迁移 + decode 写回 N。
 5. **LMCache rust/ + 跨实例复用**:Rust 存储层工程模式 + 复用场景验证。
+6. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**:计算层 worker 接入存储池的接口形态 + layer-wise save/load 流水线 + block table 维护 → 我们 Python worker 的 runtime client 与执行循环。
 
-> 参考源码时注意:三个 submodule 各带自己的 `.claude/` 规则(如 sglang 的 modify-component-must-read、mooncake 的 skills),那些是**修改它们自身代码**的约束,与我们参考其设计无关,忽略。
+> 参考源码时注意:四个 submodule 各带自己的 `.claude/` 规则(如 sglang 的 modify-component-must-read、mooncake 的 skills),那些是**修改它们自身代码**的约束,与我们参考其设计无关,忽略。
 
 ## submodule 使用约定
 
