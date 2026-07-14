@@ -12,8 +12,8 @@
 - 格式:原始 fp16/bf16,可选量化副本(int8/int4/fp8)作为独立 artifact,不在线反量化。
 
 ### KV cache
-- 可变、有生命周期,按 `(model_id, layer, block_index, token_range)` 寻址。
-- 粒度:倾向 **per-block + 前缀树**索引(复用友好),per-layer/per-sequence 备选。
+- 可变、有生命周期,按 `(model_id, layer_idx, block_hash)` **内容寻址**(见 [`kv-cache-pool.md`](kv-cache-pool.md)):相同前缀 → 相同 block hash → 命中同一 KV,前缀复用天然成立。
+- 粒度:**per-block + 前缀树(radix)**索引(复用友好),per-layer/per-sequence 备选。
 - 持久化:热数据在 RAM/NVMe,冷数据落对象存储。
 
 ## 分层缓存

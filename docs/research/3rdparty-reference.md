@@ -34,7 +34,7 @@
 | **prefetch 三策略**:best_effort / wait_complete / timeout | 迁移触发的"被动兜底"读 miss 回填 + 主动预放置 | 见 storage-layer "迁移触发"。timeout 的 `base + per_ki_token` 公式可直接借鉴为我们的 prefetch 预算模型 |
 | **write-back 三策略**:write_through / write_through_selective / write_back | decode 增量写回频率 N 的策略 | 见 execution-modes "decode 写回频率"。selective(按访问频次只回写热数据)对应我们"前缀生长"的写回取舍 |
 | **page-first / page_first_direct 布局** | block 粒度 + 分块流水线 | 见 kv-cache-pool "分块流水线"。page_first_direct 让同层同 page 连续,可零拷贝传 L3——我们 Rust transfer 层可照搬 |
-| **计算-传输重叠**:算 layer N 时传 layer N+1 | 分块流水线与 prefill 层数对齐 | 直接对应,execution-modes 开放问题已记 |
+| **计算-传输重叠**:算 layer N 时传 layer N+1 | 分块流水线(page_first_direct 子块)与 prefill 层数对齐 | **部分对应**:SGLang 是引擎驱动(每层 `wait_event`,破坏 graph);我们只取**生产侧层级重叠**(池 agent 逐层 publish,引擎无感),拒绝引擎驱动的消费侧 intra-step 重叠。见 kv-cache-pool "无引擎驱动的 intra-step 重叠" + "分块流水线" |
 | **MLA write-back 去重**:多 TP rank 只一个 rank 回写 | (未来 TP 支持) | 留作 compute-layer 细节参考 |
 | **统一 `HiCacheStorage(ABC)` 接口** + 多后端(file/mooncake/hf3fs/nixl/aibrix) | 存储池后端抽象 | 我们存储池统一管理 L0-L4,后端可抽象;Mooncake/NIXL 等可作为 L3 物理实现 |
 

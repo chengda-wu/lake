@@ -82,7 +82,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 
 引擎的全部分层职责:**消费 ready → 算 → 发 done**。零 load_stream、零 `wait_event`、零 evict/write-back 逻辑。
 
-**无 intra-step 重叠**:不照搬 SGLang HiCache "算 layer N 传 layer N+1" 的逐层重叠——那是引擎自己背分层控制器(load_stream + per-layer `wait_event`)才需要的。我们把补拉/传输整个推出引擎,引擎只调**异步传输接口 + fence**,重叠是异步的自然结果(传 step N+1 的 block 时引擎在算 step N),无需专门设计。SGLang 把"补拉与 graph 冲突"留作 TODO(`scheduler.py:2999`),我们因解耦而无此问题。跨实例传输见 [`kv-cache-pool.md`](kv-cache-pool.md) "跨实例 KV 传输"节。
+**无引擎驱动的 intra-step 重叠;池驱动异步重叠保留**:不照搬 SGLang HiCache "引擎在 `get_key_buffer` 每层 `wait_event`、算 layer N 传 layer N+1" 的**引擎驱动**逐层重叠——那套绑死引擎、破坏 graph(SGLang 把补拉与 graph 冲突留作 TODO `scheduler.py:2999`,我们因解耦而无此问题)。我们拒绝的是**引擎驱动**的 intra-step 重叠。**池驱动异步重叠保留**:引擎只调**异步传输接口 + fence**,传输由池 agent 在独立 stream 做,引擎无感、graph 安全——消费侧 step 间重叠(传 step N+1 时算 step N)+ 生产侧层级重叠(A prefill 逐层 publish page 切片,时序二正向"与 A 计算重叠",支撑 PD 分离 TTFT)。生产侧层级重叠靠 `page_first_direct` 子块传输(分块流水线),详见 [`kv-cache-pool.md`](kv-cache-pool.md) "分块流水线"。
 
 **正确性地基:in-flight 跨层冻结**。graph 保证"地址不变",但不保证"地址内容不被池动掉"。池若在 replay 途中迁移/驱逐/压实一个 in-flight block,图读到半旧半新。故 step 期间被引用 block(ref>0)的物理映射冻结,step 之间池完全自由。ref 细则见 [`kv-cache-pool.md`](kv-cache-pool.md) "引用计数与驱逐"。
 
@@ -91,7 +91,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 **(1) block 对引擎纯寻址单位**。引擎的 KV 操作只剩三原语:读 ready block / 写 token 进 slot / publish 产出。block table 的索引填充都归池(本地 agent),引擎只 replay 读。引擎连"block 满没满"都不感知,只感知"写第 i 个 token 进某 slot"——满块判断、哈希、radix 注册全归池。block 是引擎的寻址单位,不是管理单位。
 
 **(2) 写回:满块路 + 尾块路**(详见 [`kv-cache-pool.md`](kv-cache-pool.md) "写回与生命周期"):
-- 满块路:block 填满 → 池算哈希 → 注册 radix → 写回 L3(持久点)。请求进行中就可能触发。
+- 满块路:block 填满 → 池算哈希 → 注册 radix → 写回 L3(F4 恢复点,抗 worker 失败)。请求进行中就可能触发。
 - 尾块路:请求结束时未满的尾块,在请求结束点写回一次(写全部已填 token,重放整块覆盖),纯容错不进 radix。
 - 满块写回频率 N(满一个就写 vs 攒几个)留 P7。尾块只在请求结束写一次,无增量式。
 
