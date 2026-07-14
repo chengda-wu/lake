@@ -1,6 +1,6 @@
 # 05 — KV Cache 池
 
-KV Cache Pool 把 KV cache 从"附属于产生它的 GPU"提升为全局可寻址、可复用、可迁移的分布式资源。在彻底存算分离下,连 HBM/RAM/NVMe 都不归计算节点私有,而是存储池统一管理的物理载体(L0–L2)。所有 KV 位置(含"哪段 KV 在哪个节点 HBM")均为存储池权威元数据。
+KV Cache Pool 把 KV cache 从"附属于产生它的 GPU"提升为全局可寻址、可复用、可迁移的分布式资源。在彻底存算分离下,连 HBM/RAM/NVMe 都不归计算节点私有,而是存储池统一管理的物理载体(L0–L4:GPU HBM / 主机 RAM / 本地 NVMe / 远端内存池 / 对象存储,分层定义见 [`storage-layer.md`](storage-layer.md))。所有 KV 位置(含"哪段 KV 在哪个节点 HBM")均为存储池权威元数据。
 
 ## 设计目标
 
@@ -46,15 +46,107 @@ node_id = hash(KVBlockID) % N
 
 - **控制平面**:block 元数据(位置、引用计数、热度)→ etcd,强一致。
 - **数据平面**:block 字节 → RDMA,最终一致,best-effort。
-- **分块流水线**:大 block 按 sub-block 分块传输,与计算重叠——Prefill 第 i+1 层时,第 i 层 KV 已在传输。
+
+**无 intra-step 重叠**:本系统不照搬 SGLang HiCache "算 layer N 传 layer N+1" 的逐层重叠——那是引擎自己背分层控制器(load_stream + per-layer `wait_event`)才需要的。我们把传输整个推出引擎(见下节),引擎只调**异步传输接口 + fence**,重叠是异步的自然结果(传 step N+1 的 block 时引擎在算 step N),无需专门设计。
+
+## 跨实例 KV 传输
+
+核心:**跨实例的 KV 字节流不经过任何一个 worker 进程**,走存储池的分布式传输引擎(RDMA),零拷贝直送。Q1 定的 in-process agent 只管本地 L0;跨实例是池数据面的活,完全另一层。
+
+### 内存注册与寻址
+
+每个 worker 的 L0 arena(或其中被引用的页)启动时向传输引擎**注册**成可寻址区域 `(segment_id, offset, len)`,拿到全局句柄。之后跨实例传输即"源地址 → 目地址"的 RDMA 写,不经过 Python、基本不占 CPU。block 的 **page-first 连续布局**(见 [`storage-layer.md`](storage-layer.md))是零拷贝前提:一个 block = 一段连续内存,传引擎拿到的是单条 `(ptr, len)`,无 gather。
+
+### 一次跨实例传输(以 PD 分离:A prefill 产出,B decode 消费)
+
+1. **池定源**:B 的 agent 查位置视图——目标 block 在哪。两种源,由路由/时序决定:
+   - **直传(A→B)**:A 还在线且 L0 仍持热副本 → 源 = A 的 L0 注册段。低延迟,要求 A、B 时序重叠。
+   - **经池中转**:A 已 `publish` 到池 → 源 = L3 segment。A 可先死、B 稍后拉,时序解耦。
+2. **B 异步 pull**:B 的 agent 调 `pull(block_ids)`,传输引擎在**独立的传输 stream** 上把字节从源 RDMA 写进 B 的 L0 空闲 slot(slot 由池分配、in-flight 冻结),返回 handle。
+3. **B wait ready → 算**:B 在本步 replay 前 `wait(handle)`。传 step N+1 的 block 时 B 在算 step N——异步 + fence,重叠自然。
+4. **A publish**:A 产出 KV 进 L0 slot 后调 `publish(block_ids)`,池注册进 radix + 决定是否写回 L3。
+
+引擎的全部分层职责仍是 Q1 的 **消费 ready → 算 → 发 done**;pull/publish 只是这一契约在跨实例场景的接口形态。
+
+### PD 分离下的传输流程(engine-to-engine 控制链切断)
+
+关键后果:Q2.1 定了"block 对引擎纯寻址、block table 池组装、引擎零地址"——于是 **engine-to-engine 控制链被彻底切断**。vLLM/SGLang 的 PD 分离是两个引擎的 connector 直接握手、用 device 网络 engine-to-engine 传(引擎既拥有 KV 又发起传输);本系统引擎不知道地址、不组装 block table、不拥有 KV,**两个引擎从不知道对方存在**,池是唯一中介。但**数据线仍是直连 RDMA**(A 的 HBM → B 的 HBM),wire 效率不变——变的是控制权归属:发起者从引擎换成池的本地 agent。
+
+完整流程(以 A prefill 产出、B decode 消费前缀):
+
+1. **A 产出**:KV 落进 L0 slot(slot 由 A 的 agent 分配)。A step done 时调 `publish(block_ids)`——只上报"产出了这些 block",不含地址。
+2. **A 的 agent 记录**:block X → (A 的 segment, offset),写进位置视图;按写回策略决定是否同时落 L3(见"写回与生命周期")。
+3. **Router 定 B**:B 的 agent 查位置视图,拿到前缀 block 的源地址(A 的 L0 段 或 L3 段)。
+4. **B 的 agent 发起传输**:每个需要的 block——选源(A 在线且时序重叠→直传;否则 L3)+ 在 B 分配空闲 slot + 冻结 + 传输引擎做 RDMA → 返回 handle。
+5. **B 的 agent 组装 block table**(拉来的 slot + 已在 B 本地的 slot)→ `ready`(fence) → B replay。
+6. B step done → publish 新 decode KV → 回到 4。
+
+**默认直传 + Drain 推 L3**:PD 时序重叠(A 边 prefill B 边 decode)是主场景,默认直传(A 的 L0 → B 的 L0),省一跳、最低延迟;代价是 A 的源 slot 被在途传输 ref 钉住、占 A 容量直到拉完。当 A 进入 Drain/缩容,agent 先把"还被远端引用的 block"推一份到 L3(持久)再下线——之后 B 从 L3 拉,A 可先死、B 照常,时序解耦。Drain 语义含"把 in-flight block 落 L3"。
+
+**在途传输 ref(源端冻结)**:RDMA 异步,源端在传完前不能被覆写/驱逐,否则 B 读到半新半旧的损坏 block(静默故障)。故发起传输 → 源 block 的 ref +1(在途引用);RDMA 完成 → ref -1。这与请求引用(下节)是**同一个 ref**,只是多一种"在途传输"的引用来源;ref>0 即冻结,统一机制。
+
+### 布局转换
+
+L0 是 layer-first(引擎逐层写),跨实例传输要转 page-first(整块连续好零拷贝)→ 照搬 SGLang `sgl-kernel/csrc/kvcacheio/transfer.cu::transfer_kv_per_layer_pf_lf` 那个非时间索引核(`ld.global.nc`/`st.global.cg`),在传输 stream 上一次 launch 做完,无 host staging。
+
+### 三个边界点(非分叉,交代清楚)
+
+- **L0 直传依赖 GPUDirect RDMA**:NIC 与 GPU 同 PCIe root 才直读 HBM;否则经 pinned host(L1)中转一次拷贝。部署拓扑(RDMA 可用性退化)留 [`topology.md`](topology.md),接口不变(传输引擎内部吸收)。
+- **直传 vs 经池中转是路由决策**:A、B 时序重叠 → 直传省一跳;A 先结束 B 后到 → 经池中转。归 Router/调度器按时序选,非传输层职责。
+- **in-process agent = 传输引擎的本地端点**:agent 在 worker 进程内注册本地内存、发起/接收传输;传输引擎本身是池的分布式数据面。L0 内存注册用 in-process(Q1 定的方案 a)最顺——Rust `.so` 直接拿 worker 的 CUDA 内存句柄去注册 RDMA MR,省一道 IPC。
+
+### 布局转换
+
+L0 是 layer-first(引擎逐层写),跨实例传输要转 page-first(整块连续好零拷贝)→ 照搬 SGLang `sgl-kernel/csrc/kvcacheio/transfer.cu::transfer_kv_per_layer_pf_lf` 那个非时间索引核(`ld.global.nc`/`st.global.cg`),在传输 stream 上一次 launch 做完,无 host staging。
+
+### 三个边界点(非分叉,交代清楚)
+
+- **L0 直传依赖 GPUDirect RDMA**:NIC 与 GPU 同 PCIe root 才直读 HBM;否则经 pinned host(L1)中转一次拷贝。部署拓扑(RDMA 可用性退化)留 [`topology.md`](topology.md),接口不变(传输引擎内部吸收)。
+- **直传 vs 经池中转是路由决策**:A、B 时序重叠 → 直传省一跳;A 先结束 B 后到 → 经池中转。归 Router/调度器按时序选,非传输层职责。
+- **in-process agent = 传输引擎的本地端点**:agent 在 worker 进程内注册本地内存、发起/接收传输;传输引擎本身是池的分布式数据面。L0 内存注册用 in-process(Q1 定的方案 a)最顺——Rust `.so` 直接拿 worker 的 CUDA 内存句柄去注册 RDMA MR,省一道 IPC。
+
+### 参考实现与关键差异
+
+> 按 CLAUDE.md 强制查阅规则。
+
+- **参考实现**:
+  - **Mooncake transfer-engine**(`3rdparty/mooncake/mooncake-transfer-engine/`):RDMA 零拷贝 + 多 NIC 聚合 + segment 寻址(对象按 `(segment_id, offset, len)` 寻址,不解释内容)——这是本系统 `rust/transfer/` 的直接原型;pull/publish 的异步 handle API、GPUDirect RDMA 直读 HBM 照搬。逐层对应见 [`../research/mooncake/transfer-engine.md`](../research/mooncake/transfer-engine.md)。
+  - **Mooncake mooncake-store**:KVCache 全局池、按 segment 寻址——是 L3 原型,"经池中转"那条路即它。见 [`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md)。
+  - **SGLang `pool_host/mha.py::get_page_buffer_meta`**:page-first 布局让每页一段连续内存、`data_ptr()` 直出零拷贝;`transfer.cu::transfer_kv_per_layer_pf_lf` 是 layer-first↔page-first 转换核。见 [`../research/sglang/{hicache,storage-backends}.md`](../research/sglang/)。
+- **关键差异(我们更彻底)**:
+  - Mooncake 传的是**实例私有 store 之间**(实例拥有本地 HBM,传输是实例间共享/迁移);我们传的是**池权威的 L0 之间**——A、B 的 L0 都是池的物理载体,源/目 slot 由池分配、in-flight 冻结,实例不"拥有"任何 KV。传输对引擎仍是异步 pull/publish,背后所有权语义彻底归池。
+  - Mooncake 无内容寻址/radix(按 segment ID 存取);我们 pull 前先查 radix + 位置视图拿到 block 物理源地址(A 的 L0 段或 L3 段),一跳定位,省掉 Mooncake 按 ID 查后端。
+  - **D-direct 是零传输特例**:若池已把 block 预放置在 B 的 L0(本地命中),位置视图直接返回"B 本地",B 零 pull 直跳——Mooncake 没有此路径(它总要传)。
 
 ## 引用计数与驱逐
 
-- 每个 block 维护引用计数(在途请求数)。引用 >0 → 冻结迁移/驱逐(正确性约束)。
+- 每个 block 维护引用计数,由**池权威维护**(非引擎侧)——多引擎共享同一前缀 block 时,引擎各自持本地计数会导致分布式不一致,故 ref 是池的单点计数。引擎只通过"本步 read set / write set"间接表达引用,不持计数。
+- ref 的来源有两种,统一为"ref>0 即冻结":
+  - **请求引用**:block 进入某请求 read set 时 +1。减点只能在**请求结束且无续推引用**时——attention 每步读全部 KV(含所有前缀 block),前缀 block 全程 in-flight,不能中途早减。F4 续推时原请求结束但 KV 要续到新节点,ref 不归零而是**转移到新请求**(或持"续推引用"),避免被冷热淘汰。
+  - **在途传输引用**:跨实例传输发起时,源 block +1(源端冻结,防 RDMA 半传时被覆写致损坏);RDMA 完成 -1。见"PD 分离下的传输流程"。
 - 引用为 0 的 block 进冷热排序,按**热度分**(f(频次, recency),LFU-Aging)与容量阈值驱逐/下沉。
 - 公共前缀 block 给予前缀亲和加权保护,驱逐时不易被选。
 - 层间副本/移动、promotion/demotion、主动迁移见 [`storage-layer.md`](storage-layer.md) "冷热与生命周期管理";本节驱逐是其中一环。
 - 被驱逐但 L4 仍有副本的 block,可按需回填。
+
+## 写回与生命周期
+
+一次请求的 KV 从产生到消亡:
+
+```
+引擎产出(在 L0 slot)
+  → [满了] 池算哈希 → 注册 radix → 写回 L3(持久点,崩溃可续推)
+  → 请求结束
+  → [尾块,未满] 池写回(纯容错,不进 radix)
+  → KV 续存(供复用/续推) 或 按 TTL/冷热淘汰
+```
+
+两条写回路分开(满块结构性,尾块容错性):
+
+- **满块路**:block 填满 → 池算哈希 → 注册 radix → 写回 L3。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希),写回顺带做。decode 跨 block 边界即产生满块,请求进行中就可能触发。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N",留 P7 校准。
+- **尾块路**:请求结束时仍未填满的 block(尾块)→ 请求结束点写回一次,写"当前尾 block 的全部已填 token",重放时整块覆盖。纯容错,不进 radix(哈希未定,或带 partial 标记)。因尾块只在请求结束写一次,无增量式。
+
+引擎不感知 block 满不满(Q2.1:block 对引擎纯寻址单位)——满块判断、哈希、radix 注册、写回全归池。容错点 = "KV 落 L3"的时刻;满块越频繁写回(N 小)→ 崩溃丢的越少、写放大越大,反之亦然。decode 增量写回同时服务容错 + 前缀生长(见 [`execution-modes.md`](execution-modes.md) 时序二反向)。
 
 ## 多模型生命周期
 
@@ -99,7 +191,8 @@ node_id = hash(KVBlockID) % N
 ## 故障恢复
 
 - KV block 写入 L3 即视为 Prefill 持久点。
-- Decode 节点崩溃:存储池检测 → 把该 sequence 路由到新节点 → 由存储池把已有 KV 放置到新节点 HBM → 续推。丢失的仅是最后一次增量写回(落 L3+)之后的少量 token;原节点 HBM 副本随销毁失效(本就是易失副本,非私有状态)。
+- Decode 节点崩溃:存储池检测 → 把该 sequence 路由到新节点 → 由存储池把已有 KV 放置到新节点 HBM → 续推(ref 从原请求转移到新请求,见"引用计数与驱逐")。丢失的仅是最后一次写回 L3 之后的少量 token(满块路 + 尾块路,见"写回与生命周期");原节点 HBM 副本随销毁失效(本就是易失副本,非私有状态)。
+- **Drain/缩容(主动下线)**:节点进入 Drain 时,agent 先把"还被远端引用的 block"(在途传输 ref>0 或被其他节点 read set 引用)推一份到 L3,再下线——避免销毁后远端拉取落空。这是"默认直传 + Drain 推 L3"在故障/弹性侧的落点。
 - 增量写回频率(每 N 步):N 小 → 恢复快、写放大大;N 大 → 恢复慢、写放大小。另有前缀生长诉求,见 [`execution-modes.md`](execution-modes.md)。
 
 ## 开放问题
