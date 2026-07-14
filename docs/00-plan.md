@@ -66,13 +66,29 @@ P7  性能建模与验证   → 量化各假设，回填设计
 - **冷热与生命周期**：L0/L1 做副本、L2/L3/L4 间按移动、L4 永久权威；冷热按"引用数>0 冻结 + 热度分(LFU-Aging) + 前缀亲和"；迁移主动为主 + 被动兜底；迁移/GC/碎片整理共享后台带宽池（<10%）。
 - **执行模式时序**（存储池视角不区分 P/D）：时序一本地完成（D-direct/混部共用，入口由本地命中定 prefill 工作量）；时序二跨节点传输——正向（产出→消费，服务本次）+ 反向（消费→池，D 延伸 KV 回传增强未来前缀，agent 多轮核心）。
 - **decode 增量写回双重目的**：容错 + 前缀生长。频率 N 策略留开放。
+- **HBM 池化下的入图与 KV 管理（Q1/Q2，本轮定）**：
+  - **Q1 入图**：固定基址 KV arena（不上 VA，分配给模型后不扩缩容/不跨模型回收物理页）；入图三约束（静态输入 buffer / 固定 KV 基址 / 固定地址 block table）；decode 走 graph、prefill 走 eager；block table 由**本地 agent（in-process，持本地视图镜像）组装**，非全局池每步 RPC 推表（守 5ms）；**ready/done 双 fence 一步契约**（池发 ready→引擎 replay→引擎发 done→池解冻/写回/注册 radix/驱逐），引擎零分层逻辑；正确性地基 = in-flight 跨层冻结（ref>0 的 block step 期间物理映射冻结）。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "HBM 池化下的入图与 KV 管理"。
+  - **Q2 KV 管理**：block 对引擎**纯寻址单位**（连 block table 索引填充都归池，引擎只 replay 读，不感知满块）；写回两路——**满块路**（填满→池算哈希→注册 radix→写回 L3）+ **尾块路**（请求结束时未满尾块写一次，纯容错不进 radix）；**ref 池权威维护**（多引擎共享前缀 block 的分布式一致性，引擎不持计数），请求结束且无续推引用才减（F4 续推 ref 转移），含在途传输引用（源端冻结）。
+  - **跨实例/PD 传输**：engine-to-engine 控制链**切断**，池的本地 agent 发起传输，引擎降到 `publish`/`pull`+fence、不知地址、不组装 block table；数据线仍直连 RDMA（wire 效率不变）。默认**直传**（A→B L0，PD 时序重叠主场景）+ **Drain 推 L3**（节点下线前把还被远端引用的 block 落 L3）。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "跨实例 KV 传输"。
+  - **重叠语义**：拒绝**引擎驱动** intra-step 重叠（SGLang `get_key_buffer` 每层 `wait_event`，绑死引擎、破坏 graph）；保留**池驱动**异步重叠——消费侧 step 间重叠 + 生产侧 prefill 层级重叠（`page_first_direct` 子块传输/"分块流水线"，支撑 PD 分离 TTFT）。引擎无感、graph 安全。
+  - **持久语义**：L3 = F4 恢复点（抗 worker 失败，副本 RAM）；L4 = SSOT 永久权威（抗池级失败，L4 缺失才视为 block 不存在）。风险窗口：worker 与其 L3 副本同时失败且未落 L4 则丢尾巴（= 丢失最后一次写回 L3 之后的少量 token）。
+- **技术选型已定**（P2 落地）：存储 Rust / 控制 Go / 计算 Python+Triton；元数据 etcd；SSOT 用 S3/MinIO；跨语言 gRPC+Protobuf（大块 KV 走 RDMA 旁路）。3rdparty 四个 submodule（sglang/lmcache/mooncake/vllm）作实现参考。
 
 ### P1 待讨论 / 开放点
 
 - decode 写回频率 N：多轮 agent（重前缀增强时效，N 小）vs 单轮（重带宽/容错，N 大），待 P7。
+- 满块写回频率（满一个就写 vs 攒几个满块一起写），待 P7。
 - 反向回传的 radix 增长时效：写回到 radix 可见的滞后上限。
-- 时序二正向"放置与计算重叠"的流水线深度与 prefill 层数对齐。
-- 模式选择决策树的具体阈值（本地命中判定、传输成本 vs 分离收益）待 P7；决策树本身待 `data-flow.md` 落定。
+- 分块流水线深度（`page_first_direct` 子块传输 k 与 prefill 层数对齐），待 P7。
+- 模式选择决策树的具体阈值（本地命中判定、传输成本 vs 分离收益）待 P7；**决策树结构本身待 `data-flow.md` 落定**（结构定型、阈值留空标 P7）。
+
+### P1 下一步（收尾，按此顺序）
+
+1. **`architecture/data-flow.md`**（首选切入）：请求生命周期详图（含 F4 故障分支、模式选择决策树结构）。直接承接本轮 Q1/Q2/PD 传输 + execution-modes 两时序；落定后清掉 [`scheduling.md`](architecture/scheduling.md) sections 2-4 的固定 P→D 残留（⚠️ 标注处，对齐两时序视角）。决策树：结构定型、阈值留 P7。
+2. **`architecture/consistency.md`**：一致性与故障模型。形式化本轮 B2 的持久语义（L3 F4 恢复点 / L4 SSOT）、ref 池权威、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点。
+3. **`architecture/topology.md`**：部署拓扑（单/跨机房、网络 fabric 假设、RDMA 可用性退化）。承接本轮多处"留 topology.md"（GPUDirect RDMA 依赖 PCIe root、TCP 退化带宽-延迟模型）。
+
+> P1 三篇补齐后满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案），再转 P2（proto 起草）。
 
 ---
 
