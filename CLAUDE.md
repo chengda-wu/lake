@@ -80,7 +80,7 @@ docs/
 约定:
 - `3rdparty/` **只读**,不修改 submodule 内代码。要改造先 fork 换 URL。
 - 四个 submodule 各带自己的 `.claude/` 规则——那是改它们自身代码的约束,与本项目无关,**忽略**。
-- clone 本仓库需 `git submodule update --init --recursive`。
+- clone 本仓库需 `git submodule update --init --recursive`。submodule 体积较大(SGLang/Mooncake/vLLM 各数百 MB),磁盘紧张或 CI 提速用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(注意浅克隆后无法在此 submodule 内 `git checkout` 切换 ref,升级需先 `git submodule deinit -f <path>` 再重新 init 深克隆)。
 - 设计/实现遇到分层、传输、复用、放置等问题,先查对应 submodule 源码再动手。
 
 ## reference 强制查阅规则（硬性，每次都做）

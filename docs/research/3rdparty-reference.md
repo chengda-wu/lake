@@ -147,4 +147,4 @@ P4(KV Pool 原型,Rust)时按此顺序参考源码:
 - `3rdparty/` 只读参考,**不修改** submodule 内代码。如需改造,fork 后换 URL。
 - clone 本仓库后需 `git submodule update --init --recursive` 拉取。
 - 升级 submodule:在对应目录 `git checkout <ref>` 后回根目录 `git add` 提交指针更新;在本文"检出"列同步记录。
-- submodule 体积较大(SGLang/Mooncake),CI 如需提速可用 `--depth 1` 浅克隆。
+- submodule 体积较大(SGLang/Mooncake/vLLM 各数百 MB),磁盘紧张或 CI 提速用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(浅克隆后无法在 submodule 内切换 ref,升级需先 `git submodule deinit -f <path>` 再深克隆 init)。

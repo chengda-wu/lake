@@ -65,6 +65,12 @@ lake/
 ```
 
 > 首次 clone 后执行 `git submodule update --init --recursive` 拉取 `3rdparty/`。四个参考项目与本系统设计的逐层对应见 [`docs/research/3rdparty-reference.md`](docs/research/3rdparty-reference.md)。
+>
+> submodule 体积较大（SGLang/Mooncake/vLLM 各数百 MB）。磁盘紧张或想快速浏览时用浅克隆：
+> ```bash
+> git clone --recurse-submodules --depth 1 --shallow-submodules <repo>
+> ```
+> （浅克隆后无法在 submodule 内切换 ref，升级 submodule 需先 `git submodule deinit -f <path>` 再重新深克隆 init。）
 
 ## 设计文档速览
 
