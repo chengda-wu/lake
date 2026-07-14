@@ -89,7 +89,7 @@ AsyncLLM(引擎入口)
 | 调度器接口 | `vllm/v1/core/sched/interface.py`::`SchedulerInterface` |
 | 调度输出 | `vllm/v1/core/sched/output.py`::`SchedulerOutput` |
 | KV connector 接口 | `vllm/distributed/kv_transfer/kv_connector/v1/base.py`::`KVConnectorBase_V1` (L171) |
-| connector 角色/元数据 | `base.py`::`KVConnectorRole` (L124) / `KVConnectorMetadata` (L141) / `SupportsHMA` (L85,host-managed-address) |
+| connector 角色/元数据 | `base.py`::`KVConnectorRole` (L124) / `KVConnectorMetadata` (L141) / `SupportsHMA` (L85,hybrid memory allocator) |
 | worker 侧 connector 包装 | `vllm/v1/worker/gpu/kv_connector.py`::`KVConnector` (L29) / `ActiveKVConnector` (L47) |
 | connector 注入 model runner | `vllm/v1/worker/kv_connector_model_runner_mixin.py` |
 | 已有 connector 实现 | `vllm/distributed/kv_transfer/kv_connector/v1/`::`lmcache_connector.LMCacheConnectorV1` (L72) / `mooncake/store/connector.MooncakeStoreConnector` (L87) / `nixl/connector.NixlBaseConnector` (L79) / `flexkv_connector.FlexKVConnectorV1` (L35) / `multi_connector.MultiConnector` (L128) |

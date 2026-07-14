@@ -102,7 +102,7 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 |-----------|----------|------|
 | **PagedAttention**(block 分页 + block table) | 存储池 KV block + worker block table | 见 compute-layer。block 粒度对齐,worker 仍用 block table 做 paged attention,物理位置由存储池元数据定 |
 | **`KVConnectorBase_V1`** 外部 KV 插件接口(scheduler/worker 双侧 + metadata + layer-wise mixin) | 计算层 worker ↔ 存储池 client | 见 vllm/compute.md。接口形态直接参考;LMCache/Mooncake/NIXL/FlexKV 均已实现为 connector,印证接入路径可行 |
-| **`SupportsHMA`**(host-managed-address 能力标记) | 方案 Z(存储池放置 KV 到 HBM,worker 消费) | vLLM 已为"外部管 HBM"预留能力标记,正是方案 Z 的雏形 |
+| **`SupportsHMA`**(hybrid memory allocator 能力标记) | (无对应——方案 Z 是本系统增量) | `SupportsHMA` 声明 connector 支持 HMA(多 KV cache group 混合架构,如 Mamba+attention),需 `request_finished_all_groups` 与多 group 释放对齐。**注意:它不是"外部管 HBM"**——vLLM 的 HBM 始终引擎自分配,connector 只借做传输。方案 Z 的"池管 HBM 放置"vLLM 无对应标记,需自设计(见 [`../architecture/compute-layer.md`](../architecture/compute-layer.md)) |
 | **`ExternalBlockHash`**(跨实例外部哈希) | 存储池内容寻址 `(model_id,layer,block_hash)` | worker 向存储池查前缀的自然键,与存储池内容寻址直接对接 |
 | **`GPUModelRunner`**(load_model + execute_model + block table 维护) | 计算层 worker 生命周期与执行循环 | worker 生命周期(Warm→Serving→Drain)、execute_model、block table 维护直接借鉴 |
 | **权重 offloader**(UVA + `_prefetch_checkpoint`) | 权重归存储池 + 计算层流式加载 | vLLM 的权重流式喂 GPU 是"权重存算分离"的原型 |
@@ -123,7 +123,7 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 | 我们的设计层 | 主要参考 | 我们多做的(更彻底) |
 |--------------|----------|---------------------|
 | **计算层**(worker/attention/runner) | **vLLM**(PagedAttention/`GPUModelRunner`/spec decode) | worker 无状态化(模型/KV 从存储池读写);attention 核用 Triton |
-| **worker↔存储池接入** | **vLLM `KVConnectorBase_V1`** + `SupportsHMA` | connector 从可选插件升为存储池必经路径;集群级权威 |
+| **worker↔存储池接入** | **vLLM `KVConnectorBase_V1`**(scheduler/worker 双侧 + layer-wise mixin) | connector 从可选插件升为存储池必经路径;集群级权威。注:`SupportsHMA`(HMA,多 KV group)≠ 方案 Z,方案 Z 为本系统增量 |
 | L0-L4 分层 | SGLang HiCache | L1/L2 也归存储池(非实例私有);统一冷热/生命周期 |
 | KV Pool 数据面 | Mooncake transfer-engine + store | 内容寻址 + radix + 多模型配额/GC/碎片整理 |
 | 前缀复用 | SGLang RadixAttention + LMCache | radix 归存储池 + 位置视图一跳 + 反向回传生长 |

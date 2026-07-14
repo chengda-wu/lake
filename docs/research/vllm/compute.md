@@ -87,11 +87,11 @@ connector 分两侧(同文件):
 
 `KVCacheConfig`(L920)/`KVCacheSpec`(L100):connector 与调度器经 spec 协商 KV 布局(`FullAttentionSpec`/`MLAAttentionSpec`/`MambaSpec`)——**connector 需知道每层 KV 的形状才能与外部存储对齐**。本系统存储池按不透明字节块存(不解释布局),但 worker↔池的传输仍需 layout spec,可参考此协商。
 
-### SupportsHMA(host-managed-address)
+### SupportsHMA(hybrid memory allocator)
 
-`SupportsHMA`(L85,ABC 标记):connector 可声明"host-managed-address"能力——即外部存储直接管理 HBM 地址(host 拥有显存指针),worker 不自己 alloc。**这接近本系统方案 Z**(存储池主动放置 KV 到 HBM,worker 读位置视图)的雏形——vLLM 已为"外部管 HBM"预留了能力标记。
+`SupportsHMA`(L85,ABC 标记):connector 声明支持 **hybrid memory allocator (HMA)**——即 connector 可与 HMA 协同使用。HMA 是 vLLM 针对**多 KV cache group 混合架构**(如 Mamba+attention)的显存管理器,把多个 group 的 KV 放进同一池统一分配。`SupportsHMA` 要求 connector 实现 `request_finished_all_groups`:在一个请求的**所有** KV cache group 都完成后再统一异步 free block(而非逐 group 释放),使 connector 的 save/send 与 HMA 的多 group 释放时序对齐。
 
-**对本系统**:本系统存储池 client ≈ 一个常驻的 `KVConnectorBase_V1`,且 `SupportsHMA` 路径对应方案 Z 的"存储池放置、worker 消费"。区别:vLLM connector 是可选插件、per-instance;本系统是必经路径、集群级权威。
+**对本系统**:`SupportsHMA` **不对应**方案 Z("外部管 HBM")——vLLM 的 HBM 始终由引擎自身分配,connector 只借(`register_kv_caches`)做传输,无论是否 HMA。方案 Z 的"存储池放置 KV 到 HBM、worker 消费"在 vLLM **无对应能力标记**,是我们相对 vLLM 的增量,需自行设计(见 [`../../architecture/compute-layer.md`](../../architecture/compute-layer.md) "待写:HBM 池化下的入图与 KV 管理")。本系统存储池 client ≈ 一个常驻的 `KVConnectorBase_V1`;区别:vLLM connector 是可选插件、per-instance,本系统是必经路径、集群级权威。
 
 ## Worker / Model Runner
 
@@ -168,7 +168,7 @@ connector 分两侧(同文件):
 | connector 接口基类 | `vllm/distributed/kv_transfer/kv_connector/v1/base.py`::`KVConnectorBase_V1` (L171) |
 | 角色(scheduler/worker 侧) | `base.py`::`KVConnectorRole` (L124) |
 | connector 元数据 | `base.py`::`KVConnectorMetadata` (L141) / `KVConnectorWorkerMetadata` (L150) / `KVConnectorHandshakeMetadata` (L132) |
-| host-managed-address 能力 | `base.py`::`SupportsHMA` (L85) |
+| hybrid memory allocator 能力 | `base.py`::`SupportsHMA` (L85) / `request_finished_all_groups` (L92) |
 | legacy 别名 | `vllm/distributed/kv_transfer/kv_connector/base.py`(`KVConnectorBase = KVConnectorBase_V1`) |
 | worker 侧包装 | `vllm/v1/worker/gpu/kv_connector.py`::`KVConnector` (L29) / `ActiveKVConnector` (L47) |
 | 注入 model runner 的 mixin | `vllm/v1/worker/kv_connector_model_runner_mixin.py` |
@@ -232,7 +232,7 @@ connector 分两侧(同文件):
 1. **PagedAttention block + block table**:存储池 KV block 与 vLLM block 对齐,worker 仍用 block table 做 paged attention,物理位置由存储池元数据定。
 2. **`KVConnectorBase_V1` 接口形态**:本系统存储池 client ≈ 常驻 connector;scheduler/worker 双侧 + metadata 协调 + layer-wise save/load 流水线 mixin 直接参考。
 3. **`ExternalBlockHash`**:worker 向存储池查前缀的自然键,与存储池 `(model_id,layer,block_hash)` 内容寻址对接。
-4. **`SupportsHMA` 能力标记**:对应方案 Z"存储池放置 KV 到 HBM、worker 消费"的雏形。
+4. **`SupportsHMA` 能力标记**:声明 connector 支持 hybrid memory allocator(多 KV cache group 混合架构),要求 `request_finished_all_groups` 与多 group 释放时序对齐。**注意:它不对应方案 Z**——vLLM 的 HBM 始终引擎自分配,connector 只借做传输;方案 Z 的"池管 HBM 放置"是本系统增量,vLLM 无对应标记。
 5. **权重 offloader(UVA/预取)**:权重流式加载原型,参考"权重归存储池、计算层流式喂 GPU"。
 6. **`AttentionMetadataBuilder`**:调度器输出→attention 输入的衔接点形态。
 7. **spec decode proposer↔speculator**:Draft 池↔Decode 池划分参考。
