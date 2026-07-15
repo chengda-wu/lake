@@ -13,6 +13,8 @@
 | **compute network (CNIC, 东西向)** | GPU↔GPU | GPU collective 通信 + L0→L0 RDMA 数据面（PD 正向、D→P 子情况 A） | 大（如 8×400Gbps）、间歇突发（集合操作亚毫秒级） |
 | **storage network (SNIC, 南北向)** | 节点↔存储 | 访问 L1/L2/L3（DRAM 池 / NVMe 池 / 对象存储） | 相对小、持续 |
 
+> **本机命中零网络**：L1 block 若被池放置在本机 DRAM，访问它是本地 RAM 读，不走任何 NIC（同 L0 本机命中）。上表 SNIC 承载的是"访问**远端** L1/L2/L3"的网络路径；本机 DRAM 命中不占网络带宽。
+
 **为何物理隔离**：KV 传输借 CNIC 大带宽回传（D→P 子情况 B），若与 SNIC 共线会挤占 latency-critical 的模型 collective 通信。DualPath 的核心就是两类带宽隔离 + 在 CNIC 空隙插入 KV 传输。两类带宽是**池的资源**（池按 NIC 带宽视图选路，非实例"借用"——比 DualPath 更彻底，见 [`../research/dualpath.md`](../research/dualpath.md) "关键差异"）。
 
 **部署要求**：生产形态每节点配两类独立 NIC（物理或逻辑隔离）。最小/冒烟形态（单机 docker compose）可只有一类，KV 传输与模型通信共享带宽——仅用于冒烟，不满足 SLO。
@@ -82,9 +84,9 @@
 
 | 故障 | 范围 | 恢复 | 见 |
 |------|------|------|-----|
-| 单 worker 崩溃（NPU/进程级） | 该节点 L0/L1 副本 | L2 F4 恢复点续推（本机 NVMe 通常仍在） | [`consistency.md`](consistency.md) §5 |
+| 单 worker 崩溃（NPU/进程级） | 该节点 L0/L1 副本 | L2 F4 恢复点续推（NVMe 不波及，block 无论本机远端均存活） | [`consistency.md`](consistency.md) §5 |
 | 单 NIC 故障 | 该 NIC 传输 | 切备选 NIC 重传（引擎内） | §3 |
-| 单 KV Node 失败 | 该 Node 的 L1/L2 副本 | 其他 KV Node 的 L1/L2 副本 + L3 回填 | [`consistency.md`](consistency.md) §4 |
+| 单 KV Node 失败 | 该 Node 的 L1 副本（易失） | L1 丢失可回填；该 Node 上的 L2 block 由 L3 兜底（L2/L3 二选一，同层无副本） | [`consistency.md`](consistency.md) §4 |
 | 池级失败（控制面 etcd） | 位置视图 | etcd Raft 多数派恢复 | §4、[`consistency.md`](consistency.md) §5 |
 | 整机级失败（连本机 NVMe 一起没） | 该节点 L0–L2 | 退 L3（SSOT）续推 / 重算 | [`consistency.md`](consistency.md) §4 |
 | 单机房失败 | 该机房全部 | 另一机房从 L3 SSOT 重建（远期） | §4 |

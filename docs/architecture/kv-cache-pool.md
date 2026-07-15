@@ -195,14 +195,15 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 ```
 引擎产出(在 L0 slot)
   → [满了] 池算哈希 → 注册 radix → 写回 L2(NVMe,F4 恢复点,抗 worker 失败)
-  → 请求结束
+  → [注册后 L2 durable 前,block 持 writeback ref 不可驱逐]
+  → 请求结束 = 写回屏障(flush+ack 所有已注册 block 的 L2 写回,再释放 ref)
   → [尾块,未满] 池写回(纯容错,不进 radix)
   → KV 续存(供复用/续推) 或 按 TTL/冷热淘汰
 ```
 
 两条写回路分开(满块结构性,尾块容错性):
 
-- **满块路**:block 填满 → 池算哈希 → 注册 radix → 写回 L2(NVMe)。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希),写回顺带做。decode 跨 block 边界即产生满块,请求进行中就可能触发。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N",留 P7 校准。
+- **满块路**:block 填满 → 池算哈希 → 注册 radix → 写回 L2(NVMe)。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希),写回顺带做。decode 跨 block 边界即产生满块,请求进行中就可能触发。注册 radix 与 L2 写回非原子:注册后到 L2 durable 之间 block 持 **writeback ref 不可驱逐**,请求结束是**写回屏障**(flush+ack 后才释放 ref),保证 radix 已发布的 block 恒有 L2 后盾、不悬空(参考 SGLang `write_back` 驱逐即回写,见 [`consistency.md`](consistency.md) §3)。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N",留 P7 校准。
 - **尾块路**:请求结束时仍未填满的 block(尾块)→ 请求结束点写回一次,写"当前尾 block 的全部已填 token",重放时整块覆盖。纯容错,不进 radix(哈希未定,或带 partial 标记)。因尾块只在请求结束写一次,无增量式。
 
 引擎不感知 block 满不满(Q2.1:block 对引擎纯寻址单位)——满块判断、哈希、radix 注册、写回全归池。容错点 = "KV 落 L2(NVMe)"的时刻;满块越频繁写回(N 小)→ 崩溃丢的越少、写放大越大,反之亦然。decode 增量写回同时服务容错 + 前缀生长(见 [`execution-modes.md`](execution-modes.md) 时序二反向)。
@@ -250,15 +251,15 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 ## 故障恢复
 
 **持久语义分层**(层=介质,持久性分级):
-- **L2 = F4 恢复点**:NVMe(池化,block 放哪个节点 NVMe 由池决定)。NVMe 持久(断电不丢),且 NPU(worker)故障与本机 NVMe 物理解耦——worker 崩溃/进程挂/NPU OOM 时本机 NVMe 副本通常还在。block 写入 L2 即视为可 F4 续推。
+- **L2 = F4 恢复点**:NVMe(池化,block 放哪个节点 NVMe 由池决定)。L2 价值 = NVMe 持久(断电不丢)+ NPU 故障不烧 NVMe——NPU/进程级故障只销毁 worker 的 L0/L1,不波及 NVMe,无论 block 在本机还是远端 KV Node 的 NVMe 均存活。F4 续推从 L2 读(本机就本地读、远端就网络读);恢复能力只取决于"是否已写回 L2 durable",与位置无关。block 写入 L2 即视为可 F4 续推。
 - **L3 = SSOT 永久权威**:对象存储,抗**整机级/池级失败**(连本机 NVMe 一起没的故障)。L3 缺失才视为 block 不存在(见 [`storage-layer.md`](storage-layer.md))。
 - L0/L1 = 易失缓存(HBM/DRAM),断电丢,靠 L2 回填,不承担恢复点职责。
 
 风险窗口分两级:
-- **NPU/进程级故障**(常见):worker 崩溃,本机 NVMe(L2)仍存活 → 从 L2 续推,丢失"最后一次写回 L2 之后的少量 token"(满块路 + 尾块路,见"写回与生命周期")。
+- **NPU/进程级故障**(常见):worker 崩溃,L0/L1 随销毁失效;NVMe(L2)不波及(block 无论本机远端均存活) → 从 L2 续推,丢失"最后一次写回 L2 之后的少量 token"(满块路 + 尾块路,见"写回与生命周期")。
 - **整机级故障**(罕见):连本机 NVMe 一起没 → 退 L3(SSOT),丢失"自上次冷下沉 L3 之后的增量"。冷下沉 L3 的频率由冷热生命周期决定,非每步。
 
-- Decode 节点崩溃:存储池检测 → 把该 sequence 路由到新节点 → 由存储池把已有 KV(从 L2 NVMe)放置到新节点 HBM → 续推(ref 从原请求转移到新请求,见"引用计数与驱逐")。原节点 HBM/DRAM 副本随销毁失效(本就是易失副本,非私有状态);本机 NVMe 若仍存活可作回填源。
+- Decode 节点崩溃:存储池检测 → 把该 sequence 路由到新节点 → 由存储池把已有 KV(从 L2 NVMe,本机或远端按池放置)放置到新节点 HBM → 续推(ref 从原请求转移到新请求,见"引用计数与驱逐")。原节点 HBM/DRAM 副本随销毁失效(本就是易失副本,非私有状态);原节点 NVMe 若未被整机级故障波及则仍存活、可作回填源。
 - **Drain/缩容(主动下线)**:节点进入 Drain 时,agent 先把"还被远端引用的 block"(在途传输 ref>0 或被其他节点 read set 引用)落一份到 L2(NVMe),再下线——避免销毁后远端拉取落空。这是"默认直传 + Drain 推 L2"在故障/弹性侧的落点。
 - 增量写回频率(每 N 步):N 小 → 恢复快、写放大大;N 大 → 恢复慢、写放大小。另有前缀生长诉求,见 [`execution-modes.md`](execution-modes.md)。
 

@@ -53,7 +53,11 @@ r-type 状态 checkpoint 的形式/间距与 L1+ 持久化性价比(Mamba state 
 > **物理约束**:L0 的统一管理是元数据层面的——物理访问仍受 GPU 本地性约束,attention 读 KV 必须在本机 HBM,无法高效跨节点直读。因此同一 batch 各 sequence 的 KV 必须已在同一 GPU HBM(本地命中),否则先由存储池补拉。放置与 batch 的边界见下"方案 Z"。L1/L2 跨节点访问走 SNIC(见 [`topology.md`](topology.md))。
 
 **读取路径**:L0 → L1 → L2 → L3,逐层回填。
-**写入路径**:Prefill 产出 → L0(产出即属存储池)→ 异步写 L1(缓存)/ L2(F4 恢复点)→ 按冷热决定是否落 L3(SSOT)。
+**写入路径**(两条独立职责,不要混):
+- **持久化写回** = 满/尾块落 L2 durable(服务 F4 恢复点 + radix 生长)。L2 是唯一持久层,写回即写 L2。L1 易失,不增持久性,不参与写回。
+- **L1 副本来源 = L0 demotion**(L0 容量压力驱逐下沉 / 池主动 demotion 热块),**不是满块即写 L1**。即刚产出的 block 只在 L0;L1 副本在 L0 让位时产生,命中靠读路径 L0→L1 回填。仿 SGLang `write_back`(驱逐即 `_evict_write_back` D2H 到 host DRAM,节点带 `host_value`="evicted but backuped")。差异:SGLang L1→L2(GPU→host)驱逐同步触发、实例私有;lake HBM 归池、跨请求/跨节点,demotion 是池放置决策(可主动 demotion),但副本来源同样是 demotion。
+
+按冷热决定是否落 L3(SSOT)。
 
 ## 冷热与生命周期管理
 
@@ -67,7 +71,7 @@ r-type 状态 checkpoint 的形式/间距与 L1+ 持久化性价比(Mamba state 
 
 数据模型:一个 block 在元数据中有**多层位置**(L0/L1 各一份缓存副本,L2/L3 二选一),而非单一位置。`locations` 是"层→物理位置"集合;L0/L1 缺失只是缓存未命中,L3 缺失才视为不存在。
 
-> **持久性分层**:L0/L1 易失(断电丢,靠 L2 回填);L2 持久(F4 恢复点,NPU 故障与本机 NVMe 解耦,worker 崩溃后从 L2 续推);L3 永久(SSOT,整机级故障兜底)。详见 [`consistency.md`](consistency.md) §4。
+> **持久性分层**:L0/L1 易失(断电丢,靠 L2 回填);L2 持久(F4 恢复点,NVMe 持久 + NPU 故障不烧 NVMe,恢复能力与位置无关,worker 崩溃后从 L2 续推);L3 永久(SSOT,整机级故障兜底)。详见 [`consistency.md`](consistency.md) §4。
 
 ### 冷热判据
 
@@ -125,3 +129,24 @@ KV Pool 的远端物理载体由一组 KV Node 组成:每个贡献 DRAM + NVMe(L
 - 多租户隔离(远期预留,当前不实现):归外部控制面/部署切分;lake 侧未来若做,靠 `KVBlockID` 加 scope 维度(见 [`kv-cache-pool.md`](kv-cache-pool.md) "Block 寻址"预留、[`../features/features.md`](../features/features.md) F8)。
 - **r-type 状态 checkpoint**:Mamba/卷积 recurrent state 落 L1+ 的 checkpoint 间距/形式、sliding window trailing pages 阈值,待实现/P7 校准。
 - **block 粒度 128**:与传输/复用/写放大的权衡,待 P7 校准。
+- **L1 副本来源:demotion 还是满块即写**(写放大 vs 命中率,P7 校准):
+  - **现状(仿 SGLang)**:L1 副本只由 L0 demotion 产生(驱逐下沉 / 主动 demotion),满块写回只落 L2 durable,不写 L1。刚产出的 block 在 L0→L2 durable 之间,L1 是空的。
+  - **SGLang 的选择**:`write_back` 模式驱逐即回写(`hiradix_cache.py::_evict_write_back`,D2H 到 host DRAM),节点 `host_value`="evicted but backuped";`write_through` 只写 L3(远端),不写 host DRAM。即 host DRAM(lake L1)副本始终靠驱逐,非产出即写。
+  - **权衡**:demotion-only 写放大小,但满块到 demotion 之间若 L0 已让位、L1 还空,命中要从 L2 读(~10μs)。备选:满块写回时**顺便写一份 L1**,让热前缀立刻在 L1 命中(~μs,本机零网络),代价每满块写两层。agent 多轮热前缀复用频繁,从 L2 回填的延迟是否值得用写放大换,待 P7 测。
+  - **生命周期图解**(block B = 首轮填满的第一个 128-token block):
+    ```
+    t0  prefill 产出 B(只在 L0)
+        │ L0 (HBM) │ L1 (DRAM) │ L2 (NVMe) │ L3 │
+        │   [B]    │           │           │    │   B 只在 L0;命中只能从 L0 读
+
+    t1  B 填满 → 算哈希 → 注册 radix → 写回 L2 (durable)
+        │ L0  │ L1 │  L2   │ L3 │
+        │ [B] │    │ [B]✓  │    │   写回只落 L2,不写 L1;B 有了持久后盾
+
+    t2  decode 继续,L0 满,B 被驱逐(demotion 到 L1)
+        │ L0  │  L1   │  L2   │ L3 │
+        │     │ [B]   │ [B]✓  │    │   L1 副本此刻才产生(demotion,非 t1 写回)
+    ```
+    - t1→t2 之间 L1 是空的:命中 B 时 L0 还活着 → 从 L0 读;若 L0 已让位而 demotion 未到 → 从 L2 读(~10μs)。
+    - 两条路来源不同:写回→L2(持久化),demotion→L1(缓存)。故"写回 L2"与"L1 命中"不矛盾。
+    - SGLang 对应:L1(HBM)=lake L0、L2(host DRAM)=lake L1、L3(远端)=lake L2/L3;host DRAM 副本同样靠驱逐产生。

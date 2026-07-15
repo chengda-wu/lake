@@ -58,12 +58,13 @@
                      └─────────────────────────────────────────┘
 ```
 
-- **存储池四层**（层 = 介质，不是位置）：HBM → DRAM → NVMe → 对象存储，逐 tier 池化、热冷 promotion/demotion。DRAM/NVMe 各是一层、一个池，block 放本机还是远端 KV Node 由池放置决定（同 L0 放哪个节点 HBM），不按位置拆层。L2（NVMe）= F4 恢复点（NPU 故障与本机 NVMe 物理解耦），L3 = SSOT；物理载体分布不同，但元数据全归存储池统一管理，计算节点不拥有任何一层。
+- **存储池四层**（层 = 介质，不是位置）：HBM → DRAM → NVMe → 对象存储，逐 tier 池化、热冷 promotion/demotion。DRAM/NVMe 各是一层、一个池，block 放本机还是远端 KV Node 由池放置决定（同 L0 放哪个节点 HBM），不按位置拆层。L2（NVMe）= F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关），L3 = SSOT；物理载体分布不同，但元数据全归存储池统一管理，计算节点不拥有任何一层。
 - **in-process agent**：存储池在每个计算节点的本地端点（Rust `.so`，in-process）——组装 block table、发起/接收跨实例传输、注册本地内存、持本地视图镜像（零 RPC 决策）。全局权威（位置视图 / radix / ref 汇总）在控制面 etcd，本地镜像是其推送副本。
 - **KV 流转三方向**（以 KV 为中心，存储池不区分 P/D）：
   - **P→D** 服务本次（PD 分离正向：产出 → 消费）
   - **D→池** 服务未来（decode 延伸前缀反向回传，radix 生长）
   - **D→P** 服务下一轮（agent 多轮：decode 侧 KV 喂回 prefill，DualPath 原生支持）
+  - **drafter KV 同款进池**：draft 模型自身 KV 与 target KV 同款管理——进存储池、跨请求前缀复用、随 target 迁移（不 L0-only）；seed hidden / 窗口状态按重算式暂不入 radix（见 [`docs/architecture/compute-layer.md`](docs/architecture/compute-layer.md) "投机解码"）。
 
 > 详图与组件边界见 [`docs/architecture/overview.md`](docs/architecture/overview.md)；KV 流转时序见 [`docs/architecture/execution-modes.md`](docs/architecture/execution-modes.md)；双网络与 RDMA 退化见 [`docs/architecture/topology.md`](docs/architecture/topology.md)。
 
@@ -86,7 +87,7 @@
 - **前缀复用 + 本地命中**：radix 前缀索引 + 位置视图；本地命中（前缀 KV 已在某执行节点 HBM）→ D-direct 零/极小传输直跳。
 - **反向回传 + D→P**：decode 延伸 KV 回传池生长 radix（服务未来）；agent 多轮里 D→P 直接喂回 prefill（服务下一轮），不绕一跳存储。
 - **双网络隔离**：CNIC（计算）/ SNIC（存储）物理分离，两类带宽是池的资源；RDMA 三级退化在传输引擎内吸收、上层接口不变。
-- **两级 ref + 持久语义分层**：本地引用计数（池 agent）+ 全局汇总（控制面）；L2(NVMe) = F4 恢复点（NPU 故障与本机 NVMe 解耦）/ L3 = SSOT（抗整机级/池级失败）。
+- **两级 ref + 持久语义分层**：本地引用计数（池 agent）+ 全局汇总（控制面）；L2(NVMe) = F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关）/ L3 = SSOT（抗整机级/池级失败）。
 - **失败不设降级链**：执行失败 → F4 重路由，Router 重跑选路纯函数，无 mode-to-mode fallback 阶梯。
 - **过载归 gateway**：限并发 / 拒请求 / 按优先级丢弃归外部控制面，推理系统只管执行 + 上报信号。
 

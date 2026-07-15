@@ -49,13 +49,13 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 **目标**：基于 P0 特性，定下数据流、组件边界、一致性模型、故障域。
 
-**P1 状态：done 2026-07-15**（七篇架构文档补齐）。
+**P1 状态：done 2026-07-15**（八篇架构文档补齐）。
 
 产出文档（`docs/architecture/`）：
 - [x] 更新 [`overview.md`](architecture/overview.md)：纳入混合执行模式与 KV 流转视角，替代刚性 P→D；去 ⚠️
 - [x] [`architecture/execution-modes.md`](architecture/execution-modes.md) 以 KV 为中心的执行模式与 KV 流转时序（本地完成 / 跨节点传输含正向产出与反向回传）；失败处理统一归 F4 重路由，不设独立降级阶梯
 - [x] [`architecture/data-flow.md`](architecture/data-flow.md) 请求生命周期详图（含 F4 故障分支、模式选择决策树 mermaid、三模式执行段、ready/done 双 fence 一步契约）
-- [x] [`architecture/consistency.md`](architecture/consistency.md) 一致性与故障模型（控制面强一致/数据面最终一致、写一次读多次、ref 两级、持久语义分层 L2 恢复点 / L3 SSOT、风险窗口、F4 续推、GC reconcile）
+- [x] [`architecture/consistency.md`](architecture/consistency.md) 一致性与故障模型（控制面强一致/数据面最终一致、写一次读多次、ref 两级 + writeback ref 防悬空 radix、持久语义分层 L2 恢复点 / L3 SSOT、风险窗口、F4 续推、GC reconcile）
 - [x] [`architecture/topology.md`](architecture/topology.md) 部署拓扑（单/跨机房、双网络 CNIC/SNIC、RDMA 三级退化与 GPUDirect 依赖、NUMA/NIC 多 NIC 聚合、故障域边界）
 
 **完成判据**：任一特性的"数据从哪来、写到哪、谁来调度、失败怎么办"都可在此找到答案。
@@ -73,7 +73,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - **Q2 KV 管理**：block 对引擎**纯寻址单位**（连 block table 索引填充都归池，引擎只 replay 读，不感知满块）；写回两路——**满块路**（填满→池算哈希→注册 radix→写回 L2，NVMe F4 恢复点）+ **尾块路**（请求结束时未满尾块写一次，纯容错不进 radix）；**ref 池权威维护**（多引擎共享前缀 block 的分布式一致性，引擎不持计数），请求结束且无续推引用才减（F4 续推 ref 转移），含在途传输引用（源端冻结）。
   - **跨实例/PD 传输**：engine-to-engine 控制链**切断**，池的本地 agent 发起传输，引擎降到 `publish`/`pull`+fence、不知地址、不组装 block table；数据线仍直连 RDMA（wire 效率不变）。默认**直传**（A→B L0，PD 时序重叠主场景）+ **Drain 推 L2**（节点下线前把还被远端引用的 block 落 L2 NVMe）。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "跨实例 KV 传输"。
   - **重叠语义**：拒绝**引擎驱动** intra-step 重叠（SGLang `get_key_buffer` 每层 `wait_event`，绑死引擎、破坏 graph）；保留**池驱动**异步重叠——消费侧 step 间重叠 + 生产侧 prefill 层级重叠（`page_first_direct` 子块传输/"分块流水线"，支撑 PD 分离 TTFT）。引擎无感、graph 安全。
-  - **持久语义**：层=介质，L0/L1 易失缓存、L2(NVMe)= F4 恢复点（NPU 故障与本机 NVMe 物理解耦，worker 崩溃后从 L2 续推）、L3(对象存储)= SSOT 永久权威（抗整机级/池级失败，L3 缺失才视为 block 不存在）。风险窗口分两级：NPU/进程级故障（常见）丢"最后一次写回 L2 之后的少量 token"；整机级故障（罕见）退 L3 SSOT，丢"自上次冷下沉 L3 之后的增量"。
+  - **持久语义**：层=介质，L0/L1 易失缓存、L2(NVMe)= F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关，worker 崩溃后从 L2 续推）、L3(对象存储)= SSOT 永久权威（抗整机级/池级失败，L3 缺失才视为 block 不存在）。风险窗口分两级：NPU/进程级故障（常见）丢"最后一次写回 L2 之后的少量 token"；整机级故障（罕见）退 L3 SSOT，丢"自上次冷下沉 L3 之后的增量"。
   - **ref 分两级(B1 闭环)**：原"池单点强一致计数"修正为——**本地引用计数**(池本地 agent,请求级,同 vLLM `free_blocks`/sglang `inc_lock_ref` 机制,归池 agent 而非引擎)+ **全局引用汇总**(控制面,最终一致,供 tier up/down 与 GC,不进 hot step loop)。ref 归 0 ≠ 删内存,而是变可驱逐候选(对齐 vLLM `free_block_queue`/sglang `evictable_size_`,内存仍在、可命中复用/作传输源);归 0 不摘位置视图(未驱逐覆写则仍可命中/直传,D-direct 与 D→P 子情况 A 的命中来源);驱逐覆写才摘视图,L2/L3 有副本可回填。step 期间冻结是引用计数自然结果,无需额外 fence。L0/L1 是副本→驱逐 L0 不影响别节点(读各自副本),故全局 ref 只用于 tier/GC,不用于阻止 L0 副本驱逐。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "引用计数与驱逐"。
   - **D→P 流 + 双网络路径 + DualPath 原生支持（本轮新增）**：agent 多轮里上一轮 decode 产出的延伸 KV 是下一轮 prefill 的输入前缀,不必绕一跳存储,可直接由 decode 侧喂回 prefill——这是与 P→D(本次)、D→池(未来)并列的**第三条方向 D→P(服务下一轮)**,即 DualPath(arXiv:2602.21548v2,非 submodule)storage-to-decode 路径的**原生支持**。**双网络隔离**(compute network 跑 L0→L0 RDMA + GPU collective / storage network 跑 L1/L2/L3 访问)是 DualPath 的架构前提,两类带宽是**池的资源**(池统一分配,非引擎"借用",比 DualPath 更彻底)。D→P 选路按"所需 KV 是否已在 D 的 L0"分子情况:**A 零存储读取**(KV 已在 D 的 HBM → D L0 经 compute network 直传 P,连 storage network 都不占,DualPath 不强调,我们独有) / **B**(需从 L1/L2 加载 → 池可选 D 侧加载+compute network 回传,借 D 闲置 storage 带宽绕开 P 侧瓶颈) / 传统 P 侧自拉;由池按 NIC 带宽视图决策,collective 突发窗避让留 P7。engine-to-engine 控制链仍切断(池 agent 发起,引擎不知对方存在)。详见 [`architecture/data-flow.md`](architecture/data-flow.md) §3.4、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "双网络路径"、[`research/dualpath.md`](research/dualpath.md)。
   - **多租户隔离(B2 闭环)**：**lake 不做多租户**(与 goals.md "不做多租户隔离"一致),F8 降级到 Could(远期预留)。当前 `KVBlockID=(model_id, layer, block_hash)` 不含租户维度,同 model_id 内 KV 全局共享复用;多租户隔离归外部控制面/部署切分(按 model_id 命名空间或独立集群)。未来若需,可加 `scope` 维度(public/tenant,靠 scope 过滤隔离、公共只可平台写)——仅预留,不入当前寻址。消了 goals(不做)↔ F8/nonfunctional(要做)的矛盾。详见 [`features/features.md`](features/features.md) F8、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "Block 寻址"预留。
@@ -110,7 +110,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 2. ~~`architecture/consistency.md`~~ ✅（done 2026-07-15）：一致性与故障模型。形式化持久语义（L2 F4 恢复点 / L3 SSOT）、ref 分两级（B1 闭环）、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点、GC reconcile。
 3. ~~`architecture/topology.md`~~ ✅（done 2026-07-15）：部署拓扑（单/跨机房、双网络 CNIC/SNIC、RDMA 三级退化与 GPUDirect 依赖、NUMA/NIC 多 NIC 聚合、故障域边界）。承接本轮多处"留 topology.md"（GPUDirect RDMA 依赖 PCIe root、TCP 退化带宽-延迟模型）。
 
-> **P1 状态：done 2026-07-15**。七篇架构文档（overview / storage-layer / compute-layer / kv-cache-pool / scheduling / data-flow / consistency / topology）补齐，满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案）。转 P2（proto 起草）。
+> **P1 状态：done 2026-07-15**。八篇架构文档（overview / storage-layer / compute-layer / kv-cache-pool / scheduling / data-flow / consistency / topology）补齐，满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案）。转 P2（proto 起草）。
 
 ---
 

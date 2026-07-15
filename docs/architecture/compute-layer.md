@@ -132,7 +132,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 **(1) block 对引擎纯寻址单位**。引擎的 KV 操作只剩三原语:读 ready block / 写 token 进 slot / publish 产出。block table 的索引填充都归池(本地 agent),引擎只 replay 读。引擎连"block 满没满"都不感知,只感知"写第 i 个 token 进某 slot"——满块判断、哈希、radix 注册全归池。block 是引擎的寻址单位,不是管理单位。
 
 **(2) 写回:满块路 + 尾块路**(详见 [`kv-cache-pool.md`](kv-cache-pool.md) "写回与生命周期"):
-- 满块路:block 填满 → 池算哈希 → 注册 radix → 写回 L2(NVMe,F4 恢复点,抗 worker 失败)。请求进行中就可能触发。
+- 满块路:block 填满 → 池算哈希 → 注册 radix → 写回 L2(NVMe,F4 恢复点,抗 worker 失败)。请求进行中就可能触发。注册后 L2 durable 前持 writeback ref 不可驱逐、请求结束是写回屏障(见 [`consistency.md`](consistency.md) §3)。
 - 尾块路:请求结束时未满的尾块,在请求结束点写回一次(写全部已填 token,重放整块覆盖),纯容错不进 radix。
 - 满块写回频率 N(满一个就写 vs 攒几个)留 P7。尾块只在请求结束写一次,无增量式。
 
@@ -144,7 +144,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 
 > 按 CLAUDE.md 强制查阅规则。
 
-- **vLLM**:`_allocate_kv_cache`(固定 `torch.zeros` 基址)+ `bind_kv_cache`(烧 data_ptr 进 kernel)+ `BlockTables`(固定地址 input_block_tables + 每步 gather)+ `CudaGraphManager.capture/run_fullgraph` + `resolve_cigraph_mode_and_sizes`(graph 降级条件)+ `KVConnectorBase_V1`(存算分离接入点)+ `ExternalBlockHash`(只对完整 block 算哈希)。见 [`../research/vllm/compute.md`](../research/vllm/compute.md)。
+- **vLLM**:`_allocate_kv_cache`(固定 `torch.zeros` 基址)+ `bind_kv_cache`(烧 data_ptr 进 kernel)+ `BlockTables`(固定地址 input_block_tables + 每步 gather)+ `CudaGraphManager.capture/run_fullgraph` + `CUDAGraphMode`(`vllm/config.py`,graph 模式枚举)+ `_check_and_update_cudagraph_mode`(`gpu_model_runner.py`,graph 降级条件)+ `KVConnectorBase_V1`(存算分离接入点)+ `ExternalBlockHash`(只对完整 block 算哈希)。见 [`../research/vllm/compute.md`](../research/vllm/compute.md)。
 - **SGLang**:`memory_pool.py::MHATokenToKVPool`(L1 固定 arena + post-capture VA 原地 back,我们不取物理超订语义)+ `radix_cache.py::TreeNode`(节点记三层位置)+ `hiradix_cache.py::match_prefix`(L1前缀/L2后缀切分)+ `pool_host/mha.py::get_page_buffer_meta`(page-first 零拷贝裸指针)+ `cache_controller.py::LayerDoneCounter`/`LayerLoadingEvent`(三缓冲,我们不照搬)+ `transfer.cu::transfer_kv_per_layer_pf_lf`(layer-first↔page-first 转换核,池侧照用)。见 [`../research/sglang/{overview,hicache}.md`](../research/sglang/)。
 - **关键差异**:vLLM/SGLang 引擎既拥有 KV 又发起传输(engine-to-engine connector 握手,知道地址);我们 engine-to-engine 控制链切断,池 agent 发起,引擎降到 publish/pull+fence、不知地址、不组装 block table。wire 效率不变(直连 RDMA),变的是控制权归属——"彻底存算分离"在传输/入图面的落点。
 

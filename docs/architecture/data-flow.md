@@ -148,7 +148,7 @@ agent 多轮场景：第 N 轮 decode 产出的延伸 KV 是**第 N+1 轮 prefil
 
 一次请求的 KV 从产生到消亡（详见 [`kv-cache-pool.md`](kv-cache-pool.md) "写回与生命周期"）：
 
-- **满块路**：block 填满 → 池算哈希 → 注册 radix → 写回 L2（NVMe，F4 恢复点）。请求进行中就可能触发（decode 跨 block 边界）。满块写回频率 N 留 P7。
+- **满块路**：block 填满 → 池算哈希 → 注册 radix → 写回 L2（NVMe，F4 恢复点）。请求进行中就可能触发（decode 跨 block 边界）。注册后到 L2 durable 之间持 writeback ref 不可驱逐，请求结束是写回屏障（见 [`consistency.md`](consistency.md) §3）。满块写回频率 N 留 P7。
 - **尾块路**：请求结束时未满的尾块 → 请求结束点写一次（写全部已填 token，重放整块覆盖），纯容错，不进 radix。
 
 引擎不感知 block 满不满（block 对引擎纯寻址单位）——满块判断、哈希、radix 注册、写回全归池。
@@ -167,10 +167,10 @@ agent 多轮场景：第 N 轮 decode 产出的延伸 KV 是**第 N+1 轮 prefil
 - 存储池检测 → 把该 sequence 路由到新节点 → 池把已有 KV（L2 F4 恢复点）放置到新节点 HBM → 续推。
 - ref 从原请求**转移**到新请求（避免被冷热淘汰，见 [`kv-cache-pool.md`](kv-cache-pool.md) "引用计数与驱逐"）。
 - 原节点 HBM 副本随销毁失效（本就是易失副本，非私有状态）。
-- 丢失的仅是最后一次写回 L2 之后的少量 token（NPU/进程级故障，本机 NVMe 仍存活）。
+- 丢失的仅是最后一次写回 L2 之后的少量 token（NPU/进程级故障，NVMe 不波及、block 无论本机远端均存活）。
 
 **持久语义与风险窗口**（见 [`kv-cache-pool.md`](kv-cache-pool.md) "故障恢复"）：
-- L2(NVMe) = F4 恢复点（NPU 故障与本机 NVMe 物理解耦）；L3 = SSOT 永久权威（抗整机级/池级失败）。
+- L2(NVMe) = F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关）；L3 = SSOT 永久权威（抗整机级/池级失败）。
 - 风险窗口分两级：NPU/进程级故障（常见）丢"最后一次写回 L2 之后的少量 token"；整机级故障（罕见）退 L3 SSOT，丢"自上次冷下沉 L3 之后的增量"，冷下沉 L3 频率由冷热生命周期决定，非每步。
 
 **过载不在此分支**：过载 shedding 归 gateway（①），不计推理系统失败率；推理系统只上报信号（队列长度/in-flight/剩余容量）供 gateway 决策。
