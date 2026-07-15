@@ -34,14 +34,18 @@ KVBlockID = (model_id, layer_idx, block_hash)
 
 > 池按不透明字节块存,r-type 与 t-type 在存储层共享同一套 block/分层/传输机制;区别仅是 block 内布局(逐 token KV vs 紧凑 state 快照),由元数据声明。相对 SGLang multi-pool 物理分池,我们把类型差异收敛到 **L0 存储形态 + block 内布局**,而非物理分池。
 
-### hidden states(MTP/EAGLE 投机的暂存物)
+### draft 中间态(投机的暂存物)
 
-投机解码的 drafter(MTP/EAGLE 一类)需 target 模型**最后 `num_mtp_layers` 个 token 的 hidden states**作自回归输入。这部分是 target 逐层产出的中间态:
+投机解码的 drafter 需一份 target 产出的**中间态**,形态按方案类别不同:
 
-- **组织**:按 token 组织、每步滚动保留最近 `num_mtp_layers` 个 token;采用 **r-type 的紧凑存储形态**(per-request、不随序列线性堆积)。
+- **自回归类(MTP/EAGLE/EAGLE3)**:target **最后 `num_mtp_layers` 个 token 的 hidden states**(自回归输入)。
+- **diffusion 类(DFLASH/DSPARK)**:draft 侧窗口/block 状态(DFLASH target-token 滑窗、DSPARK gamma 块 + Markov 状态),由 post drafter 从 target 输出准备。
+
+两类统一处理:
+- **组织**:按 token / block 组织,每步滚动保留;采用 **r-type 的紧凑存储形态**(per-request、不随序列线性堆积)。
 - **层级**:仅 L0(HBM)暂存,每步滚动覆盖;**不进 radix、不落 L1+ 持久**(跨请求无复用价值,故不涉及全前缀复用)。
-- **与 KV 的区别**:同 step 产出,但 KV 写回池(容错 + 前缀生长),hidden states 用完即滚,生命周期独立。
-- 详见 [`compute-layer.md`](compute-layer.md) "投机解码"节。
+- **与 KV 的区别**:同 step 产出,但 KV 写回池(容错 + 前缀生长),draft 中间态用完即滚,生命周期独立。
+- 详见 [`compute-layer.md`](compute-layer.md) "投机解码"节(post/pre drafter 二分)。
 
 ### 前缀树索引
 
