@@ -26,6 +26,8 @@ KVBlockID = (model_id, layer_idx, block_hash)
 
 **模型无关**:`model_id` 是寻址命名空间,Pool 不解释张量布局(层数、头维、dtype),按不透明字节块存取。接入新模型只需注册 `model_id`,无需新建池。
 
+**多租户预留(不实现)**:当前寻址 `KVBlockID = (model_id, layer_idx, block_hash)` **不含租户维度**——同一 `model_id` 内 KV 全局共享复用,不做租户间私有隔离(多租户归外部控制面,见 [`../features/features.md`](../features/features.md) F8)。未来若需多租户,可加 `scope` 维度(`public` / `tenant:<t>`,靠 scope 过滤隔离、公共只可平台写),当前不实现、不入寻址。
+
 ### t-type / r-type:复用条件一致,区别在 HBM 存储形态
 
 两类的**复用条件相同**:都需**命中全部前缀**才能复用(从序列起点的连续前缀 KV/state 必须在场)。区别**仅在 HBM(L0)存储形态**——r-type 用紧凑表示(滑动窗口最近 W token / Mamba 定长 state)替代逐 token 完整 KV,降低 HBM 占用。HBM 之上的区分**不带入下层**:
@@ -259,7 +261,7 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 
 ## 开放问题
 
-- 内容寻址哈希碰撞与安全(是否加盐区分租户)。
+- 内容寻址哈希碰撞与安全(block_hash 抗碰撞性;多租户场景下的加盐区分属 F8 远期预留,当前不实现)。
 - RDMA 不可用时退化 TCP,带宽-延迟模型如何变化。
 - 多模型配额公平性:高负载模型挤占他人时的仲裁与抢占回收代价。
 - GC/碎片整理与数据面竞争的隔离(带宽预留 vs 优先级抢占)。

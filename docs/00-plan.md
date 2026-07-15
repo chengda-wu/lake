@@ -34,7 +34,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - [x] F11 多模型存储池与生命周期管理（长期存续/模型无关/配额扩缩/GC/碎片整理）
   - [x] F6 投机解码（draft / target 分离）
   - [x] F7 秒级弹性扩缩容
-  - [x] F8 多租户隔离与共享前缀
+  - [x] F8 多租户隔离与共享前缀（Could，远期预留——lake 不做,归外部;留 KVBlockID scope 维度预留）
   - [x] F9 模型版本/热更新（Could）
   - [x] F10 跨机房（Could）
 - [x] [`slo.md`](features/slo.md) SLO 与衡量指标（TTFT / ITL P50/P99 / 吞吐 / 命中率 / 冷启动时延，初版 draft）
@@ -74,6 +74,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - **持久语义**：L3 = F4 恢复点（抗 worker 失败，副本 RAM）；L4 = SSOT 永久权威（抗池级失败，L4 缺失才视为 block 不存在）。风险窗口：worker 与其 L3 副本同时失败且未落 L4 则丢尾巴（= 丢失最后一次写回 L3 之后的少量 token）。
   - **ref 分两级(B1 闭环)**：原"池单点强一致计数"修正为——**本地引用计数**(池本地 agent,请求级,同 vLLM `free_blocks`/sglang `inc_lock_ref` 机制,归池 agent 而非引擎)+ **全局引用汇总**(控制面,最终一致,供 tier up/down 与 GC,不进 hot step loop)。ref 归 0 ≠ 删内存,而是变可驱逐候选(对齐 vLLM `free_block_queue`/sglang `evictable_size_`,内存仍在、可命中复用/作传输源);归 0 不摘位置视图(未驱逐覆写则仍可命中/直传,D-direct 与 D→P 子情况 A 的命中来源);驱逐覆写才摘视图,L3/L4 有副本可回填。step 期间冻结是引用计数自然结果,无需额外 fence。L0/L1 是副本→驱逐 L0 不影响别节点(读各自副本),故全局 ref 只用于 tier/GC,不用于阻止 L0 副本驱逐。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "引用计数与驱逐"。
   - **D→P 流 + 双网络路径 + DualPath 原生支持（本轮新增）**：agent 多轮里上一轮 decode 产出的延伸 KV 是下一轮 prefill 的输入前缀,不必绕一跳存储,可直接由 decode 侧喂回 prefill——这是与 P→D(本次)、D→池(未来)并列的**第三条方向 D→P(服务下一轮)**,即 DualPath(arXiv:2602.21548v2,非 submodule)storage-to-decode 路径的**原生支持**。**双网络隔离**(compute network 跑 L0→L0 RDMA + GPU collective / storage network 跑 L2/L3/L4 访问)是 DualPath 的架构前提,两类带宽是**池的资源**(池统一分配,非引擎"借用",比 DualPath 更彻底)。D→P 选路按"所需 KV 是否已在 D 的 L0"分子情况:**A 零存储读取**(KV 已在 D 的 HBM → D L0 经 compute network 直传 P,连 storage network 都不占,DualPath 不强调,我们独有) / **B**(需从 L3 加载 → 池可选 D 侧加载+compute network 回传,借 D 闲置 storage 带宽绕开 P 侧瓶颈) / 传统 P 侧自拉;由池按 NIC 带宽视图决策,collective 突发窗避让留 P7。engine-to-engine 控制链仍切断(池 agent 发起,引擎不知对方存在)。详见 [`architecture/data-flow.md`](architecture/data-flow.md) §3.4、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "双网络路径"、[`research/dualpath.md`](research/dualpath.md)。
+  - **多租户隔离(B2 闭环)**：**lake 不做多租户**(与 goals.md "不做多租户隔离"一致),F8 降级到 Could(远期预留)。当前 `KVBlockID=(model_id, layer, block_hash)` 不含租户维度,同 model_id 内 KV 全局共享复用;多租户隔离归外部控制面/部署切分(按 model_id 命名空间或独立集群)。未来若需,可加 `scope` 维度(public/tenant,靠 scope 过滤隔离、公共只可平台写)——仅预留,不入当前寻址。消了 goals(不做)↔ F8/nonfunctional(要做)的矛盾。详见 [`features/features.md`](features/features.md) F8、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "Block 寻址"预留。
 - **技术选型已定**（P2 落地）：存储 Rust / 控制 Go / 计算 Python+Triton；元数据 etcd；SSOT 用 S3/MinIO；跨语言 gRPC+Protobuf（大块 KV 走 RDMA 旁路）。3rdparty 四个 submodule（sglang/lmcache/mooncake/vllm）作实现参考。
 - **KV 类型 t-type / r-type + 投机解码机制（本轮新增）**：
   - **KV 类型**：按 HBM 存储形态分 t-type(逐 token 完整 KV,paged block,full attention/MLA)与 r-type(紧凑表示——窗口最近 W token / Mamba 定长 state,sliding window/Mamba/卷积)。**两类复用条件一致**:都需命中全部前缀才能复用;区别**仅在 HBM(L0)存储形态**,目的是降低 r-type 的 HBM 占用。HBM 两类并存、分 arena 管理(r-type 另设固定状态 arena 入图);L1–L4 统一按 block(128 token)组织(两类复用条件一致、不区分类型),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)——相对 SGLang multi-pool 物理分池,我们把类型差异收敛到 L0 存储形态 + block 内布局,而非物理分池。详见 [`architecture/storage-layer.md`](architecture/storage-layer.md) "KV 类型"节、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "t-type / r-type"。
@@ -103,7 +104,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 ### P1 下一步（收尾，按此顺序）
 
 1. ~~`architecture/data-flow.md`~~ ✅（done 2026-07-15）：请求生命周期详图 + 模式选择决策树 mermaid + 三模式执行段 + F4 分支；清掉 [`scheduling.md`](architecture/scheduling.md) ⚠️ 固定 P→D 残留（注解改为指向 data-flow）。
-2. **`architecture/consistency.md`**（下一步）：一致性与故障模型。形式化本轮 B2 的持久语义（L3 F4 恢复点 / L4 SSOT）、ref 池权威、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点。
+2. **`architecture/consistency.md`**（下一步）：一致性与故障模型。形式化持久语义（L3 F4 恢复点 / L4 SSOT）、ref 分两级（B1 闭环）、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点。
 3. **`architecture/topology.md`**：部署拓扑（单/跨机房、网络 fabric 假设、RDMA 可用性退化）。承接本轮多处"留 topology.md"（GPUDirect RDMA 依赖 PCIe root、TCP 退化带宽-延迟模型）。
 
 > P1 三篇补齐后满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案），再转 P2（proto 起草）。
