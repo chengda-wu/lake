@@ -80,3 +80,4 @@ Request → Gateway
 - KV 传输带宽与 prefill/decode 计算时间的比值,在什么范围内 P/D 物理分离才划算?
 - KV Pool 分片粒度(per-layer / per-block / per-sequence)如何影响传输与复用?(已定 per-block,粒度 128 token,见 [`kv-cache-pool.md`](kv-cache-pool.md))
 - 投机解码 draft model 放哪一层?→ 已定:默认与 decode(target)共置(sglang 式),独立 Draft 池可选,见 [`compute-layer.md`](compute-layer.md) "投机解码"节。
+- **请求在途迁移(换 DP/换节点)归存算分离的开放性**:未来特性;KV(target + drafter)归池权威使迁移代价低,抢占重算式下框架无需特别预留(见 [`scheduling.md`](scheduling.md) "DP 间在途再均衡")。控制态交接、seed 重建、抖动控制等细节待特性立项。

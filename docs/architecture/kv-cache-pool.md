@@ -34,18 +34,18 @@ KVBlockID = (model_id, layer_idx, block_hash)
 
 > 池按不透明字节块存,r-type 与 t-type 在存储层共享同一套 block/分层/传输机制;区别仅是 block 内布局(逐 token KV vs 紧凑 state 快照),由元数据声明。相对 SGLang multi-pool 物理分池,我们把类型差异收敛到 **L0 存储形态 + block 内布局**,而非物理分池。
 
-### draft 中间态(投机的暂存物)
+### drafter 的 KV 与 seed 状态
 
-投机解码的 drafter 需一份 target 产出的**中间态**,形态按方案类别不同:
+投机解码的暂存物分**两类**,管理不同(此前误记"draft 一律 L0-only 不进池",已纠正):
 
-- **自回归类(MTP/EAGLE/EAGLE3)**:target **最后 `num_mtp_layers` 个 token 的 hidden states**(自回归输入)。
-- **diffusion 类(DFLASH/DSPARK)**:draft 侧窗口/block 状态(DFLASH target-token 滑窗、DSPARK gamma 块 + Markov 状态),由 drafter 的 `post_forward` 从 target 输出准备。
+**1. drafter 自己的 KV(draft head/model 的 KV)——与 target KV 同款进池**
+- 按 token/block 组织、进存储池统一管理(放置/迁移/生命周期),**跨请求前缀命中即可复用**、随请求迁移;复用条件与 target KV 一致(全前缀命中)。t-type/r-type 同存储层机制对 drafter KV 一样适用。
+- 参考 SGLang `hicache_storage.py::PoolName.DRAFT`——drafter KV 作与 `PoolName.KV` 并列的一等 pool(跨请求存取/预取)。命中后残差区间由 draft-extend 前向补齐。
 
-两类统一处理:
-- **组织**:按 token / block 组织,每步滚动保留;采用 **r-type 的紧凑存储形态**(per-request、不随序列线性堆积)。
-- **层级**:仅 L0(HBM)暂存,每步滚动覆盖;**不进 radix、不落 L1+ 持久**(跨请求无复用价值,故不涉及全前缀复用)。
-- **与 KV 的区别**:同 step 产出,但 KV 写回池(容错 + 前缀生长),draft 中间态用完即滚,生命周期独立。
-- 详见 [`compute-layer.md`](compute-layer.md) "投机解码"节(drafter `post_forward`/`pre_forward` 二阶段)。
+**2. seed 状态(自回归的 seed hidden / diffusion 的窗口·block 状态)——请求内滚动窗口,是否跨请求缓存待定**
+- 自回归类:target **最后 `num_mtp_layers` 个 token 的 hidden states**;diffusion 类:draft 侧窗口/block 状态(DFLASH 滑窗、DSPARK gamma 块 + Markov 状态),均由 drafter `post_forward` 从 target 输出准备。
+- **是否进池跨请求复用 = 待定,先按 SGLang 重算式推演**:不进 radix、走请求内 `spec_info`,命中/迁移后由 draft-extend(`post_forward`)重建 seed。备选:按 token 存 hidden 进池换跨请求复用(省重算、费存储)。**记为遗留问题**(见 [`compute-layer.md`](compute-layer.md) "开放问题")。
+- 详见 [`compute-layer.md`](compute-layer.md) "投机解码"节(drafter `post_forward`/`pre_forward` 二阶段、"drafter cache 与 seed hidden states")。
 
 ### 前缀树索引
 
