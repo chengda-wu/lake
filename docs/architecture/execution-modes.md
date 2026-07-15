@@ -70,7 +70,7 @@ A prefill → 产出 KV 写存储池(L0 即本机)→ 存储池放置到 B 的 H
 B 在 decode 中延伸了前缀(生成新 token 的 KV)→ 这段延伸 KV 回传存储池 → radix 生长 → 未来请求(如下一轮 agent)查池时命中更长前缀。
 
 ```
-B decode 生成延伸 KV → 异步回传存储池(落 L3 + 更新 radix)
+B decode 生成延伸 KV → 异步回传存储池(落 L2 + 更新 radix)
                               ↓
                     前缀树生长,下次命中边界前推
 ```

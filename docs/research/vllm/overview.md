@@ -12,7 +12,7 @@ vLLM 是**高性能 LLM 推理引擎**:以 PagedAttention 块状管理 GPU KV ca
 
 | vLLM 概念 | 本系统对应 | 关系 |
 |-----------|-----------|------|
-| `KVCacheManager` + `BlockPool`(进程内 paged HBM) | 存储池统一管理 L0–L4,HBM 是池的物理载体 | **vLLM 的 KV 管理是进程私有;我们归存储池权威** |
+| `KVCacheManager` + `BlockPool`(进程内 paged HBM) | 存储池统一管理 L0–L3,HBM 是池的物理载体 | **vLLM 的 KV 管理是进程私有;我们归存储池权威** |
 | APC(内容寻址 hash + LRU) | radix tree + 位置视图(存储池强一致) | **vLLM 无 radix、无位置视图、单实例;我们跨节点强一致** |
 | `Scheduler`(prefill/decode 组 batch) | 控制面 Router/调度器(Go) | **vLLM 调度器在引擎进程内、单实例视角;我们控制面独立、集群视角** |
 | `KVConnectorBase_V1`(外部 KV 插件) | 计算层 worker ↔ 存储池 client | **直接参考:vLLM 的 connector 抽象正是 worker 接入外部存储池的接口形态** |
@@ -134,7 +134,7 @@ AsyncLLM(引擎入口)
 
 | 维度 | vLLM | 本系统 |
 |------|------|--------|
-| KV 归属 | 进程私有(单实例 HBM) | 存储池统一权威 L0–L4 |
+| KV 归属 | 进程私有(单实例 HBM) | 存储池统一权威 L0–L3 |
 | 前缀复用 | APC hash 顺序匹配,单实例 | radix + 位置视图,跨节点强一致 |
 | 本地命中/D-direct | 无概念 | 前缀 KV 放置在某节点 HBM → D-direct |
 | 调度器 | 引擎进程内,单实例 | 控制面独立(Go),集群视角 |

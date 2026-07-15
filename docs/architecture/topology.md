@@ -11,7 +11,7 @@
 | 网络 | 方向 | 承载 | 带宽特征 |
 |------|------|------|----------|
 | **compute network (CNIC, 东西向)** | GPU↔GPU | GPU collective 通信 + L0→L0 RDMA 数据面（PD 正向、D→P 子情况 A） | 大（如 8×400Gbps）、间歇突发（集合操作亚毫秒级） |
-| **storage network (SNIC, 南北向)** | 节点↔存储 | 访问 L2/L3/L4（NVMe / 远端内存池 / 对象存储） | 相对小、持续 |
+| **storage network (SNIC, 南北向)** | 节点↔存储 | 访问 L1/L2/L3（DRAM 池 / NVMe 池 / 对象存储） | 相对小、持续 |
 
 **为何物理隔离**：KV 传输借 CNIC 大带宽回传（D→P 子情况 B），若与 SNIC 共线会挤占 latency-critical 的模型 collective 通信。DualPath 的核心就是两类带宽隔离 + 在 CNIC 空隙插入 KV 传输。两类带宽是**池的资源**（池按 NIC 带宽视图选路，非实例"借用"——比 DualPath 更彻底，见 [`../research/dualpath.md`](../research/dualpath.md) "关键差异"）。
 
@@ -51,30 +51,30 @@
 
 ```
 ┌────────── 单机房 ──────────┐
-│  计算节点池(CNIC+SNIC, RDMA) │  L0/L1 物理载体在此
-│  KV Node 池(RDMA RAM+NVMe)  │  L2/L3 物理载体在此
-│  etcd + 对象存储(L4)        │  控制面 + SSOT
+│  计算节点池(CNIC+SNIC, RDMA) │  L0 HBM / L1 本机 DRAM 物理载体在此
+│  KV Node 池(RDMA DRAM+NVMe) │  L1 远端 DRAM / L2 NVMe 池物理载体在此
+│  etcd + 对象存储(L3)        │  控制面 + SSOT
 └────────────────────────────┘
 ```
 
-- L0→L0 直传、L3 访问都在同机房 RDMA 域内（μs 级），SLO 预算达标。
-- L4（对象存储）同机房或就近机房，冷下沉延迟可控。
+- L0→L0 直传、L1/L2 池访问都在同机房 RDMA 域内（μs 级），SLO 预算达标。
+- L3（对象存储）同机房或就近机房，冷下沉延迟可控。
 - **主形态**，所有执行模式（PD 分离 / 混部 / D-direct）在此域内最优。
 
 ### 跨机房（容灾 / 地域分布，远期）
 
 跨机房带来两类问题：
 
-1. **RDMA 域不连续**：跨机房通常无 RDMA（或带宽/延迟退化），L0→L0 直传、L3 同域访问不能跨机房直连。
-2. **故障域扩大**：单机房整体失败需另一机房接管（与 [`consistency.md`](consistency.md) §4 L4 SSOT 抗池级失败衔接）。
+1. **RDMA 域不连续**：跨机房通常无 RDMA（或带宽/延迟退化），L0→L0 直传、L1/L2 池同域访问不能跨机房直连。
+2. **故障域扩大**：单机房整体失败需另一机房接管（与 [`consistency.md`](consistency.md) §4 L3 SSOT 抗整机级/池级失败衔接）。
 
 **跨机房策略（远期，不实现）**：
-- **执行不跨机房**：请求路由到本机房节点完成，KV 在本机房池内流转（L0–L3 本机房闭环）。
-- **L4 跨机房副本**：对象存储跨机房复制（SSOT 跨机房容灾），单机房失败后另一机房从 L4 重建。
-- **前缀复用跨机房**：若两机房跑同 model_id，热前缀的 KV 可经 L4 异步同步（冷路径、最终一致），不追求跨机房 L3 强一致。
-- **控制面**：etcd 跨机房部署（Raft 跨机房多数派），或各机房独立 etcd + L4 间接同步（弱一致跨机房）。
+- **执行不跨机房**：请求路由到本机房节点完成，KV 在本机房池内流转（L0–L2 本机房闭环）。
+- **L3 跨机房副本**：对象存储跨机房复制（SSOT 跨机房容灾），单机房失败后另一机房从 L3 重建。
+- **前缀复用跨机房**：若两机房跑同 model_id，热前缀的 KV 可经 L3 异步同步（冷路径、最终一致），不追求跨机房 L1/L2 强一致。
+- **控制面**：etcd 跨机房部署（Raft 跨机房多数派），或各机房独立 etcd + L3 间接同步（弱一致跨机房）。
 
-**当前结论**：跨机房为远期容灾形态，P1 不细化。单机房是 SLO 兑现的基线；跨机房以"执行本机房闭环 + L4 跨机房容灾"为原则，不在跨机房链路上跑 hot path。
+**当前结论**：跨机房为远期容灾形态，P1 不细化。单机房是 SLO 兑现的基线；跨机房以"执行本机房闭环 + L3 跨机房容灾"为原则，不在跨机房链路上跑 hot path。
 
 ## 5. 故障域边界
 
@@ -82,11 +82,12 @@
 
 | 故障 | 范围 | 恢复 | 见 |
 |------|------|------|-----|
-| 单 worker 崩溃 | 该节点 L0/L1 副本 | L3 F4 恢复点续推 | [`consistency.md`](consistency.md) §5 |
+| 单 worker 崩溃（NPU/进程级） | 该节点 L0/L1 副本 | L2 F4 恢复点续推（本机 NVMe 通常仍在） | [`consistency.md`](consistency.md) §5 |
 | 单 NIC 故障 | 该 NIC 传输 | 切备选 NIC 重传（引擎内） | §3 |
-| 单 KV Node 失败 | 该 Node 的 L2/L3 副本 | 其他 KV Node 的 L3 副本 + L4 回填 | [`consistency.md`](consistency.md) §4 |
+| 单 KV Node 失败 | 该 Node 的 L1/L2 副本 | 其他 KV Node 的 L1/L2 副本 + L3 回填 | [`consistency.md`](consistency.md) §4 |
 | 池级失败（控制面 etcd） | 位置视图 | etcd Raft 多数派恢复 | §4、[`consistency.md`](consistency.md) §5 |
-| 单机房失败 | 该机房全部 | 另一机房从 L4 SSOT 重建（远期） | §4 |
+| 整机级失败（连本机 NVMe 一起没） | 该节点 L0–L2 | 退 L3（SSOT）续推 / 重算 | [`consistency.md`](consistency.md) §4 |
+| 单机房失败 | 该机房全部 | 另一机房从 L3 SSOT 重建（远期） | §4 |
 
 **RDMA 退化不计故障**：TCP 退化是性能降级非不可用，请求照常执行（SLO 放宽），不触发 F4。
 
@@ -95,9 +96,9 @@
 | 关注点 | 单机房 | 跨机房(远期) |
 |--------|--------|--------------|
 | L0→L0 直传 | CNIC RDMA（μs 级） | 不跨机房（本机房闭环） |
-| L3 访问 | 同域 RDMA RAM | 本机房池 |
-| L4 SSOT | 就近机房对象存储 | 跨机房副本容灾 |
-| 控制面 etcd | 单机房 Raft | 跨机房 Raft 或独立 + L4 同步 |
+| L1/L2 池访问 | 同域 RDMA DRAM/NVMe | 本机房池 |
+| L3 SSOT | 就近机房对象存储 | 跨机房副本容灾 |
+| 控制面 etcd | 单机房 Raft | 跨机房 Raft 或独立 + L3 同步 |
 | SLO 预算 | 达标 | 跨机房链路不跑 hot path |
 
 ## 7. 开放问题
@@ -105,4 +106,4 @@
 - GPUDirect RDMA 的 PCIe root 亲和检测与 A/B 级自动判定（运行时探测 vs 部署声明）待 P7。
 - TCP 退化（C 级）下的带宽-延迟量化模型与 SLO 放宽系数待 P7（对接 [`../features/slo.md`](../features/slo.md)）。
 - 多 NIC 聚合的 Slice 分配策略（random vs roundrobin vs 按负载）与 CNIC 突发窗避让待 P7（见 [`data-flow.md`](data-flow.md) §3.4 collective 突发窗）。
-- 跨机房 L4 副本的同步策略（强一致 RPO=0 vs 异步 RPO>0）与跨机房 etcd 拓扑待容灾特性立项。
+- 跨机房 L3 副本的同步策略（强一致 RPO=0 vs 异步 RPO>0）与跨机房 etcd 拓扑待容灾特性立项。

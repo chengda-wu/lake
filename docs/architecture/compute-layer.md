@@ -29,7 +29,7 @@ Idle → Boot (镜像拉起) → Warm (向存储池申请放置) → Ready → S
 
 - **Warm**：向存储池申请把权重放置到本机 L1/L0、热点前缀 KV 放置到 HBM，缩短 Ready 时延。
 - **Drain**：停止接收新请求，完成 in-flight；本机 HBM 放置归还存储池（由其保留/下沉/驱逐）。
-- **Terminate**：可安全销毁。节点无私有状态——HBM/RAM 中的 KV 本就是存储池的放置副本，销毁仅损失未落 L3+ 的最近增量窗口（F4 续推）。
+- **Terminate**：可安全销毁。节点无私有状态——HBM/RAM 中的 KV 本就是存储池的放置副本，销毁仅损失未落 L2（NVMe F4 恢复点）的最近增量窗口（F4 续推）。
 
 ## 冷启动压缩
 
@@ -62,7 +62,7 @@ Idle → Boot (镜像拉起) → Warm (向存储池申请放置) → Ready → S
 
 - HBM 两类并存,引擎按类型分 arena / 管理器(t-type block arena + r-type 状态 arena):参考 vLLM `SingleTypeKVCacheManager × N` + `KVCacheSpec`(`FullAttentionSpec`/`MLAAttentionSpec`/`MambaSpec`);SGLang multi-pool `PoolName`(Mamba/SWA/DSA/Draft)+ `PoolHitPolicy`。**区分的唯一目的是减少 r-type 的 HBM 占用**。
 - **入图影响(Q1)**:t-type 走固定 KV arena + 固定地址 block table(已定);r-type 另设**固定状态 arena**(窗口/状态槽基址入图),block table 语义不适用——按 request 槽寻址。两类 arena 独立 capture,graph 分别 replay。
-- **下层不区分**:L1–L4 按 128-token block 统一组织,两类复用条件本就一致(全前缀命中),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)。
+- **下层不区分**:L1–L3 按 128-token block 统一组织,两类复用条件本就一致(全前缀命中),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)。
 
 ### r-type SWA 前缀复用的尾段重算优化(idea,暂不实现)
 
@@ -117,7 +117,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
                  → 给 write set 分配空闲 slot(满则驱逐冷块)→ 冻结被引用 slot(ref>0)
                  → 组装完整 block table → 发 ready(fence)
 引擎侧(step 中): 拷 block table 进固定地址 tensor → replay graph → 新 token KV 写进 write slots
-池侧(step 后):   引擎发 done(compute fence)→ 池解冻 → 完整 block 写回 L3 + 注册 radix
+池侧(step 后):   引擎发 done(compute fence)→ 池解冻 → 完整 block 写回 L2(NVMe) + 注册 radix
                  → 驱逐冷块 → 回收已结束请求 slot
 ```
 
@@ -132,7 +132,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 **(1) block 对引擎纯寻址单位**。引擎的 KV 操作只剩三原语:读 ready block / 写 token 进 slot / publish 产出。block table 的索引填充都归池(本地 agent),引擎只 replay 读。引擎连"block 满没满"都不感知,只感知"写第 i 个 token 进某 slot"——满块判断、哈希、radix 注册全归池。block 是引擎的寻址单位,不是管理单位。
 
 **(2) 写回:满块路 + 尾块路**(详见 [`kv-cache-pool.md`](kv-cache-pool.md) "写回与生命周期"):
-- 满块路:block 填满 → 池算哈希 → 注册 radix → 写回 L3(F4 恢复点,抗 worker 失败)。请求进行中就可能触发。
+- 满块路:block 填满 → 池算哈希 → 注册 radix → 写回 L2(NVMe,F4 恢复点,抗 worker 失败)。请求进行中就可能触发。
 - 尾块路:请求结束时未满的尾块,在请求结束点写回一次(写全部已填 token,重放整块覆盖),纯容错不进 radix。
 - 满块写回频率 N(满一个就写 vs 攒几个)留 P7。尾块只在请求结束写一次,无增量式。
 

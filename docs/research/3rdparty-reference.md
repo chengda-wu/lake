@@ -22,7 +22,7 @@
 
 ---
 
-## 1. SGLang HiCache → 我们的 L0-L4 分层 + 放置 + 冷热
+## 1. SGLang HiCache → 我们的 L0-L3 分层 + 放置 + 冷热
 
 源码入口:`3rdparty/sglang/docs/advanced_features/hicache_design.md`、`python/sglang/srt/mem_cache/`。
 
@@ -36,11 +36,11 @@
 | **page-first / page_first_direct 布局** | block 粒度 + 分块流水线 | 见 kv-cache-pool "分块流水线"。page_first_direct 让同层同 page 连续,可零拷贝传 L3——我们 Rust transfer 层可照搬 |
 | **计算-传输重叠**:算 layer N 时传 layer N+1 | 分块流水线(page_first_direct 子块)与 prefill 层数对齐 | **部分对应**:SGLang 是引擎驱动(每层 `wait_event`,破坏 graph);我们只取**生产侧层级重叠**(池 agent 逐层 publish,引擎无感),拒绝引擎驱动的消费侧 intra-step 重叠。见 kv-cache-pool "无引擎驱动的 intra-step 重叠" + "分块流水线" |
 | **MLA write-back 去重**:多 TP rank 只一个 rank 回写 | (未来 TP 支持) | 留作 compute-layer 细节参考 |
-| **统一 `HiCacheStorage(ABC)` 接口** + 多后端(file/mooncake/hf3fs/nixl/aibrix) | 存储池后端抽象 | 我们存储池统一管理 L0-L4,后端可抽象;Mooncake/NIXL 等可作为 L3 物理实现 |
+| **统一 `HiCacheStorage(ABC)` 接口** + 多后端(file/mooncake/hf3fs/nixl/aibrix) | 存储池后端抽象 | 我们存储池统一管理 L0-L3,后端可抽象;Mooncake/NIXL 等可作为 L1 DRAM 池(远端载体)的物理实现 |
 
 ### 关键差异(我们更彻底)
 
-- **HiCache 的 L1/L2 私有于推理实例,L3 才共享**;我们 **L0-L4 全归存储池统一管理,L1/L2 也是池的物理载体而非 worker 私有**。计算节点不拥有任何内存,"本地命中"是存储池放置决策的结果,不是实例私有缓存。这是我们与 HiCache 的根本分野——HiCache 仍是"实例私有分层 + 共享 L3",我们是"全层共享、放置归一"。
+- **HiCache 的 L1/L2 私有于推理实例,L3 才共享**;我们 **L0-L3 全归存储池统一管理,L1/L2 也是池的物理载体而非 worker 私有**。计算节点不拥有任何内存,"本地命中"是存储池放置决策的结果,不是实例私有缓存。这是我们与 HiCache 的根本分野——HiCache 仍是"实例私有分层 + 共享 L3",我们是"全层共享、放置归一"。
 - HiCache 不持续同步 L3 元数据,访问时实时查后端;我们 radix + 位置视图由控制面(etcd)强一致维护,Router 一跳拿前缀复用 + 本地命中(守 5ms 预算)。
 - HiCache 无"反向回传增强未来前缀"的显式机制(它的 write-back 是为跨实例共享,非为多轮前缀生长);我们把它作为 agent 多轮的核心(见 execution-modes 时序二反向)。
 
@@ -55,7 +55,7 @@
 | Mooncake 组件 | 我们对应 | 说明 |
 |---------------|----------|------|
 | **mooncake-transfer-engine**:RDMA + 多 NIC 零拷贝传输 | Transfer Bus(RDMA 数据面,TCP 退化) | 见 overview "数据面:KV 跨节点传输"。直接参考其传输 API 与零拷贝设计 |
-| **mooncake-store**:KVCache 全局池、按 segment 寻址 | KV Pool(L3 远端内存池) | 见 kv-cache-pool "物理布局"。Mooncake 的 KVCache store 是我们 L3 的工业级原型 |
+| **mooncake-store**:KVCache 全局池、按 segment 寻址 | KV Pool(L1 DRAM 池远端载体) | 见 kv-cache-pool "物理布局"。Mooncake 的 KVCache store 是我们 L1 DRAM 池(远端)的工业级原型 |
 | **mooncake-p2p-store**:P2P 存储拓扑 | KV Node 分片 + 一致性哈希 | 见 kv-cache-pool "空间分配与扩缩容"。参考其节点组织与扩缩 |
 | **KVCache-centric disaggregation**(prefill/decode 分离 + KV 池) | 整体架构立地 | Mooncake 是我们"以 KV 为中心"的直接灵感来源(见 overview)。但 Mooncake 仍以实例为中心做 P/D 分离,我们进一步把 HBM 也剥离 |
 | **PD disaggregation via TransferEngine** | 时序二正向(P→D 跨节点传输) | 见 execution-modes。Mooncake 的 P/D KV 搬运即我们时序二正向 |
@@ -64,7 +64,7 @@
 
 - Mooncake 的 KVCache 池服务于"实例间共享/迁移",实例仍拥有本地 HBM;我们连 HBM 放置都归存储池(方案 Z)。
 - Mooncake 无 radix 前缀树的内容寻址复用(按 segment ID 存取);我们用内容寻址 `(model_id, layer, block_hash)` + radix 实现前缀复用,SGLang RadixAttention 的思路补上这一块。
-- Mooncake 无"统一管理 L0-L4 + 冷热生命周期 + 多模型配额/GC/碎片整理"——这些是我们的存储池增量(F11)。
+- Mooncake 无"统一管理 L0-L3 + 冷热生命周期 + 多模型配额/GC/碎片整理"——这些是我们的存储池增量(F11)。
 
 ---
 
@@ -77,7 +77,7 @@
 | LMCache 设计 | 我们对应 | 说明 |
 |--------------|----------|------|
 | 跨请求/跨实例 KV 复用,降 TTFT | 前缀复用 + D-direct | 见 features F1。LMCache 的"长 system prompt / RAG / 多轮"复用场景与我们 agent 多轮定位一致 |
-| 多存储后端:CPU memory / local disk / Redis | L1-L4 分层后端 | 见 storage-layer 分层表。LMCache 的后端抽象可作 L2/L3 实现参考 |
+| 多存储后端:CPU memory / local disk / Redis | L1-L3 分层后端 | 见 storage-layer 分层表。LMCache 的后端抽象可作 L2/L3 实现参考 |
 | `csrc/storage_backends`(C++ 后端) | Rust 存储层后端 | 我们用 Rust 重写存储层,但后端策略(分片、压缩、传输)可参考 LMCache 的 C++ 实现思路 |
 | `rust/` 目录(LMCache 已有 Rust 组件) | 存储层 Rust 技术栈 | 印证 Rust 适合写存储层;可参考其 Rust/C++ 桥接与 FFI 模式 |
 | 与 vLLM 集成的 KV manager 拦截 | 计算层 worker ↔ 存储池 client | 见 compute-layer。LMCache 作为 vLLM 的 drop-in 优化,其"拦截 KV 读写"的模式可参考我们 Python worker 的 runtime client 设计 |
@@ -124,7 +124,7 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 |--------------|----------|---------------------|
 | **计算层**(worker/attention/runner) | **vLLM**(PagedAttention/`GPUModelRunner`/spec decode) | worker 无状态化(模型/KV 从存储池读写);attention 核用 Triton |
 | **worker↔存储池接入** | **vLLM `KVConnectorBase_V1`**(scheduler/worker 双侧 + layer-wise mixin) | connector 从可选插件升为存储池必经路径;集群级权威。注:`SupportsHMA`(HMA,多 KV group)≠ 方案 Z,方案 Z 为本系统增量 |
-| L0-L4 分层 | SGLang HiCache | L1/L2 也归存储池(非实例私有);统一冷热/生命周期 |
+| L0-L3 分层 | SGLang HiCache | L1/L2 也归存储池(非实例私有);统一冷热/生命周期 |
 | KV Pool 数据面 | Mooncake transfer-engine + store | 内容寻址 + radix + 多模型配额/GC/碎片整理 |
 | 前缀复用 | SGLang RadixAttention + LMCache | radix 归存储池 + 位置视图一跳 + 反向回传生长 |
 | 执行模式 | DistServe/Splitwise + HiCache PD | 三模式逐请求选路 + D-direct(本地命中直跳) |

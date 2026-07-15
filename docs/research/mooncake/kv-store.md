@@ -81,7 +81,7 @@
 
 ## 本系统的借鉴点
 
-Mooncake Store 可直接作为 L3(远端内存池)的物理实现参考,但需在其上增加:
+Mooncake Store 可直接作为 L1 DRAM 池(远端载体)的物理实现参考,但需在其上增加:
 - 内容寻址 + radix 前缀复用(Store 无,Conductor 在外部)
 - per-model 配额(Store 仅 tenant-level)
 - 主动碎片整理(Store 无 compaction 线程)

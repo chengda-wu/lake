@@ -126,7 +126,7 @@ Mooncake 是 **KVCache-centric 的存算分离架构**:将 prefill/decode 集群
 
 | 维度 | Mooncake | 本系统 |
 |------|----------|--------|
-| KV 池位置 | DRAM/SSD 池,HBM 仍实例私有 | L0-L4 全归存储池,含 HBM |
+| KV 池位置 | DRAM/SSD 池,HBM 仍实例私有 | L0-L3 全归存储池,含 HBM |
 | 内容寻址/radix | Store 无;Conductor(外部)有 prefix cache table | Store 内置 radix + 内容寻址 |
 | 前缀复用 | 依赖外部(SGLang/vLLM/Conductor) | Store 原生支持 |
 | 多模型配额 | 仅 tenant-level | per-model 配额 |
