@@ -39,6 +39,8 @@ Idle → Boot (镜像拉起) → Warm (向存储池申请放置) → Ready → S
 3. **CUDA 初始化**：预初始化的进程池 / 常驻 worker。
 4. **KV 预取**：扩容决策做出即由存储池把热点前缀 KV 放置到新节点 HBM（支撑 D-direct）。
 
+**权重 in-flight pin**：权重归池管、也被 graph 捕获（Q2 权重对称性），机制与 KV 一致——只读、跨请求共享、in-flight 冻结。具体：节点进入 Serving 后,其 L0/L1 上的权重副本在节点生命周期内被池**钉住**(pin,ref>0 等效),池不得在节点 serving 期间迁移/驱逐/压实该权重副本(graph 捕获的是固定基址,迁移会破图)。Warm 期流式加载期间已加载的 layer 同样 pin(边加载边可接受的请求其权重不可动)。节点 Drain/Terminate 才解 pin、权重副本可被池回收/下沉。区别于 KV:权重不可变、无需写回(靠 revision 缓存失效),pin 仅是"serve 期间别动这块只读副本"。
+
 目标：从扩容决策到 Ready 接受请求 < 10s（待验证）。
 
 ## 资源画像

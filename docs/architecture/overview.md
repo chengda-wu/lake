@@ -70,6 +70,7 @@ Request → Gateway
       ├─ 单节点划算      → 混部:该节点完整/增量 prefill + decode
       └─ 跨节点划算      → PD 分离:P prefill → KV 放置到 D → D decode
   → decode 增量 KV 异步写回存储池(容错 + 前缀生长,见 execution-modes.md)
+  → 多轮 agent:延伸 KV 亦可 D→P 直接喂回 prefill 节点服务下一轮(见 data-flow.md §3.4)
   → 完成 → 本机 HBM 放置归还存储池(L3+ 副本按冷热保留)
 ```
 

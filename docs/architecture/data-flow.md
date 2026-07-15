@@ -141,6 +141,8 @@ agent 多轮场景：第 N 轮 decode 产出的延伸 KV 是**第 N+1 轮 prefil
 - **与 §3.3 反向回传的关系**：两者并行不冲突。§3.3 是 D→池（异步、为所有未来请求攒前缀、radix 生长）；§3.4 是 D→P（为紧邻的下一轮、直接喂）。子情况 A 的"KV 已在 D 的 L0"成立的前提，正是上轮 §3.3 已把这段 KV 注册进 radix（位置视图才知道它在 D 的 L0）。
 - **选路归池**：子情况 A vs B vs 传统 P 侧自拉，由池按 NIC 负载/带宽视图决定（compute network / storage network 两类带宽是池的资源，见 [`kv-cache-pool.md`](kv-cache-pool.md) "双网络路径"）。这正是 [DualPath](../research/dualpath.md) "借 decode 闲置 SNIC + CNIC 回传"在我们架构里的等价——且因池统一管理而更彻底。
 - **TP 场景**：per-rank 字段预留，单卡先行（见 [`compute-layer.md`](compute-layer.md) "TP"）。D→P 跨节点传输涉及多 rank 的 KV 切片归集，留 P7。
+- **子情况 A 依赖 §3.3 的 radix 注册时效**：位置视图知道延伸 KV 在 D 的 L0，前提是上轮 §3.3 反向回传已把该段 KV 注册进 radix（满块路）。若上轮回传尚未完成（radix 生长有滞后，见开放问题），位置视图缺该位置 → 子情况 A 降级为 B 或 P 侧自拉（多一跳存储读取/加载）。**降级是安全的**（只是损失零存储读取收益），但 D→P 子情况 A 的成立与反向回传时效耦合。
+- **D→P 的 L0→L0 直传也有在途 ref**：与 §3.2 PD 正向直传同——子情况 A 从 D 的 L0 读源、经 compute network 传 P 时，源 block（D 的 L0 slot）按跨实例传输的通用在途 ref 规则 +1 冻结、RDMA 完成 -1（源端冻结，防半传被覆写致损坏，见 [`kv-cache-pool.md`](kv-cache-pool.md) "引用计数与驱逐"/"PD 分离下的传输流程"）。D→P 不因"零存储读取"而豁免在途冻结。
 
 ## 4. 产出写回
 
