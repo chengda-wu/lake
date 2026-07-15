@@ -15,6 +15,81 @@
 
 更进一步，本系统**以 KV 为中心**设计，连 GPU HBM / 主机内存 / 本地 NVMe 都不归计算节点私有，而是存储池统一管理的物理载体（L0–L4）。**agent 多轮对话**是首要驱动场景：其"长共享前缀 + 逐步增长"结构使 KV 池化、前缀复用与反向回传增强的价值最大化（见 [`docs/architecture/execution-modes.md`](docs/architecture/execution-modes.md)）。
 
+## 整体架构
+
+```
+                           ┌────────────────────────────┐
+                           │      Gateway / Router      │
+                           │      路由 + 模式选择       │
+                           └─────────────┴──────────────┘
+                                         │ gRPC
+             ┌───────────────────────────────┴───────────────────────────────┐
+             ▼                                                               ▼
+ ┌───────────────────────┐                                       ┌───────────────────────┐
+ │      计算节点 A       │                                       │      计算节点 B       │
+ │                       │                                       │                       │
+ │计算引擎  Python+Triton│                                       │计算引擎  Python+Triton│
+ │  (零分层, 只 replay)  │                                       │  (零分层, 只 replay)  │
+ │                       │                                       │                       │
+ │in-process agent (Rust)│◄────────────────CNIC─────────────────►│in-process agent (Rust)│
+ │ 本地视图镜像 · 组装表 │              L0→L0 RDMA               │ 本地视图镜像 · 组装表 │
+ └───────────┬───────────┘                                       └───────────┬───────────┘
+             │                                                               │
+             │                         SNIC (南北向)                         │
+ ┌───────────┬───────────────────────────────────────────────────────────────┬───────────┐
+ │                                存储池 (统一管理 L0–L4)                                │
+ │       放置 / 冷热(LFU-Aging) / 生命周期 / radix 前缀索引 / 位置视图 / 配额 / GC       │
+ │                          热 ◄── promotion / demotion ──► 冷                           │
+ │ ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐ │
+ │ │ L0  GPU HBM │  │L1  主机 RAM │  │L2  本地 NVMe│  │L3  远端内存池│  │ L4  对象存储 │ │
+ │ │  (池放置)   │  │ (缓存副本)  │  │   (移动)    │  │ (F4 恢复点)  │  │    (SSOT)    │ │
+ │ └─────────────┘  └─────────────┘  └─────────────┘  └──────────────┘  └──────────────┘ │
+ │                                                                                       │
+ └───────────────────────────────────────────┬───────────────────────────────────────────┘
+                                             │ 位置视图 / radix / ref 汇总
+                       ┌───────────────────────────────────────────┐
+                       │           控制面 (etcd, 强一致)           │
+                       │位置元数据 · radix · 引用汇总 · 拓扑 · 配额│
+                       │       本地视图镜像 = 控制面推送副本       │
+                       └───────────────────────────────────────────┘
+
+  存储池的五层是同一个池的五个 tier(HBM→DRAM→NVMe→远端内存池→对象存储,逐 tier 池化、
+  热冷 promotion/demotion),物理载体分布不同(L0–L2 在计算节点、L3 在 KV Node、L4 独立)
+  但元数据全归存储池统一管理,计算节点不拥有任何一层。
+  agent:存储池在每个计算节点的本地端点(Rust .so, in-process)——组装 block table、
+        发起/接收跨实例传输、注册本地内存、持本地视图镜像(零 RPC 决策)。
+        全局权威(位置视图/radix/ref 汇总)在控制面 etcd,本地镜像是其推送副本。
+  KV 流转三方向(以 KV 为中心,存储池不区分 P/D):
+    P→D  服务本次(PD 分离正向:产出→消费)
+    D→池 服务未来(decode 延伸前缀反向回传,radix 生长)
+    D→P  服务下一轮(agent 多轮:decode 侧 KV 喂回 prefill,DualPath 原生支持)
+```
+
+> 详图与组件边界见 [`docs/architecture/overview.md`](docs/architecture/overview.md)；KV 流转时序见 [`docs/architecture/execution-modes.md`](docs/architecture/execution-modes.md)；双网络与 RDMA 退化见 [`docs/architecture/topology.md`](docs/architecture/topology.md)。
+
+### 关键模块
+
+| 模块 | 语言 | 职责 |
+|------|------|------|
+| **Gateway** | Go | 鉴权 / 限流 / 入口准入 / 过载 shedding（决定请求"进/不进"） |
+| **Router** | Go | 无状态路由 + 模式选择纯函数 `f(请求,集群状态)→(模式,节点)`，零 RPC 读本地命中视图镜像 |
+| **计算层**（Prefill/Decode/Draft） | Python+Triton | 前向计算（graph replay），引擎零分层逻辑，只消费 ready→算→发 done |
+| **in-process agent** | Rust | 存储池在计算节点的本地端点：组装 block table / 发起传输 / 注册本地内存 / 持本地视图镜像（零 RPC） |
+| **存储池** | Rust | 统一管理 L0–L4：放置 / 冷热 / 生命周期 / radix 前缀索引 / 位置视图 / 配额 / GC / 碎片整理 |
+| **传输引擎** | Rust | 跨实例 KV 传输（RDMA 零拷贝），池 agent 发起；多 NIC 聚合 + TCP 退化 |
+| **控制面** | Go + etcd | 强一致位置视图 / radix / 引用汇总 / 节点拓扑 / 负载视图 |
+
+### 关键特性
+
+- **彻底存算分离**：L0–L4 全归存储池统一管理，计算节点不拥有任何内存，可随时销毁/拉起。
+- **混合执行模式**：请求不固定走 P→D，Router 逐请求在 **PD 分离 / 混部 / D-direct** 三模式间选路。
+- **前缀复用 + 本地命中**：radix 前缀索引 + 位置视图；本地命中（前缀 KV 已在某执行节点 HBM）→ D-direct 零/极小传输直跳。
+- **反向回传 + D→P**：decode 延伸 KV 回传池生长 radix（服务未来）；agent 多轮里 D→P 直接喂回 prefill（服务下一轮），不绕一跳存储。
+- **双网络隔离**：CNIC（计算）/ SNIC（存储）物理分离，两类带宽是池的资源；RDMA 三级退化在传输引擎内吸收、上层接口不变。
+- **两级 ref + 持久语义分层**：本地引用计数（池 agent）+ 全局汇总（控制面）；L3 = F4 恢复点（抗单 worker）/ L4 = SSOT（抗池级失败）。
+- **失败不设降级链**：执行失败 → F4 重路由，Router 重跑选路纯函数，无 mode-to-mode fallback 阶梯。
+- **过载归 gateway**：限并发 / 拒请求 / 按优先级丢弃归外部控制面，推理系统只管执行 + 上报信号。
+
 ## 仓库定位
 
 这是**探索与研究**仓库，不是生产系统。当前阶段以设计文档 + 原型代码为主，验证以下假设：
@@ -28,7 +103,7 @@
 
 先看 [`docs/00-plan.md`](docs/00-plan.md) —— 依次要做的事情与技术选型（存储 Rust / 控制 Go / 计算 Python+Triton）。
 
-**当前阶段**：P0 特性设计 → P1 架构设计 → P2 模块划分与技术选型。
+**当前阶段**：P0 特性设计 ✅ → P1 架构设计 ✅ → P2 模块划分与技术选型（进行中）。
 
 ## 目录结构
 
@@ -44,14 +119,18 @@ lake/
 │   │   └── nonfunctional.md    #   非功能需求
 │   ├── architecture/           # P1 架构设计 — 怎么搭
 │   │   ├── overview.md         #   总体架构
+│   │   ├── storage-layer.md    #   存储层（L0–L4 分层 / 冷热 / 方案 Z）
+│   │   ├── compute-layer.md    #   计算层（HBM 池化入图 / KV 管理 / 投机解码）
+│   │   ├── kv-cache-pool.md    #   KV cache 池（Block 寻址 / 跨实例传输 / ref / 双网络）
+│   │   ├── scheduling.md       #   路由与调度（命中感知 / 在途再均衡）
 │   │   ├── execution-modes.md  #   执行模式与 KV 流转时序（以 KV 为中心）
-│   │   ├── storage-layer.md    #   存储层（权重 / KV / 对象存储分层）
-│   │   ├── compute-layer.md    #   计算层（Prefill / Decode 池）
-│   │   ├── kv-cache-pool.md    #   KV cache 分布式池
-│   │   └── scheduling.md       #   路由与调度
+│   │   ├── data-flow.md        #   请求生命周期（决策树 / 三模式执行段 / F4 / D→P）
+│   │   ├── consistency.md      #   一致性与故障模型（持久语义 / ref 两级 / 风险窗口）
+│   │   └── topology.md         #   部署拓扑（双网络 / RDMA 退化 / 故障域）
 │   └── research/               # 相关工作
 │       ├── references.md
 │       ├── 3rdparty-reference.md  # 3rdparty 源码与本设计的逐层对应(汇总)
+│       ├── dualpath.md            #   DualPath 双路径 KV 加载分析
 │       ├── sglang/                #   SGLang HiCache 深度分析
 │       ├── lmcache/               #   LMCache 深度分析
 │       ├── mooncake/              #   Mooncake 深度分析
@@ -82,6 +161,9 @@ lake/
 - **计算层**：见 [`docs/architecture/compute-layer.md`](docs/architecture/compute-layer.md)
 - **KV cache 池**：见 [`docs/architecture/kv-cache-pool.md`](docs/architecture/kv-cache-pool.md)
 - **调度**：见 [`docs/architecture/scheduling.md`](docs/architecture/scheduling.md)
+- **数据流与请求生命周期**：见 [`docs/architecture/data-flow.md`](docs/architecture/data-flow.md)
+- **一致性与故障模型**：见 [`docs/architecture/consistency.md`](docs/architecture/consistency.md)
+- **部署拓扑**：见 [`docs/architecture/topology.md`](docs/architecture/topology.md)
 - **相关工作**：见 [`docs/research/references.md`](docs/research/references.md)
 
 ## 状态
