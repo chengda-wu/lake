@@ -1,6 +1,6 @@
 # 06 — 路由与调度
 
-> ⚠️ 第 1 节"请求级路由"已按 P0 混合执行模式更新;**第 2–4 节(池间/节点级/弹性调度)仍偏固定 P→D 视角**,待与 [`execution-modes.md`](execution-modes.md) 两条时序(本地完成 / 跨节点传输)对齐。执行模式与 KV 流转时序见 [`execution-modes.md`](execution-modes.md),模式选择依存储池本地命中、prompt 规模、传输成本决策(见 [`../features/features.md`](../features/features.md) "执行模式"节)。
+> 调度分四层(请求级路由 / 池间 / 节点级 / 弹性)。**模式选择与请求生命周期权威描述见 [`data-flow.md`](data-flow.md)**(决策树 + 三模式执行段 + F4 分支);**执行模式与 KV 流转时序见 [`execution-modes.md`](execution-modes.md)**(本地完成 / 跨节点传输两条时序)。本文讲调度层各层次的机制:模式选择依存储池本地命中、prompt 规模、传输成本逐请求决策(见 [`../features/features.md`](../features/features.md) "执行模式"节)。
 
 调度是存算分离系统能否兑现弹性与低延迟承诺的控制核心。本系统调度器**无状态**（所有决策依据来自控制面的共享视图），可水平扩展。
 

@@ -52,7 +52,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 产出文档（`docs/architecture/`）：
 - [x] 更新 [`overview.md`](architecture/overview.md)：纳入混合执行模式与 KV 流转视角，替代刚性 P→D；去 ⚠️
 - [x] [`architecture/execution-modes.md`](architecture/execution-modes.md) 以 KV 为中心的执行模式与 KV 流转时序（本地完成 / 跨节点传输含正向产出与反向回传）；失败处理统一归 F4 重路由，不设独立降级阶梯
-- [ ] `architecture/data-flow.md` 请求生命周期详图（含 F4 故障分支、模式选择决策树）
+- [x] [`architecture/data-flow.md`](architecture/data-flow.md) 请求生命周期详图（含 F4 故障分支、模式选择决策树 mermaid、三模式执行段、ready/done 双 fence 一步契约）
 - [ ] `architecture/consistency.md` 一致性与故障模型（KV 写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点）
 - [ ] `architecture/topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）
 
@@ -84,8 +84,8 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 ### P1 下一步（收尾，按此顺序）
 
-1. **`architecture/data-flow.md`**（首选切入）：请求生命周期详图（含 F4 故障分支、模式选择决策树结构）。直接承接本轮 Q1/Q2/PD 传输 + execution-modes 两时序；落定后清掉 [`scheduling.md`](architecture/scheduling.md) sections 2-4 的固定 P→D 残留（⚠️ 标注处，对齐两时序视角）。决策树：结构定型、阈值留 P7。
-2. **`architecture/consistency.md`**：一致性与故障模型。形式化本轮 B2 的持久语义（L3 F4 恢复点 / L4 SSOT）、ref 池权威、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点。
+1. ~~`architecture/data-flow.md`~~ ✅（done 2026-07-15）：请求生命周期详图 + 模式选择决策树 mermaid + 三模式执行段 + F4 分支；清掉 [`scheduling.md`](architecture/scheduling.md) ⚠️ 固定 P→D 残留（注解改为指向 data-flow）。
+2. **`architecture/consistency.md`**（下一步）：一致性与故障模型。形式化本轮 B2 的持久语义（L3 F4 恢复点 / L4 SSOT）、ref 池权威、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点。
 3. **`architecture/topology.md`**：部署拓扑（单/跨机房、网络 fabric 假设、RDMA 可用性退化）。承接本轮多处"留 topology.md"（GPUDirect RDMA 依赖 PCIe root、TCP 退化带宽-延迟模型）。
 
 > P1 三篇补齐后满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案），再转 P2（proto 起草）。

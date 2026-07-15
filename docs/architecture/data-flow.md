@@ -1,0 +1,162 @@
+# 数据流与请求生命周期
+
+本文把 [`execution-modes.md`](execution-modes.md) 的两条时序、[`scheduling.md`](scheduling.md) 的路由决策、[`compute-layer.md`](compute-layer.md) 的入图与 KV 管理、[`kv-cache-pool.md`](kv-cache-pool.md) 的跨实例传输，落成一条**完整的请求生命周期**。目标（P1 完成判据）：任一特性的"数据从哪来、写到哪、谁来调度、失败怎么办"都可在此找到答案。
+
+本文以 **KV 为中心**展开，沿用 execution-modes 的"执行节点 A/B"中性称呼（P/D 是调度层角色分配，不进数据流）。
+
+## 1. 请求生命周期主轴（happy path）
+
+```
+① Gateway 入口准入(限流/鉴权/过载 shedding) ── 拒绝则不计推理系统失败率
+        ↓ (已准入请求)
+② Router 查池:一次 RPC 拿 (model_id, prompt 前缀)
+        ← 可复用 block 列表 + 各自位置(含"是否已在某 HBM"= 本地命中判定) + 集群负载视图
+        ↓ (5ms 模式选择预算内)
+③ 模式选择 f(请求, 集群状态) → (模式, 节点)        [纯函数,见 §2]
+        ↓
+④ 执行(按模式分支,见 §3;统一 ready/done 双 fence 一步契约)
+        ↓
+⑤ 产出写回池:满块→注册 radix+写回 L3;尾块→请求结束写一次(见 §4)
+        ↓
+⑥ decode 延伸前缀? → 触发时序二反向回传(radix 生长,服务未来请求)
+        ↓
+⑦ 完成 → 响应
+```
+
+**职责切分**：① 归 gateway（过载/限流/丢弃，见 [`../features/slo.md`](../features/slo.md)）；②③ 归 Router/控制面（路由 + 模式选择 + 优先级排队，不丢请求）；④ 归计算层（引擎零分层逻辑，只消费 ready→算→发 done）+ 存储池（放置/传输/写回，池 agent 发起）；⑤⑥ 归存储池。
+
+## 2. 模式选择决策树
+
+模式选择是 Router 的纯函数 `f(请求, 集群状态) → (模式, 节点)`，逐请求选路。**不设 mode-to-mode 降级阶梯**——失败即重跑此函数（见 §4）。结构如下，**具体阈值留 P7**：
+
+```mermaid
+flowchart TD
+    Q[Router 查池拿到:前缀复用 block + 位置 + 负载视图]
+    Q --> L{前缀 KV 已被池预放置到<br/>某执行节点 HBM?<br/>(本地命中)}
+    L -- 是 --> DD[D-direct:路由到该节点<br/>残差 prefill + decode,零传输]
+    L -- 否 --> S{单节点完成划算?<br/>(prompt 短 / 传输成本 > 分离收益)}
+    S -- 是 --> CO[混部:路由到一节点<br/>完整/增量 prefill + decode,本机完成]
+    S -- 否 --> PD[PD 分离:时序二正向<br/>A prefill 产出 → 池搬到 B → B decode]
+    DD --> R[decode 延伸前缀?<br/>(多轮 agent)]
+    CO --> R
+    PD --> R
+    R -- 是 --> RB[触发时序二反向回传<br/>延伸 KV 回池,radix 生长]
+    R -- 否 --> DONE[完成]
+    RB --> DONE
+```
+
+**判定依据**（阈值 P7 校准）：
+- **本地命中**：位置视图返回"前缀 block 已在某节点 L0"。→ D-direct，省传输。关键区分：Pool 命中（前缀 KV 在分布式池，省重算但需传输）≠ 本地命中（已在执行节点 HBM，零/极小传输直跳）。
+- **单节点完成划算**：传输成本 > prefill 分离收益（短 prompt / 带宽紧张 / 各节点有空闲）。
+- **跨节点传输划算**：prefill 大、各节点有空闲、带宽充裕，P/D 物理分离收益 > 传输成本。
+
+决策树是结构定型的；阈值（本地命中判定边界、传输成本 vs 分离收益的拐点）留 P7 量化。
+
+## 3. 三模式执行段（KV 流转详图）
+
+三模式统一遵守 **ready/done 双 fence 一步契约**（见 [`compute-layer.md`](compute-layer.md)）：
+
+```
+池侧(步前): 定 read set/write set → 保证 read set 在 L0(缺则补拉) 
+            → 给 write set 分配空闲 slot → 冻结被引用 slot(ref>0)
+            → 组装完整 block table → 发 ready(fence)
+引擎(步中): 拷 block table 进固定地址 tensor → replay graph → 新 token KV 写进 write slots
+池侧(步后): 引擎发 done(compute fence) → 池解冻 → 满块写回 L3+注册 radix → 驱逐冷块 → 回收 slot
+```
+
+引擎的全部分层职责：**消费 ready → 算 → 发 done**。block table 由本地 agent 组装（in-process，持本地视图镜像），引擎不知地址、不组装 block table。
+
+### 3.1 D-direct / 混部（时序一本地完成）
+
+请求在单节点完成 prefill + decode，KV 全程本机 L0，无跨节点传输。
+
+```
+Router → 查池(本地命中判定) → 路由到目标节点
+       → 本机 prefill(残差[D-direct] 或 完整/增量[混部]) → 本机 L0
+       → 本机 decode(每步 ready/done 契约) → 增量 KV 异步写回池
+```
+
+- **D-direct**：前缀 KV 已被池**后台**预放置到本机 HBM（请求到达前完成），入口只做残差 prefill。零传输。
+- **混部**：前缀 KV 仅在 Pool/未命中，本机完整或增量 prefill + decode，本机完成。省的是跨节点传输，非绕过存储池（本机 L0 仍归池管）。
+
+两者共享同一条单节点时序。本地命中与否只决定 prefill 工作量，非数据流分支。
+
+### 3.2 PD 分离（时序二正向：产出→消费，服务本次）
+
+请求生命周期内某段 KV 要从 A 搬到 B。**engine-to-engine 控制链切断**——两个引擎从不知对方存在，池的本地 agent 发起传输，数据线仍直连 RDMA。
+
+```
+① A prefill 逐层产出 KV → 落 A 的 L0 slot(slot 由 A 的 agent 分配)
+② A 每层产出 → A 的 agent publish 该层 page 切片 → 传输引擎在独立 stream 搬到 B
+   (分块流水线:page_first_direct 子块,层算完即传该层切片,与 A 计算重叠,支撑 TTFT)
+③ B 的 agent 查位置视图拿源地址 → 在 B 分配空闲 slot + 冻结 → RDMA 写入 → 返回 handle
+④ B 的 agent 组装 block table(拉来的 slot + 已在 B 本地的 slot) → ready(fence) → B replay
+⑤ B step done → publish 新 decode KV → 回到③(连续 batching)
+```
+
+- **默认直传**（A→B L0）：PD 时序重叠（A 边 prefill B 边 decode）主场景，省一跳、最低延迟。代价：A 的源 slot 被在途传输 ref 钉住、占 A 容量直到拉完。
+- **经池中转**（A→L3→B）：A 先结束/Drain 时，A 已 publish 到 L3，B 从 L3 拉，时序解耦。
+- 传输细节（内存注册、pull/publish、布局转换、在途 ref、Drain 推 L3）见 [`kv-cache-pool.md`](kv-cache-pool.md) "跨实例 KV 传输"。
+
+### 3.3 反向回传（时序二反向：消费→池，服务未来）
+
+B 在 decode 中延伸了前缀（生成新 token 的 KV）→ 这段延伸 KV 回传池 → radix 生长 → 未来请求（如下一轮 agent）查池时命中更长前缀。
+
+```
+B decode 生成延伸 KV → 异步回传池(落 L3 + 更新 radix)
+                              ↓
+                    前缀树生长,下次命中边界前推
+```
+
+反向回传**不为本次请求服务**，是为未来请求的前缀增强攒数据。agent 多轮的核心：每轮增长的 KV 回流，下一轮自动命中更长。与正向（服务本次）不可混作一谈。
+
+## 4. 产出写回
+
+一次请求的 KV 从产生到消亡（详见 [`kv-cache-pool.md`](kv-cache-pool.md) "写回与生命周期"）：
+
+- **满块路**：block 填满 → 池算哈希 → 注册 radix → 写回 L3（F4 恢复点）。请求进行中就可能触发（decode 跨 block 边界）。满块写回频率 N 留 P7。
+- **尾块路**：请求结束时未满的尾块 → 请求结束点写一次（写全部已填 token，重放整块覆盖），纯容错，不进 radix。
+
+引擎不感知 block 满不满（block 对引擎纯寻址单位）——满块判断、哈希、radix 注册、写回全归池。
+
+## 5. F4 故障分支
+
+执行失败（节点故障/超时）→ 触发 F4 → Router 依最新集群状态**重跑模式选择**（§2 纯函数）。**不设 mode-to-mode 降级阶梯**——模式选择是纯函数，失败即重跑该函数，由最新状态重新定模式与节点。
+
+```
+执行失败(故障/超时) → F4 触发 → Router 重跑 f(请求, 最新集群状态) → (新模式, 新节点)
+                                          ↓
+                        池把该 sequence 的已有 KV 放置到新节点 HBM → 续推
+```
+
+**worker 崩溃续推**：
+- 存储池检测 → 把该 sequence 路由到新节点 → 池把已有 KV（L3 F4 恢复点）放置到新节点 HBM → 续推。
+- ref 从原请求**转移**到新请求（避免被冷热淘汰，见 [`kv-cache-pool.md`](kv-cache-pool.md) "引用计数与驱逐"）。
+- 原节点 HBM 副本随销毁失效（本就是易失副本，非私有状态）。
+- 丢失的仅是最后一次写回 L3 之后的少量 token。
+
+**持久语义与风险窗口**（见 [`kv-cache-pool.md`](kv-cache-pool.md) "故障恢复"）：
+- L3 = F4 恢复点（抗 worker 失败，副本 RAM）；L4 = SSOT 永久权威（抗池级失败）。
+- 风险窗口：block 在 L0 产出 → 每 N 步写回 L3。若 worker 与其 L3 副本**同时失败**且未落 L4，这段尾巴丢失。落 L4 频率由冷热生命周期决定（冷下沉），非每步。
+
+**过载不在此分支**：过载 shedding 归 gateway（①），不计推理系统失败率；推理系统只上报信号（队列长度/in-flight/剩余容量）供 gateway 决策。
+
+## 6. 职责边界速查
+
+| 关注点 | 归属 | 见 |
+|--------|------|-----|
+| 入口准入 / 限流 / 过载 shedding / 丢弃 | gateway | [`../features/slo.md`](../features/slo.md) |
+| 路由 / 模式选择 / 优先级排队（不丢请求） | Router / 控制面 | §2、[`scheduling.md`](scheduling.md) |
+| 节点角色分配（P/D/draft） | 调度层 | [`scheduling.md`](scheduling.md) |
+| KV 放置 / 冷热 / 生命周期 / radix / 位置视图 | 存储池 | [`kv-cache-pool.md`](kv-cache-pool.md) |
+| block table 组装 / L0 内存注册 / 传输发起 | 存储池本地 agent（in-process） | [`compute-layer.md`](compute-layer.md)、[`kv-cache-pool.md`](kv-cache-pool.md) |
+| KV 跨节点传输执行 | 存储池数据面（池 agent 发起，非引擎） | [`kv-cache-pool.md`](kv-cache-pool.md) "跨实例 KV 传输" |
+| 前向计算（graph replay）| 计算层引擎（零分层逻辑） | [`compute-layer.md`](compute-layer.md) |
+| 产出写回触发 / 频率 N | 存储池（基于引擎 publish） | §4 |
+| F4 故障恢复 / 续推 | 存储池 + Router 重路由 | §5 |
+
+## 7. 开放问题
+
+- 模式选择决策树阈值（本地命中判定、传输成本 vs 分离收益拐点）待 P7。
+- 满块写回频率 N、分块流水线深度、反向回传 radix 生长时效待 P7。
+- continuous batching 与 KV 跨节点迁移协同（迁移中的 sequence 如何处理）。
