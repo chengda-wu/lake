@@ -73,6 +73,12 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - **重叠语义**：拒绝**引擎驱动** intra-step 重叠（SGLang `get_key_buffer` 每层 `wait_event`，绑死引擎、破坏 graph）；保留**池驱动**异步重叠——消费侧 step 间重叠 + 生产侧 prefill 层级重叠（`page_first_direct` 子块传输/"分块流水线"，支撑 PD 分离 TTFT）。引擎无感、graph 安全。
   - **持久语义**：L3 = F4 恢复点（抗 worker 失败，副本 RAM）；L4 = SSOT 永久权威（抗池级失败，L4 缺失才视为 block 不存在）。风险窗口：worker 与其 L3 副本同时失败且未落 L4 则丢尾巴（= 丢失最后一次写回 L3 之后的少量 token）。
 - **技术选型已定**（P2 落地）：存储 Rust / 控制 Go / 计算 Python+Triton；元数据 etcd；SSOT 用 S3/MinIO；跨语言 gRPC+Protobuf（大块 KV 走 RDMA 旁路）。3rdparty 四个 submodule（sglang/lmcache/mooncake/vllm）作实现参考。
+- **KV 类型 t-type / r-type + 投机解码机制（本轮新增）**：
+  - **KV 类型**：按 HBM 存储形态分 t-type(逐 token 完整 KV,paged block,full attention/MLA)与 r-type(紧凑表示——窗口最近 W token / Mamba 定长 state,sliding window/Mamba/卷积)。**两类复用条件一致**:都需命中全部前缀才能复用;区别**仅在 HBM(L0)存储形态**,目的是降低 r-type 的 HBM 占用。HBM 两类并存、分 arena 管理(r-type 另设固定状态 arena 入图);L1–L4 统一按 block(128 token)组织(两类复用条件一致、不区分类型),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)——相对 SGLang multi-pool 物理分池,我们把类型差异收敛到 L0 存储形态 + block 内布局,而非物理分池。详见 [`architecture/storage-layer.md`](architecture/storage-layer.md) "KV 类型"节、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "t-type / r-type"。
+  - **block 粒度 128 token**：缓存命中/复用/传输/写回最小单位(初版默认,待 P7 校准)。
+  - **投机解码(仿 SGLang)**：drafter 与 decode(target)默认共置、同 step 串行。**pre/post 共用同一 drafter 模型,拆 `post_forward` / `pre_forward` 两阶段(同类的两个方法,非独立组件)**统一自回归类与 diffusion 类编排:**`post_forward`**(target 之后,吃 target 输出做强耦合部分)承载 MTP/EAGLE/EAGLE3 的 draft head 前向(参数与主模型一致)+ DFLASH/DSPARK 的 draft cache 准备;**`pre_forward`**(下轮 target 之前)承载 MTP/EAGLE/EAGLE3 的自回归多 token 生成 + DFLASH/DSPARK 的 diffusion 并行产 block。**prefill 阶段仍产 draft**(drafter forward 照跑),差异在产出是否使用:vLLM PD 分离下 P 侧 draft 弃用、forward 仅为保 drafter KV 同步(`llm_base_proposer.py:567`),SGLang 暂未细究——**记为遗留问题,初步判断不影响整体设计**(prefill 产出是否用属节点侧策略)。**decode 多层 MTP** 分 chain-style(每层用自己上步输出 hidden,需 FULL 暂存)/ non-chain(每层用 target hidden,只需 LAST)两范式,参考 SGLang `multi_layer_eagle_worker_v2.py::chain_mtp_hidden_states`;单层 MTP 是 non-chain 退化。**drafter 自己的 KV 与 target KV 同款——进存储池统一管理、跨请求前缀复用、随迁**(SGLang `PoolName.DRAFT`,纠正此前"draft L0-only 不进池"的误记);seed hidden(自回归)/ 窗口状态(diffusion)是否跨请求缓存待定,先按 SGLang 重算式(draft-extend 重建,不进 radix),记为遗留问题。MTP 重算产出 `1+num_mtp_layers` token,残差 prefill 短时左 pad。**主攻方案**:MTP/EAGLE/EAGLE3/DFLASH/DSPARK(后两者 diffusion 类,半年内进生产),不主攻 medusa/mlp_speculator/ngram/独立 draft 模型。**支持梳理**:MTP/EAGLE/EAGLE3/DFLASH 两边都有;**DSPARK 仅 SGLang**;不参考 vLLM `spec_target_max_model_len`(独立 draft 模型时代遗留)。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "投机解码"节。
+  - **缓存命中感知调度**：命中(Pool/本地)是模式选择与 batch 组成的一等输入;新增**跨请求前缀共调度**(同前缀请求组同 batch/节点,前缀 block 复用+本地命中叠加,参考 SGLang `match_prefix` cache-aware scheduling / vLLM `get_computed_blocks`);守方案 Z 单向耦合(只读视图、不指挥放置),draft 候选不进 radix。详见 [`architecture/scheduling.md`](architecture/scheduling.md) "缓存命中感知调度"节。
+  - **长度边界规避(max_model_length vs runner_max_model_length)**：推理临近最大长度时的边界 bug(drafter 跳过致 EP/DP 集合通信盲等、block 申请不够致请求永不可调度)在 vLLM/sglang 均靠累积特殊逻辑兜(vLLM `reserve_full_isl`+spec pad break+PD+spec lookahead=0;sglang `init_req_max_new_tokens` admission clamp+`speculative_skip_dp_mlp_sync`+`_build_trivial_verify_input`)。lake 用双长度变量规避:对外 `max_model_length`(gateway/scheduler 守,length cap+SLO 契约)+ 计算层内部 `runner_max_model_length = max_model_length + headroom`(arena/block table/graph 预分配);headroom 吸收 draft transient,runner 不写近 max debug 逻辑。代价:额外 HBM arena。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "长度边界规避"节。
 
 ### P1 待讨论 / 开放点
 
@@ -81,6 +87,15 @@ P7  性能建模与验证   → 量化各假设，回填设计
 - 反向回传的 radix 增长时效：写回到 radix 可见的滞后上限。
 - 分块流水线深度（`page_first_direct` 子块传输 k 与 prefill 层数对齐），待 P7。
 - 模式选择决策树的具体阈值（本地命中判定、传输成本 vs 分离收益）待 P7；**决策树结构本身待 `data-flow.md` 落定**（结构定型、阈值留空标 P7）。
+- **block 粒度 128 token** 与传输/写放大/碎片率的权衡,待 P7 校准。
+- **r-type 状态 checkpoint**:Mamba/卷积 recurrent state 落 L1+ 的 checkpoint 间距/形式、sliding window trailing pages 阈值,待实现/P7 校准。
+- **r-type SWA 尾段重算优化(idea,暂不实现,已记预留)**:SWA KV 不落 L1+、prefix 命中时重算匹配序列最后 `n*(w-1)+1` 个 token(position `[L+n-n*w-1, L)`)仅刷 SWA 窗口、不写非 SWA 模块(slot_mapping=-1),省存储换重算。暂不实现,但已留两处接口预留:① agent 的 slot 分配按模块差异化(只给 SWA 分 write slot,模块意识留池侧、引擎契约不破,经 Q2 张力权衡选此);② 残差路径区分"增量 prefill(未匹配尾)"与"刷新重算(已匹配尾,仅 SWA 写)"。r-type SWA 是否落 L1+(持久 vs 重算)二选一,待 P7。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "r-type SWA 前缀复用的尾段重算优化"。
+- **MTP 左 pad 策略**:是否总 pad 到固定宽度、pad token 是否复用命中 KV、pad 窗口上限,待实现/P7 校准。
+- **drafter 共置 vs 独立 Draft 池**:默认共置(sglang 式);独立池的收益阈值(投机命中率 vs draft 候选传输延迟)待 P7。
+- **r-type 入图**:sliding window / Mamba 固定状态 arena 与 t-type block arena 的 capture/replay 协同,待 P2/P3。
+- **headroom 大小**:`runner_max_model_length − max_model_length`(覆盖 draft 深度+lookahead+block 对齐 margin+安全余量),待 P7 校准。
+- **seed hidden 是否跨请求缓存(遗留)**:默认 SGLang 重算式(hidden 不进 radix、命中后 draft-extend 重建);备选按 token 存 hidden 进池换跨请求复用(省重算、费存储)。drafter KV 本身已定为进池复用。
+- **DP 间在途再均衡(未来特性,框架预留分析)**:抢占重算式(仿 vLLM v1 `_preempt_request`),控制态硬核仅 RNG state + 结构化解码 FSM 游标,drafter KV 随池迁移、seed 由 `post_forward` 重建 → **框架无需特别预留**。多次迁移防抖/防饿死、imbalance 源(attn vs MoE/EPLB)、归存算分离整体细化 = 遗留问题。详见 [`architecture/scheduling.md`](architecture/scheduling.md) "DP 间在途再均衡"。
 
 ### P1 下一步（收尾，按此顺序）
 

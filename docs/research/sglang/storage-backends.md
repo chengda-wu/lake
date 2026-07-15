@@ -16,6 +16,8 @@ L3 后端统一抽象,位于 `hicache_storage.py:141`。三套接口代际并存
 
 关键数据类:`HiCacheStorageConfig`(`tp_rank/tp_size/pp_rank/pp_size/attn_cp_rank/attn_cp_size/is_mla_model/tp_lcm_size/should_split_heads/extra_config`)、`PoolTransfer`、`PoolHitPolicy`(`ALL_PAGES`/`TRAILING_PAGES`)、`PoolName`。
 
+> **与 lake 的对照**:SGLang v2 把 Mamba/SWA/DSA/Draft 各开独立 pool,按类型**物理分池**存 + 各自 `PoolHitPolicy`。lake 不物理分池——t-type/r-type 区分**只存在于 HBM(L0)存储形态**(降 r-type 占用),L1–L4 统一按 128-token block 存储池承载,block 内装逐 token KV 还是紧凑 state 快照由布局元数据声明;`TRAILING_PAGES` 语义被吸收为"SWA 落下层存 trailing pages"的命中策略,而非独立 pool。详见 [`../../architecture/storage-layer.md`](../../architecture/storage-layer.md) "KV 类型"节、[`../../architecture/kv-cache-pool.md`](../../architecture/kv-cache-pool.md) "t-type / r-type"。
+
 ## 已注册后端
 
 `backend_factory.py` 注册的后端:
