@@ -49,12 +49,14 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 **目标**：基于 P0 特性，定下数据流、组件边界、一致性模型、故障域。
 
+**P1 状态：done 2026-07-15**（七篇架构文档补齐）。
+
 产出文档（`docs/architecture/`）：
 - [x] 更新 [`overview.md`](architecture/overview.md)：纳入混合执行模式与 KV 流转视角，替代刚性 P→D；去 ⚠️
 - [x] [`architecture/execution-modes.md`](architecture/execution-modes.md) 以 KV 为中心的执行模式与 KV 流转时序（本地完成 / 跨节点传输含正向产出与反向回传）；失败处理统一归 F4 重路由，不设独立降级阶梯
 - [x] [`architecture/data-flow.md`](architecture/data-flow.md) 请求生命周期详图（含 F4 故障分支、模式选择决策树 mermaid、三模式执行段、ready/done 双 fence 一步契约）
 - [x] [`architecture/consistency.md`](architecture/consistency.md) 一致性与故障模型（控制面强一致/数据面最终一致、写一次读多次、ref 两级、持久语义分层 L3 恢复点 / L4 SSOT、风险窗口、F4 续推、GC reconcile）
-- [ ] `architecture/topology.md` 部署拓扑（单机房/跨机房、网络 fabric 假设、RDMA 可用性退化）
+- [x] [`architecture/topology.md`](architecture/topology.md) 部署拓扑（单/跨机房、双网络 CNIC/SNIC、RDMA 三级退化与 GPUDirect 依赖、NUMA/NIC 多 NIC 聚合、故障域边界）
 
 **完成判据**：任一特性的"数据从哪来、写到哪、谁来调度、失败怎么办"都可在此找到答案。
 
@@ -106,9 +108,9 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 1. ~~`architecture/data-flow.md`~~ ✅（done 2026-07-15）：请求生命周期详图 + 模式选择决策树 mermaid + 三模式执行段 + F4 分支；清掉 [`scheduling.md`](architecture/scheduling.md) ⚠️ 固定 P→D 残留（注解改为指向 data-flow）。
 2. ~~`architecture/consistency.md`~~ ✅（done 2026-07-15）：一致性与故障模型。形式化持久语义（L3 F4 恢复点 / L4 SSOT）、ref 分两级（B1 闭环）、写回频率 N 的风险窗口、写一次读多次、控制面强一致/数据面最终一致、崩溃恢复点、GC reconcile。
-3. **`architecture/topology.md`**（下一步）：部署拓扑（单/跨机房、网络 fabric 假设、RDMA 可用性退化）。承接本轮多处"留 topology.md"（GPUDirect RDMA 依赖 PCIe root、TCP 退化带宽-延迟模型）。
+3. ~~`architecture/topology.md`~~ ✅（done 2026-07-15）：部署拓扑（单/跨机房、双网络 CNIC/SNIC、RDMA 三级退化与 GPUDirect 依赖、NUMA/NIC 多 NIC 聚合、故障域边界）。承接本轮多处"留 topology.md"（GPUDirect RDMA 依赖 PCIe root、TCP 退化带宽-延迟模型）。
 
-> P1 三篇补齐后满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案），再转 P2（proto 起草）。
+> **P1 状态：done 2026-07-15**。七篇架构文档（overview / storage-layer / compute-layer / kv-cache-pool / scheduling / data-flow / consistency / topology）补齐，满足完成判据（任一特性的"数据从哪来/写到哪/谁来调度/失败怎么办"可在此找到答案）。转 P2（proto 起草）。
 
 ---
 
