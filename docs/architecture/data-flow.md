@@ -18,7 +18,7 @@
         ↓
 ⑤ 产出写回池:满块→注册 radix+写回 L3;尾块→请求结束写一次(见 §4)
         ↓
-⑥ decode 延伸前缀? → 触发时序二反向回传(radix 生长,服务未来请求)
+⑥ decode 延伸前缀? → 触发时序二反向回传(radix 生长,服务未来请求) + D→P(§3.4,延伸 KV 喂下一轮 prefill)
         ↓
 ⑦ 完成 → 响应
 ```
@@ -110,6 +110,38 @@ B decode 生成延伸 KV → 异步回传池(落 L3 + 更新 radix)
 
 反向回传**不为本次请求服务**，是为未来请求的前缀增强攒数据。agent 多轮的核心：每轮增长的 KV 回流，下一轮自动命中更长。与正向（服务本次）不可混作一谈。
 
+### 3.4 D→P（decode 侧 KV 喂回 prefill，服务下一轮）
+
+agent 多轮场景：第 N 轮 decode 产出的延伸 KV 是**第 N+1 轮 prefill 的输入前缀**。这条 KV 不必先落池再被下一轮 prefill 拉（绕一跳存储），可直接由 decode 侧喂回 prefill 节点——这是与 §3.3 反向回传并行的**第三条方向**：§3.2 P→D 服务本次、§3.3 D→池服务未来（攒数据）、**§3.4 D→P 服务下一轮**（直接喂回去）。机制即 [DualPath](../research/dualpath.md) 的 storage-to-decode 路径原生支持。
+
+按"下一轮 prefill 所需 KV 是否已在 D 的 L0"分两子情况：
+
+```
+子情况 A(零存储读取,DualPath 不强调,我们独有):
+   下一轮 prefill 所需 KV 全在 D 的 L0(= D 上轮 decode 自己产出、未下沉)
+   → 连存储读取都省 → D L0 ──compute network RDMA──→ P L0 直传
+
+子情况 B(DualPath storage-to-decode + CNIC 回传):
+   所需 KV 部分需从池加载 → D 侧从 L3 经 storage network 加载进 D 的 L0
+   → 再经 compute network RDMA 传 P L0
+   (借 D 侧存储带宽加载 + 高带宽 compute network 回传,绕开 P 侧 SNIC 瓶颈)
+```
+
+```
+① D 上轮 decode 产出延伸 KV(落 D 的 L0) + 池异步反向回传(§3.3,radix 生长,与本节并行)
+② 下一轮 prefill 落到某 P 节点 → P 的 agent 查位置视图:所需延伸 KV 在哪?
+   - 在 D 的 L0(子情况 A)        → 直接从 D L0 拉,经 compute network RDMA 写入 P L0 slot
+   - 需从 L3 加载(子情况 B)      → 池调度选 D 侧加载(借 D 闲置 storage 带宽)→ D L0 → compute network → P L0
+                                  (也可 P 侧自拉 = 传统 storage-to-prefill,池按 NIC 带宽视图选路)
+③ P 的 agent 组装 block table(拉来的 slot + 已在 P 本地的 slot) → ready → P 增量 prefill
+```
+
+**关键点**：
+- **engine-to-engine 控制链仍切断**（与 §3.2 同）：P 的 agent 查池位置视图定源、池发起传输，P 引擎不知 D 存在。子情况 A 的"零存储读取"不改变这点——只是源地址落在 D 的 L0 而非 L3，仍由池 agent 发起。
+- **与 §3.3 反向回传的关系**：两者并行不冲突。§3.3 是 D→池（异步、为所有未来请求攒前缀、radix 生长）；§3.4 是 D→P（为紧邻的下一轮、直接喂）。子情况 A 的"KV 已在 D 的 L0"成立的前提，正是上轮 §3.3 已把这段 KV 注册进 radix（位置视图才知道它在 D 的 L0）。
+- **选路归池**：子情况 A vs B vs 传统 P 侧自拉，由池按 NIC 负载/带宽视图决定（compute network / storage network 两类带宽是池的资源，见 [`kv-cache-pool.md`](kv-cache-pool.md) "双网络路径"）。这正是 [DualPath](../research/dualpath.md) "借 decode 闲置 SNIC + CNIC 回传"在我们架构里的等价——且因池统一管理而更彻底。
+- **TP 场景**：per-rank 字段预留，单卡先行（见 [`compute-layer.md`](compute-layer.md) "TP"）。D→P 跨节点传输涉及多 rank 的 KV 切片归集，留 P7。
+
 ## 4. 产出写回
 
 一次请求的 KV 从产生到消亡（详见 [`kv-cache-pool.md`](kv-cache-pool.md) "写回与生命周期"）：
@@ -160,3 +192,4 @@ B decode 生成延伸 KV → 异步回传池(落 L3 + 更新 radix)
 - 模式选择决策树阈值（本地命中判定、传输成本 vs 分离收益拐点）待 P7。
 - 满块写回频率 N、分块流水线深度、反向回传 radix 生长时效待 P7。
 - continuous batching 与 KV 跨节点迁移协同（迁移中的 sequence 如何处理）。
+- D→P 选路（§3.4 子情况 A/B 与 P 侧自拉的 NIC 带宽视图决策）待 P7。

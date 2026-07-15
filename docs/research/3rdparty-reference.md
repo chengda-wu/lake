@@ -148,3 +148,7 @@ P4(KV Pool 原型,Rust)时按此顺序参考源码:
 - clone 本仓库后需 `git submodule update --init --recursive` 拉取。
 - 升级 submodule:在对应目录 `git checkout <ref>` 后回根目录 `git add` 提交指针更新;在本文"检出"列同步记录。
 - submodule 体积较大(SGLang/Mooncake/vLLM 各数百 MB),磁盘紧张或 CI 提速用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(浅克隆后无法在 submodule 内切换 ref,升级需先 `git submodule deinit -f <path>` 再深克隆 init)。
+
+## 非 submodule 文献参考
+
+除上述四个源码 submodule 外,本系统还参考了 **DualPath**(论文 arXiv:2602.21548v2,非 submodule,未引入源码)——双网络隔离下的双路径 KV 加载,直接对应 [`../architecture/kv-cache-pool.md`](../architecture/kv-cache-pool.md) "双网络路径"与 [`../architecture/data-flow.md`](../architecture/data-flow.md) §3.4 D→P 流。分析(机制/借鉴点/关键差异)见 [`dualpath.md`](dualpath.md),文献总览见 [`references.md`](references.md)。

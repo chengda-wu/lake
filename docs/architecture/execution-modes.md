@@ -79,6 +79,8 @@ B decode 生成延伸 KV → 异步回传存储池(落 L3 + 更新 radix)
 
 正向流新产出 KV、服务本次;反向流延伸 KV、服务未来,两者不可混作一谈。
 
+**第三条方向 D→P(消费 → prefill,服务下一轮)**:agent 多轮里,上一轮 decode 产出的延伸 KV 是下一轮 prefill 的输入前缀。这条 KV 不必绕一跳存储(先落池再被下轮拉),可直接由 decode 侧喂回 prefill 节点——即 [DualPath](../research/dualpath.md) 的 storage-to-decode 路径原生支持。它与反向回传并行:D→池为所有未来请求攒前缀(radix 生长),D→P 为紧邻的下一轮直接喂(若所需 KV 已在 D 的 HBM 则零存储读取直传)。完整流程与双网络选路见 [`data-flow.md`](data-flow.md) §3.4、[`kv-cache-pool.md`](kv-cache-pool.md) "双网络路径"。
+
 ## 前置设计决策
 
 以下已在别处定稿,本文沿用:

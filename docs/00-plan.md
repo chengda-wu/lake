@@ -72,6 +72,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - **跨实例/PD 传输**：engine-to-engine 控制链**切断**，池的本地 agent 发起传输，引擎降到 `publish`/`pull`+fence、不知地址、不组装 block table；数据线仍直连 RDMA（wire 效率不变）。默认**直传**（A→B L0，PD 时序重叠主场景）+ **Drain 推 L3**（节点下线前把还被远端引用的 block 落 L3）。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "跨实例 KV 传输"。
   - **重叠语义**：拒绝**引擎驱动** intra-step 重叠（SGLang `get_key_buffer` 每层 `wait_event`，绑死引擎、破坏 graph）；保留**池驱动**异步重叠——消费侧 step 间重叠 + 生产侧 prefill 层级重叠（`page_first_direct` 子块传输/"分块流水线"，支撑 PD 分离 TTFT）。引擎无感、graph 安全。
   - **持久语义**：L3 = F4 恢复点（抗 worker 失败，副本 RAM）；L4 = SSOT 永久权威（抗池级失败，L4 缺失才视为 block 不存在）。风险窗口：worker 与其 L3 副本同时失败且未落 L4 则丢尾巴（= 丢失最后一次写回 L3 之后的少量 token）。
+  - **D→P 流 + 双网络路径 + DualPath 原生支持（本轮新增）**：agent 多轮里上一轮 decode 产出的延伸 KV 是下一轮 prefill 的输入前缀,不必绕一跳存储,可直接由 decode 侧喂回 prefill——这是与 P→D(本次)、D→池(未来)并列的**第三条方向 D→P(服务下一轮)**,即 DualPath(arXiv:2602.21548v2,非 submodule)storage-to-decode 路径的**原生支持**。**双网络隔离**(compute network 跑 L0→L0 RDMA + GPU collective / storage network 跑 L2/L3/L4 访问)是 DualPath 的架构前提,两类带宽是**池的资源**(池统一分配,非引擎"借用",比 DualPath 更彻底)。D→P 选路按"所需 KV 是否已在 D 的 L0"分子情况:**A 零存储读取**(KV 已在 D 的 HBM → D L0 经 compute network 直传 P,连 storage network 都不占,DualPath 不强调,我们独有) / **B**(需从 L3 加载 → 池可选 D 侧加载+compute network 回传,借 D 闲置 storage 带宽绕开 P 侧瓶颈) / 传统 P 侧自拉;由池按 NIC 带宽视图决策,collective 突发窗避让留 P7。engine-to-engine 控制链仍切断(池 agent 发起,引擎不知对方存在)。详见 [`architecture/data-flow.md`](architecture/data-flow.md) §3.4、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "双网络路径"、[`research/dualpath.md`](research/dualpath.md)。
 - **技术选型已定**（P2 落地）：存储 Rust / 控制 Go / 计算 Python+Triton；元数据 etcd；SSOT 用 S3/MinIO；跨语言 gRPC+Protobuf（大块 KV 走 RDMA 旁路）。3rdparty 四个 submodule（sglang/lmcache/mooncake/vllm）作实现参考。
 - **KV 类型 t-type / r-type + 投机解码机制（本轮新增）**：
   - **KV 类型**：按 HBM 存储形态分 t-type(逐 token 完整 KV,paged block,full attention/MLA)与 r-type(紧凑表示——窗口最近 W token / Mamba 定长 state,sliding window/Mamba/卷积)。**两类复用条件一致**:都需命中全部前缀才能复用;区别**仅在 HBM(L0)存储形态**,目的是降低 r-type 的 HBM 占用。HBM 两类并存、分 arena 管理(r-type 另设固定状态 arena 入图);L1–L4 统一按 block(128 token)组织(两类复用条件一致、不区分类型),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)——相对 SGLang multi-pool 物理分池,我们把类型差异收敛到 L0 存储形态 + block 内布局,而非物理分池。详见 [`architecture/storage-layer.md`](architecture/storage-layer.md) "KV 类型"节、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "t-type / r-type"。
@@ -86,6 +87,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 - 满块写回频率（满一个就写 vs 攒几个满块一起写），待 P7。
 - 反向回传的 radix 增长时效：写回到 radix 可见的滞后上限。
 - 分块流水线深度（`page_first_direct` 子块传输 k 与 prefill 层数对齐），待 P7。
+- D→P 选路（§3.4 子情况 A/B 与 P 侧自拉的 NIC 带宽视图决策、collective 突发窗避让）待 P7。
 - 模式选择决策树的具体阈值（本地命中判定、传输成本 vs 分离收益）待 P7；**决策树结构本身待 `data-flow.md` 落定**（结构定型、阈值留空标 P7）。
 - **block 粒度 128 token** 与传输/写放大/碎片率的权衡,待 P7 校准。
 - **r-type 状态 checkpoint**:Mamba/卷积 recurrent state 落 L1+ 的 checkpoint 间距/形式、sliding window trailing pages 阈值,待实现/P7 校准。
