@@ -40,6 +40,22 @@
 - **放置与 batch 单向耦合（方案 Z）**：同一 batch 各 sequence 的 KV 必须同时在本机 HBM（attention 一次读全部）。存储池按热度主动预放置 KV 到 HBM 并发布位置视图;调度器读视图组 batch（本地命中优先），缺失补拉，不反向指挥放置。见 [`storage-layer.md`](storage-layer.md) / [`execution-modes.md`](execution-modes.md)。
 - **抢占**：高优先级请求可抢占低优先级，被抢占者的 KV 在存储池中保留（不丢失，本机 HBM 放置释放归还存储池）。
 
+## 缓存命中感知调度
+
+缓存命中是调度的**一等输入**——模式选择(请求级)与 batch 组成(节点级)都由命中视图驱动。本节把散见于各层的命中感知要点收敛,并补一条此前未显式写的**跨请求前缀共调度**。
+
+**两层命中(均为存储池权威元数据,见 [`features.md`](../features/features.md) "Pool 命中 vs 本地命中")**:
+- **Pool 命中**:前缀 KV 在分布式池 → 省重算,但仍需传输(驱动 PD 分离 / 混部选路,见第 1 节)。
+- **本地命中**:前缀 KV 已被存储池放置在某执行节点 HBM → 可 D-direct,零/极小传输(驱动节点选择 + 残差 prefill 工作量)。
+
+**跨请求前缀共调度**(节点级):把**共享公共前缀**的多个请求尽量组到同一 batch / 同一节点,使前缀 block 在 batch 内复用、本地命中叠加。参考 SGLang RadixAttention 的 cache-aware scheduling(`radix_cache.py::match_prefix` 驱动 scheduler 把同前缀请求 co-schedule)、vLLM `KVCacheManager.get_computed_blocks`(逐请求查前缀块、命中数影响调度顺序)。收益:同前缀请求共节点 → 共享同一批前缀 block 的 HBM 放置,本地命中密度提升、传输减少。
+
+**边界(重申,守方案 Z 单向耦合)**:
+- 调度**只读**命中视图,不反向指挥存储池放置。存储池按热度主动预放置并发布位置视图;调度读视图组 batch(本地命中优先→D-direct,缺失补拉)。信息流单向。
+- 命中视图由存储池权威维护,陈旧只影响命中率(miss→pull→控制面确认),不影响正确性(与 [`kv-cache-pool.md`](kv-cache-pool.md) "block table 池组装"的本地视图镜像语义一致)。
+- **投机解码的 draft 候选不进 radix**(hidden states 仅 L0 暂存,见 [`compute-layer.md`](compute-layer.md) "投机解码");命中感知只针对 target 的 KV(t-type 与 r-type 均含,复用条件一致——都按全前缀命中,见 [`kv-cache-pool.md`](kv-cache-pool.md) "t-type / r-type")。
+- 前缀共调度与"前缀亲和性引发热点"(见下开放问题)存在张力:把所有同前缀请求固定到一个节点会过载。共调度目标是 batch 内复用,非全局集中;负载均衡由 Router 在节点选择时加权(见第 1 节 Prefill 节点选择)。
+
 ## 4. 弹性调度
 
 触发指标：

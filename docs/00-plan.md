@@ -73,6 +73,11 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - **重叠语义**：拒绝**引擎驱动** intra-step 重叠（SGLang `get_key_buffer` 每层 `wait_event`，绑死引擎、破坏 graph）；保留**池驱动**异步重叠——消费侧 step 间重叠 + 生产侧 prefill 层级重叠（`page_first_direct` 子块传输/"分块流水线"，支撑 PD 分离 TTFT）。引擎无感、graph 安全。
   - **持久语义**：L3 = F4 恢复点（抗 worker 失败，副本 RAM）；L4 = SSOT 永久权威（抗池级失败，L4 缺失才视为 block 不存在）。风险窗口：worker 与其 L3 副本同时失败且未落 L4 则丢尾巴（= 丢失最后一次写回 L3 之后的少量 token）。
 - **技术选型已定**（P2 落地）：存储 Rust / 控制 Go / 计算 Python+Triton；元数据 etcd；SSOT 用 S3/MinIO；跨语言 gRPC+Protobuf（大块 KV 走 RDMA 旁路）。3rdparty 四个 submodule（sglang/lmcache/mooncake/vllm）作实现参考。
+- **KV 类型 t-type / r-type + 投机解码机制（本轮新增）**：
+  - **KV 类型**：按 HBM 存储形态分 t-type(逐 token 完整 KV,paged block,full attention/MLA)与 r-type(紧凑表示——窗口最近 W token / Mamba 定长 state,sliding window/Mamba/卷积)。**两类复用条件一致**:都需命中全部前缀才能复用;区别**仅在 HBM(L0)存储形态**,目的是降低 r-type 的 HBM 占用。HBM 两类并存、分 arena 管理(r-type 另设固定状态 arena 入图);L1–L4 统一按 block(128 token)组织(两类复用条件一致、不区分类型),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)——相对 SGLang multi-pool 物理分池,我们把类型差异收敛到 L0 存储形态 + block 内布局,而非物理分池。详见 [`architecture/storage-layer.md`](architecture/storage-layer.md) "KV 类型"节、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "t-type / r-type"。
+  - **block 粒度 128 token**：缓存命中/复用/传输/写回最小单位(初版默认,待 P7 校准)。
+  - **投机解码(仿 SGLang)**：drafter(MTP/EAGLE)默认与 decode(target)共置、同 step 串行——drafter 在 target 之后执行、draft token 放下一轮 target 之前;一层 MTP head 以 target 末 token hidden states 自回归产多 draft;重算产出 `1 + num_mtp_layers` 个 token,残差 prefill 短时左 pad;hidden states 仅 L0 暂存(归 r-type)、不进池。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "投机解码"节。
+  - **缓存命中感知调度**：命中(Pool/本地)是模式选择与 batch 组成的一等输入;新增**跨请求前缀共调度**(同前缀请求组同 batch/节点,前缀 block 复用+本地命中叠加,参考 SGLang `match_prefix` cache-aware scheduling / vLLM `get_computed_blocks`);守方案 Z 单向耦合(只读视图、不指挥放置),draft 候选不进 radix。详见 [`architecture/scheduling.md`](architecture/scheduling.md) "缓存命中感知调度"节。
 
 ### P1 待讨论 / 开放点
 
@@ -81,6 +86,12 @@ P7  性能建模与验证   → 量化各假设，回填设计
 - 反向回传的 radix 增长时效：写回到 radix 可见的滞后上限。
 - 分块流水线深度（`page_first_direct` 子块传输 k 与 prefill 层数对齐），待 P7。
 - 模式选择决策树的具体阈值（本地命中判定、传输成本 vs 分离收益）待 P7；**决策树结构本身待 `data-flow.md` 落定**（结构定型、阈值留空标 P7）。
+- **block 粒度 128 token** 与传输/写放大/碎片率的权衡,待 P7 校准。
+- **r-type 状态 checkpoint**:Mamba/卷积 recurrent state 落 L1+ 的 checkpoint 间距/形式、sliding window trailing pages 阈值,待实现/P7 校准。
+- **r-type SWA 尾段重算优化(idea,暂不实现,已记预留)**:SWA KV 不落 L1+、prefix 命中时重算匹配序列最后 `n*(w-1)+1` 个 token(position `[L+n-n*w-1, L)`)仅刷 SWA 窗口、不写非 SWA 模块(slot_mapping=-1),省存储换重算。暂不实现,但已留两处接口预留:① agent 的 slot 分配按模块差异化(只给 SWA 分 write slot,模块意识留池侧、引擎契约不破,经 Q2 张力权衡选此);② 残差路径区分"增量 prefill(未匹配尾)"与"刷新重算(已匹配尾,仅 SWA 写)"。r-type SWA 是否落 L1+(持久 vs 重算)二选一,待 P7。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "r-type SWA 前缀复用的尾段重算优化"。
+- **MTP 左 pad 策略**:是否总 pad 到固定宽度、pad token 是否复用命中 KV、pad 窗口上限,待实现/P7 校准。
+- **drafter 共置 vs 独立 Draft 池**:默认共置(sglang 式);独立池的收益阈值(投机命中率 vs draft 候选传输延迟)待 P7。
+- **r-type 入图**:sliding window / Mamba 固定状态 arena 与 t-type block arena 的 capture/replay 协同,待 P2/P3。
 
 ### P1 下一步（收尾，按此顺序）
 

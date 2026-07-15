@@ -16,10 +16,10 @@
 - 调度目标：最小化 ITL（P99），batch 连续批处理（continuous batching）。
 - 输入：从 KV Pool 拉取前缀 KV。
 
-### Draft Pool（投机解码，可选）
-- 任务：用小模型快速生成候选 token。
-- 特征：算力需求小，可与 Decode Pool 共置或独立。
-- 产物：候选 token 序列 → 由 Decode Pool 的 target 模型并行验证。
+### Draft Pool(投机解码,可选)
+- 任务:用 drafter(MTP/EAGLE 一类)快速生成候选 token,target 模型并行验证。
+- 特征:drafter 算力需求小;**默认与 Decode(target)共置**(仿 SGLang:drafter 在 target 之后、同节点同 step 执行,见下"投机解码"节),不强制独立 Draft 池。
+- 产物:候选 token 序列 → 由同节点 target 并行验证;独立 Draft 池为可选(物理分离时 draft 候选传输延迟可能抵消收益,见"开放问题")。
 
 ## 节点生命周期
 
@@ -48,6 +48,45 @@ Idle → Boot (镜像拉起) → Warm (向存储池申请放置) → Ready → S
 | Prefill | 高 FLOPS | 大 HBM（长序列） | 队列长度 / TTFT SLO |
 | Decode | 高带宽 | 中 HBM（增量 KV） | QPS / ITL SLO |
 | Draft | 低端卡即可 | 小 | 投采命中率 |
+
+## KV 类型:t-type / r-type
+
+两类 KV **复用条件一致**(都需命中全部前缀才能复用),区别**仅在 HBM 存储形态**——r-type 用紧凑表示降低 HBM 占用(详见 [`storage-layer.md`](storage-layer.md) "KV 类型"节,block 组织与复用见 [`kv-cache-pool.md`](kv-cache-pool.md) "t-type / r-type"):
+
+| 类型 | HBM(L0)存储形态 | 占用 | 典型算子 |
+|------|-----------------|------|----------|
+| **t-type** | 逐 token 完整 KV,paged block table(128-token block) | 随序列线性增长 | full attention、MLA |
+| **r-type** | 紧凑表示(窗口最近 W token / 定长 recurrent state) | 亚线性或常量 | sliding window、Mamba、卷积类 |
+
+- HBM 两类并存,引擎按类型分 arena / 管理器(t-type block arena + r-type 状态 arena):参考 vLLM `SingleTypeKVCacheManager × N` + `KVCacheSpec`(`FullAttentionSpec`/`MLAAttentionSpec`/`MambaSpec`);SGLang multi-pool `PoolName`(Mamba/SWA/DSA/Draft)+ `PoolHitPolicy`。**区分的唯一目的是减少 r-type 的 HBM 占用**。
+- **入图影响(Q1)**:t-type 走固定 KV arena + 固定地址 block table(已定);r-type 另设**固定状态 arena**(窗口/状态槽基址入图),block table 语义不适用——按 request 槽寻址。两类 arena 独立 capture,graph 分别 replay。
+- **下层不区分**:L1–L4 按 128-token block 统一组织,两类复用条件本就一致(全前缀命中),r-type 落下层在 block 边界 checkpoint 紧凑状态(trailing pages / state 快照)。
+
+### r-type SWA 前缀复用的尾段重算优化(idea,暂不实现)
+
+**动机**:进一步降存储——SWA 的 KV 只在窗口内有意义,不必把前缀的 SWA KV 落 L1+ 持久(本就计划 trailing only);prefix 命中复用时再重算一小段把 SWA 窗口填回来,以一小段重算换存储节省。
+
+**设定**:每层含一个 SWA 模块,窗口大小 w,合计 n 层。prefix 匹配**不考虑 SWA**(只按非 SWA 模块内容寻址匹配),最终匹配长度 L。
+
+**重算量**:需重算匹配序列最后 `n*w - n + 1 = n*(w-1)+1` 个 token,即 position 在 `[L+n-n*w-1, L)` 的段。推导:顶层 SWA 在 position L-1 需本层前 w 个 token 的 SWA KV;逐层回溯每向下多需 w-1 个 token(SWA 窗口在层间圆锥展开),n 层合计 `n*(w-1)+1`。
+
+**关键优化**:该段重算时**仅刷新 SWA 模块的 KV cache,不刷新其他模块的 cache**(通过 `slot_mapping=-1` 之类机制跳过非 SWA 模块的 KV 写)。非 SWA 模块的这段 KV 已在匹配前缀中(命中复用),只补 SWA 窗口。
+
+**存储取舍**:SWA KV 不落 L1+ → 省存储(r-type SWA 不持久);代价是每次 prefix 命中多一段尾段重算(`n*(w-1)+1` token,仅 SWA 模块计算)。n、w 较大时该段可能 > 一个 block(128),属计算开销,非架构约束。
+
+**暂不实现的预留评估**:若现在不实现,需在以下处留接口/语义预留,否则未来改动成本大:
+
+1. **引擎 write-set 需可按模块表达(per-module write mask)** ★主要预留点:Q2 现把写定为"写第 i 个 token 进某 slot"(block 粒度、全模块);未来要支持"本段重算只写 SWA 模块、跳过非 SWA"。**预留**:KV 写接口的 write-set 按 `(module_type, token_range)` 表达,而非整 block 全模块。
+   - **与 Q2 极简契约的张力**:Q2 定了"block 对引擎纯寻址单位、引擎连满块都不感知、零分层逻辑"。让引擎按模块跳写,等于把模块类型意识渗进引擎,破坏该极简契约。
+   - **备选(下沉到池侧 agent,引擎仍无感)**:不把 per-module write mask 暴露给引擎,而是由池的本地 agent 吸收——两种做法:
+     - **a. 写后丢弃**:引擎照常全模块写 step;agent 在 `done` 后按模块类型丢弃非 SWA 模块的写(只保留 SWA slot 内容,非 SWA slot 标记为未写/归还)。引擎无感,代价是一次多余的非 SWA 写 + agent 侧按模块裁剪。
+     - **b. 预分配只给 SWA slot**:刷新重算段只对 SWA 模块分配 write slot、非 SWA 模块不分配(引擎写到不存在的 slot 即跳过,或 slot_mapping 在 agent 组装时就置 -1)。引擎仍只"写第 i 个 token 进某 slot",感知不到模块类型——模块意识全在 agent 的 slot 分配策略里。
+   - **倾向**:选 b——模块意识留在池 agent(本就管 slot 分配/状态 arena),引擎契约不破。预留点 1 因此弱化为"agent 的 slot 分配需可按模块类型差异化(只给 SWA 分 write slot)",而非"引擎 write-set 按模块表达"。引擎接口不变,Q2 契约保住。
+2. **残差 prefill 的重算范围需可延伸进已匹配前缀**:时序一/D-direct 的残差 prefill 现定义为"对未匹配尾部做增量 prefill";本优化要求重算一段**已匹配前缀的尾部**(刷 SWA,非未匹配段)。**预留**:执行路径区分"增量 prefill(未匹配尾)"与"刷新重算(已匹配尾,仅 SWA 模块写)",后者不重写非 SWA KV。见 [`execution-modes.md`](execution-modes.md) 时序一预留。
+3. **模型注册 schema 预留模块类型布局 + SWA 窗口大小**:哪些层/模块是 SWA、各窗口 w——r-type arena 管理本就需要;确保注册项含 `module_type_layout` + `swa_window`,重算量公式据此算。已由 t-type/r-type 设计隐含,显式登记即可。
+4. **r-type SWA 是否落 L1+ 留开放**:本优化假设**不落**(改重算)。若将来决定落 L1+(trailing pages 持久),则本优化无意义、直接命中。两条路线二选一,待 P7 存储成本 vs 重算成本权衡。见 [`kv-cache-pool.md`](kv-cache-pool.md) 开放点。
+
+**结论**:**暂不实现可行**,需落实预留 1、2(接口语义层),3、4 已被现有设计覆盖/留开放。预留 1 经张力权衡后弱化为"agent 的 slot 分配按模块差异化"(选备选 b,引擎契约不破),预留 2 为"残差路径区分增量 prefill 与刷新重算"。预留成本小、不破坏 Q2 极简契约,不实现不影响当前 t-type/r-type 与命中复用的正确性。
 
 ## HBM 池化下的入图与 KV 管理
 
@@ -111,8 +150,68 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 
 proto 预留 per-rank 字段,实现单卡先行。MLA 多 rank 回写去重(SGLang 设计 doc 提及)留作后续参考。
 
+## 投机解码
+
+本节落定投机解码的执行模型(仿 SGLang)、MTP/EAGLE 机制、hidden states 暂存,以及 PD 分离下 MTP 的左 pad 问题。
+
+### 执行顺序:drafter 在 target 之后
+
+仿 SGLang:drafter 与 target(主模型)**同节点、同 step 串行**,非并行独立池:
+
+```
+每步(step N):
+  1. target 前向 → 产出/验证 token + KV + 末 token hidden states
+  2. drafter 以 target 末 token 的 hidden states 为输入 → 自回归生成 k 个 draft token
+  3. draft token 放在 target 之前,供 step N+1 的 target 并行验证
+step N+1:
+  target 一次前向验证 k 个 draft → 接受若干 + 延伸 1 token → 回到 1
+```
+
+drafter 在 target **之后**执行(吃 target 本步输出),draft token 放在 target **之前**(供下步消费)。"主模型前面执行"指 draft 相对下一轮 target 的时间前置,而非本步并行。这与 vLLM `EagleProposer`/`MedusaProposer`(proposer 侧产 draft)+ `BaseSpeculator`(target 侧并行验证)+ `RejectionSampler` 的 proposer↔speculator 划分一致;区别在物理编排——vLLM proposer 可独立进程,我们默认 drafter 与 decode(target)共置(下文)。
+
+### MTP/EAGLE:一层 MTP head 自回归产多 draft
+
+drafter 用**一层 MTP head**(接续/共享 target 的 embedding 与最后一层 hidden),以 target 末 token 的 hidden states 为种子,**自回归**生成多个 draft token(比独立小模型省算力、与 target 同分布)。`num_mtp_layers` = MTP 一次产出的 draft token 数(也即 hidden states 需保留的最近 token 数,见下)。
+
+### hidden states 暂存(归 r-type)
+
+drafter 需 target **最后 `num_mtp_layers` 个 token 的 hidden states**作自回归输入:
+
+- 按 token 组织、每步滚动保留最近 `num_mtp_layers` 个 token;采用 **r-type 的紧凑存储形态**(per-request,不随序列线性堆积)。
+- 仅 L0(HBM)暂存,每步滚动覆盖;**不进 radix、不落 L1+**(跨请求无复用价值,故不涉及全前缀复用)。
+- 同 step 与 KV 一同产出,但 KV 写回池(容错 + 前缀生长),hidden states 用完即滚,生命周期独立。block 组织与命中策略见 [`kv-cache-pool.md`](kv-cache-pool.md) "hidden states"。
+
+### drafter 共置 vs 独立 Draft 池
+
+- **默认共置**(sglang 式):drafter 与 decode(target)同节点,零 draft 候选传输延迟,主路径。
+- **独立 Draft 池(可选)**:仅当 drafter 算力开销显著拖累 decode 才考虑物理分离;但 draft 候选需跨节点传给 target,延迟可能抵消投机收益(见"开放问题")。
+
+### PD 分离下 MTP 的重算与左 pad
+
+MTP 类方案的验证 step:target 对 draft 的 k 个 token 一次前向,**重算后产出 `1 + num_mtp_layers` 个 token** 的 KV(k 个 draft 的验证 + 1 个延伸 token)。
+
+**左 pad 问题**:残差 prefill 场景(前缀命中后做残差 prefill,见 [`execution-modes.md`](execution-modes.md) 时序一/D-direct),若**残差 prefill 的 token 数 < MTP 单次产出宽度**(`1 + num_mtp_layers`),MTP head 的多 token 输出与序列位置无法对齐 → 需**左 pad**:在残差段左侧补入若干已命中的前缀 token(从缓存重引入),把 prefill 段垫到 ≥ MTP 产出宽度,使 MTP 各 head 的位置对齐。
+
+- 本质:MTP 一次产多 token 要求输入段长度 ≥ 产出宽度;短 prefill(尤其 D-direct 残差 prefill)不足时左 pad 补齐。
+- 代价:左 pad 增加少量 prefill 算力(重算已命中的补齐 token),但保证 MTP 正确性;pad 窗口 = MTP 产出宽度 − 残差长度,上限 `num_mtp_layers`。
+- PD 分离下该问题同样存在(残差在 P 侧或 D-direct 节点),左 pad 归计算层处理,pad 的 token 来自已命中前缀(本地命中则零传输,Pool 命中则需先拉取对应 block)。
+- 具体左 pad 策略(是否总是 pad 到固定宽度、pad token 是否复用 KV)待实现/P7 校准。
+
+### 参考实现与关键差异
+
+> 按 CLAUDE.md 强制查阅规则。
+
+- **vLLM**:`vllm/v1/spec_decode/`::`EagleProposer`/`MedusaProposer`/`DraftModelProposer`(proposer 侧产 draft)+ `spec_decode/speculator.py::BaseSpeculator`/`DraftModelSpeculator`(target 侧并行验证)+ `rejection_sampler.py::RejectionSampler`(拒绝采样)。proposer↔speculator 划分对应 drafter↔target。见 [`../research/vllm/compute.md`](../research/vllm/compute.md) "Speculative Decoding"。
+- **SGLang**:speculative 执行于 `python/sglang/srt/speculative/`(drafter 在 target 之后、同 step 串行的执行模型即仿此);multi-pool `PoolName` 含 **Draft** pool(`hicache_storage.py::batch_exists_v2` / `PoolTransfer`),即 drafter 的 hidden states/draft 产物作为独立 pool 类型管理——我们把 hidden states 收敛为 L0 r-type 暂存、不进池,差异见下。SGLang spec decode 未在 `docs/research/sglang/` 单列文档,执行顺序按 `3rdparty/sglang/python/sglang/srt/speculative/` 源码回溯。
+- **关键差异**:
+  - vLLM/SGLang 的 drafter 可独立进程/proposer;我们默认 drafter 与 decode(target)**共置**(sglang 式),独立 Draft 池为可选。
+  - SGLang 把 Draft 产物作为 multi-pool 的一类(可落 L3);我们 hidden states **仅 L0 暂存、不落池**(跨请求无复用价值),池只承载 target 的 t-type KV。
+  - 投机不改变存算分离边界:draft 的 hidden states 是计算层 per-step 暂态(同权重 offload 之外的临时显存),不归存储池权威;target 的 KV 仍归池、写回、前缀生长。
+
 ## 开放问题
 
 - Prefill/Decode 比例随流量变化，是否支持节点在池间动态转换？（带权重迁移成本）
 - continuous batching 与 KV 跨节点迁移如何协同（迁移中的 sequence 如何处理）？
-- 投机解码的 draft 与 target 在物理分离时，候选传输延迟是否抵消收益？
+- **投机解码 draft 与 target 物理分离时,候选传输延迟是否抵消收益?**(默认共置规避;独立 Draft 池的收益阈值待 P7)
+- **MTP 左 pad 策略**:是否总是 pad 到固定宽度、pad token 是否复用命中 KV、pad 窗口上限,待实现/P7 校准。
+- **r-type 入图**:sliding window / Mamba 的固定状态 arena 与 t-type block arena 的 capture/replay 协同。

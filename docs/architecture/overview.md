@@ -78,5 +78,5 @@ Request → Gateway
 ## 开放问题
 
 - KV 传输带宽与 prefill/decode 计算时间的比值,在什么范围内 P/D 物理分离才划算?
-- KV Pool 分片粒度(per-layer / per-block / per-sequence)如何影响传输与复用?
-- 投机解码的 draft model 放哪一层?
+- KV Pool 分片粒度(per-layer / per-block / per-sequence)如何影响传输与复用?(已定 per-block,粒度 128 token,见 [`kv-cache-pool.md`](kv-cache-pool.md))
+- 投机解码 draft model 放哪一层?→ 已定:默认与 decode(target)共置(sglang 式),独立 Draft 池可选,见 [`compute-layer.md`](compute-layer.md) "投机解码"节。
