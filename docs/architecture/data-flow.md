@@ -9,9 +9,9 @@
 ```
 ① Gateway 入口准入(限流/鉴权/过载 shedding) ── 拒绝则不计推理系统失败率
         ↓ (已准入请求)
-② Router 查池:一次 RPC 拿 (model_id, prompt 前缀)
+② Router 读本地命中视图镜像(零 RPC): (model_id, prompt 前缀)
         ← 可复用 block 列表 + 各自位置(含"是否已在某 HBM"= 本地命中判定) + 集群负载视图
-        ↓ (5ms 模式选择预算内)
+        ↓ (5ms 模式选择预算内,本地内存查 + 本地纯函数决策)
 ③ 模式选择 f(请求, 集群状态) → (模式, 节点)        [纯函数,见 §2]
         ↓
 ④ 执行(按模式分支,见 §3;统一 ready/done 双 fence 一步契约)
@@ -31,7 +31,7 @@
 
 ```mermaid
 flowchart TD
-    Q[Router 查池拿到:前缀复用 block + 位置 + 负载视图]
+    Q[Router 读本地命中视图镜像:前缀复用 block + 位置 + 负载视图]
     Q --> L{前缀 KV 已被池预放置到<br/>某执行节点 HBM?<br/>(本地命中)}
     L -- 是 --> DD[D-direct:路由到该节点<br/>残差 prefill + decode,零传输]
     L -- 否 --> S{单节点完成划算?<br/>(prompt 短 / 传输成本 > 分离收益)}
@@ -71,7 +71,7 @@ flowchart TD
 请求在单节点完成 prefill + decode，KV 全程本机 L0，无跨节点传输。
 
 ```
-Router → 查池(本地命中判定) → 路由到目标节点
+Router → 读本地命中视图镜像(本地命中判定) → 路由到目标节点
        → 本机 prefill(残差[D-direct] 或 完整/增量[混部]) → 本机 L0
        → 本机 decode(每步 ready/done 契约) → 增量 KV 异步写回池
 ```
