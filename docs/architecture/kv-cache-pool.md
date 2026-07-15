@@ -39,13 +39,13 @@ KVBlockID = (model_id, layer_idx, block_hash)
 投机解码的 drafter 需一份 target 产出的**中间态**,形态按方案类别不同:
 
 - **自回归类(MTP/EAGLE/EAGLE3)**:target **最后 `num_mtp_layers` 个 token 的 hidden states**(自回归输入)。
-- **diffusion 类(DFLASH/DSPARK)**:draft 侧窗口/block 状态(DFLASH target-token 滑窗、DSPARK gamma 块 + Markov 状态),由 post drafter 从 target 输出准备。
+- **diffusion 类(DFLASH/DSPARK)**:draft 侧窗口/block 状态(DFLASH target-token 滑窗、DSPARK gamma 块 + Markov 状态),由 drafter 的 `post_forward` 从 target 输出准备。
 
 两类统一处理:
 - **组织**:按 token / block 组织,每步滚动保留;采用 **r-type 的紧凑存储形态**(per-request、不随序列线性堆积)。
 - **层级**:仅 L0(HBM)暂存,每步滚动覆盖;**不进 radix、不落 L1+ 持久**(跨请求无复用价值,故不涉及全前缀复用)。
 - **与 KV 的区别**:同 step 产出,但 KV 写回池(容错 + 前缀生长),draft 中间态用完即滚,生命周期独立。
-- 详见 [`compute-layer.md`](compute-layer.md) "投机解码"节(post/pre drafter 二分)。
+- 详见 [`compute-layer.md`](compute-layer.md) "投机解码"节(drafter `post_forward`/`pre_forward` 二阶段)。
 
 ### 前缀树索引
 

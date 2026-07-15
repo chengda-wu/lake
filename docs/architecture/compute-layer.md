@@ -188,42 +188,44 @@ proto 预留 per-rank 字段,实现单卡先行。MLA 多 rank 回写去重(SGLa
 **对 lake 的参考取向**:
 - **MTP / EAGLE / EAGLE3 / DFLASH**:两边都有,交叉参考。执行编排(drafter-after-target、hidden states 复用)以 SGLang 为主(我们仿 SGLang 共置串行),proposer↔speculator 划分参考 vLLM。
 - **DSPARK**:**只有 SGLang 有**,是 diffusion 类 self-drafting 的唯一参考——`dspark_components/`(config/planner/block_accept_estimator/kernels)+ `dspark_worker_v2.py` + ragged verify。gamma 块并行 draft(默认 gamma=7)+ verify window = gamma+1,与我们"drafter 一次产多 token"的宽度语义一致,但 diffusion 的并行 draft 与 MTP 的自回归 draft 在 hidden states 依赖/verify 上不同,接入时需区分。
-- **通用性**:lake 用 **post drafter / pre drafter 二分**统一自回归类(MTP/EAGLE/EAGLE3)与 diffusion 类(DFLASH/DSPARK)的编排(见下"执行编排")——post 吃 target 输出做强耦合部分(自回归的 draft head 前向 / diffusion 的 cache 准备),pre 产 draft token(自回归多 token / diffusion 并行 block)。draft 中间态一律 L0 r-type 暂存、不进池,形态按类不同(hidden states vs 窗口/block 状态)。不改存算分离边界。
+- **通用性**:lake 用 **drafter 的 `post_forward` / `pre_forward` 二阶段**(pre/post 共用同一 drafter 模型,同类的两个方法)统一自回归类(MTP/EAGLE/EAGLE3)与 diffusion 类(DFLASH/DSPARK)的编排(见下"执行编排")——`post_forward` 吃 target 输出做强耦合部分(自回归的 draft head 前向 / diffusion 的 cache 准备),`pre_forward` 产 draft token(自回归多 token / diffusion 并行 block)。draft 中间态一律 L0 r-type 暂存、不进池,形态按类不同(hidden states vs 窗口/block 状态)。不改存算分离边界。
 
-### 执行编排:post drafter / pre drafter 二分
+### 执行编排:drafter 的 post_forward / pre_forward 二阶段
 
-drafter 与 target(主模型)**同节点、同 step 串行**(仿 SGLang,非并行独立池)。lake 把 drafter 拆成**围绕 target 的两段**,按"相对 target 的时间位置 + 是否依赖 target 本步输出"划分:
+drafter 与 target(主模型)**同节点、同 step 串行**(仿 SGLang,非并行独立池)。**pre 与 post 共用同一个 drafter 模型**——它们不是两个独立组件,而是**同一 drafter 类的两个前向阶段**(方法),按"相对 target 的时间位置 + 是否依赖 target 本步输出"划分:
 
-| 段 | 位置 | 职责 | 承载 |
-|----|------|------|------|
-| **post drafter** | target **之后**(同 step) | 吃 target 本步输出(hidden states/KV),做**与主模型行为强耦合**的部分 | MTP/EAGLE/EAGLE3 的 draft head 前向(参数与主模型一致的那部分);DFLASH/DSPARK 的 **draft cache 准备**(从 target 输出构建 draft 侧所需的窗口/状态) |
-| **pre drafter** | target **之前**(下一轮 step) | 产出实际 draft token,供本轮 target 并行验证 | MTP/EAGLE/EAGLE3 的**自回归多 token 生成**;DFLASH/DSPARK 的 **draft 生成**(diffusion 并行产 block) |
+| 阶段 | 位置 | 职责 | 承载 |
+|------|------|------|------|
+| **`post_forward`** | target **之后**(同 step) | 吃 target 本步输出(hidden states/KV),做**与主模型行为强耦合**的部分 | MTP/EAGLE/EAGLE3 的 draft head 前向(参数与主模型一致的那部分);DFLASH/DSPARK 的 **draft cache 准备**(从 target 输出构建 draft 侧所需的窗口/状态) |
+| **`pre_forward`** | target **之前**(下一轮 step) | 产出实际 draft token,供本轮 target 并行验证 | MTP/EAGLE/EAGLE3 的**自回归多 token 生成**;DFLASH/DSPARK 的 **draft 生成**(diffusion 并行产 block) |
 
-**划分依据**:post drafter 是"消费 target 输出、与主模型强绑定"的一段(必须紧接 target、读其 hidden states/KV);pre drafter 是"产 draft token、喂下一轮 target"的一段(时间上前置于下轮 target)。两段之间隔着 target 的一次前向。
+**框架落点**:一个 `Drafter` 类持有 draft 模型(MTP head / EAGLE / DFLASH / DSPARK 各自实现),暴露 `post_forward()` 与 `pre_forward()` 两个方法;二者共享同一份模型权重与 draft 侧状态(hidden states / 窗口 / block 状态),只是执行时机不同(post 紧接 target、pre 在下轮 target 前)。不拆成两个类/进程。
+
+**划分依据**:`post_forward` 是"消费 target 输出、与主模型强绑定"的一段(必须紧接 target、读其 hidden states/KV);`pre_forward` 是"产 draft token、喂下一轮 target"的一段(时间上前置于下轮 target)。两阶段之间隔着 target 的一次前向。
 
 ```
 step N:
-  [target]        前向 → 产出/验证 token + KV + hidden states
-  [post drafter]  吃 target 本步输出:
-                    - MTP/EAGLE/EAGLE3:draft head 前向(与主模型一致的计算)
-                    - DFLASH/DSPARK:准备 draft cache(窗口/状态)
+  [target]              前向 → 产出/验证 token + KV + hidden states
+  [drafter.post_forward] 吃 target 本步输出:
+                           - MTP/EAGLE/EAGLE3:draft head 前向(与主模型一致的计算)
+                           - DFLASH/DSPARK:准备 draft cache(窗口/状态)
 step N+1:
-  [pre drafter]   产 draft token(放 target 之前):
-                    - MTP/EAGLE/EAGLE3:自回归生成 k 个 draft token
-                    - DFLASH/DSPARK:diffusion 并行生成 draft block
-  [target]        一次前向并行验证 draft → 接受若干 + 延伸 1 token → 回到 post drafter
+  [drafter.pre_forward]  产 draft token(放 target 之前):
+                           - MTP/EAGLE/EAGLE3:自回归生成 k 个 draft token
+                           - DFLASH/DSPARK:diffusion 并行生成 draft block
+  [target]              一次前向并行验证 draft → 接受若干 + 延伸 1 token → 回到 post_forward
 ```
 
-- **为何拆两段而非"drafter 一坨在 target 后"**:MTP 的自回归多 token 生成本身要迭代多步(每步吃上一个 draft token),把"依赖 target 输出的第一步(post)"与"纯 draft 自迭代(pre)"分开,便于:① 编排上 post 紧贴 target 复用其 hidden states/KV,pre 在下轮 target 前批量做;② diffusion 类(DFLASH/DSPARK)天然是"post 准备 cache + pre 并行生成",二分对它们同样成立,统一编排框架。
-- **对应参考**:vLLM `EagleProposer`/`MedusaProposer`(proposer 产 draft)+ `BaseSpeculator`(target 并行验证)+ `RejectionSampler` 的 proposer↔speculator 划分,大体对应我们的 pre drafter↔target-verify;但 vLLM 未显式区分 post/pre,把 draft head 前向与自回归生成揉在 proposer 内。我们二分是为统一 MTP(自回归)与 diffusion(并行)两类的编排(见下"diffusion 类")。区别在物理编排——vLLM proposer 可独立进程,我们默认共置(下文)。
+- **为何分两阶段而非"drafter 一坨在 target 后"**:MTP 的自回归多 token 生成本身要迭代多步(每步吃上一个 draft token),把"依赖 target 输出的第一步(`post_forward`)"与"纯 draft 自迭代(`pre_forward`)"分开,便于:① 编排上 post 紧贴 target 复用其 hidden states/KV,pre 在下轮 target 前批量做;② diffusion 类(DFLASH/DSPARK)天然是"post 准备 cache + pre 并行生成",二阶段对它们同样成立,统一编排框架。两阶段同模型,故为方法而非独立组件。
+- **对应参考**:vLLM `EagleProposer`/`MedusaProposer`(proposer 产 draft)+ `BaseSpeculator`(target 并行验证)+ `RejectionSampler` 的 proposer↔speculator 划分,大体对应我们的 `pre_forward`↔target-verify;但 vLLM 未显式区分 post/pre,把 draft head 前向与自回归生成揉在 proposer 内。我们分两阶段是为统一 MTP(自回归)与 diffusion(并行)两类的编排(见下"diffusion 类")。区别在物理编排——vLLM proposer 可独立进程,我们默认共置(下文)。
 
 ### 自回归类(MTP/EAGLE/EAGLE3):一层 head 自回归产多 draft
 
 drafter 用**一层 draft head**(MTP/EAGLE head,接续/共享 target 的 embedding 与最后一层 hidden;EAGLE3 用多层 aux hidden),以 target 末 token 的 hidden states 为种子,**自回归**生成多个 draft token(比独立小模型省算力、与 target 同分布)。`num_mtp_layers` = 一次产出的 draft token 数(也即 hidden states 需保留的最近 token 数,见下)。
 
-映射到 post/pre 二分:
-- **post drafter**:draft head 吃 target 末 token hidden states 做第一步前向(与主模型参数一致的计算)。
-- **pre drafter**:在此基础上自回归迭代出剩余 draft token,放到下轮 target 之前。
+映射到二阶段:
+- **`post_forward`**:draft head 吃 target 末 token hidden states 做第一步前向(与主模型参数一致的计算)。
+- **`pre_forward`**:在此基础上自回归迭代出剩余 draft token,放到下轮 target 之前。
 
 ### hidden states 暂存(归 r-type)
 
@@ -237,12 +239,12 @@ drafter 需 target **最后 `num_mtp_layers` 个 token 的 hidden states**作自
 
 DFLASH/DSPARK 是 diffusion 风格投机,与自回归类的核心差异:**不逐 token 自回归,而是一次并行产出一个 draft block(多 token 同时生成)**。半年内可能进生产,当前先把编排位置定清(细节接入时按方案落)。
 
-映射到 post/pre 二分(与自回归类共用同一框架):
-- **post drafter**:吃 target 本步输出,**准备 draft cache**——DFLASH 维护 draft 侧的 target-token 滑动窗口(近 max 时 paged 后端可能左留一页对齐);DSPARK 准备 self-draft 所需的 block 状态(gamma 块规划、Markov head 状态)。这段与主模型输出强耦合,故放 post。
-- **pre drafter**:**并行生成 draft block**——DSPARK 一次产 gamma 个 draft token(默认 gamma=7,verify window = gamma+1),DFLASH 按 block size(verify window)并行产;放下轮 target 之前,target 用 ragged verify 一次验证整块。
+映射到二阶段(与自回归类共用同一 drafter 类的两个方法):
+- **`post_forward`**:吃 target 本步输出,**准备 draft cache**——DFLASH 维护 draft 侧的 target-token 滑动窗口(近 max 时 paged 后端可能左留一页对齐);DSPARK 准备 self-draft 所需的 block 状态(gamma 块规划、Markov head 状态)。这段与主模型输出强耦合,故放 post。
+- **`pre_forward`**:**并行生成 draft block**——DSPARK 一次产 gamma 个 draft token(默认 gamma=7,verify window = gamma+1),DFLASH 按 block size(verify window)并行产;放下轮 target 之前,target 用 ragged verify 一次验证整块。
 
 与自回归类的差异点(接入时需区分):
-- **draft 中间态**:自回归类是 hidden states(逐 token 滚动);diffusion 类是 **draft 侧窗口/block 状态**(DFLASH 滑窗、DSPARK gamma 块 + Markov 状态)。两者都归 **L0 r-type 暂存、不进池**(计算层 per-step 暂态),但形态不同——post drafter 的 cache 准备产出的就是这部分,pre drafter 消费它并行产 block。
+- **draft 中间态**:自回归类是 hidden states(逐 token 滚动);diffusion 类是 **draft 侧窗口/block 状态**(DFLASH 滑窗、DSPARK gamma 块 + Markov 状态)。两者都归 **L0 r-type 暂存、不进池**(计算层 per-step 暂态),但形态不同——`post_forward` 的 cache 准备产出的就是这部分,`pre_forward` 消费它并行产 block。
 - **verify**:自回归类逐 token 树形 verify;diffusion 类 **ragged verify**(整块并行验证,DSPARK 有 SPS/STS 校准表调 verify 长度)。
 - **左 pad / 边界**:DFLASH 滑窗在近 max 时左留一页对齐——归"长度边界规避"的 headroom 吸收(见下)。
 - **不改存算分离边界**:diffusion 的 draft 窗口/block 状态仍是计算层 per-step 暂态,不归存储池权威;target 的 KV 仍归池、写回、前缀生长。post/pre 二分只是计算层内部编排,存储池只见 target KV 的 publish/写回。
