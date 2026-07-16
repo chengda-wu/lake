@@ -70,7 +70,7 @@ docs/
 
 | 路径 | 来源 | 主要参考点 |
 |------|------|-----------|
-| `3rdparty/sglang` | sgl-project/sglang | **HiCache**:L1/L2/L3 分层、HiRadixTree(节点记 KV 位置)、prefetch/write-back 策略、page-first 布局、计算-传输重叠 |
+| `3rdparty/sglang` | sgl-project/sglang | **HiCache**:L1/L2/L3 分层、HiRadixTree(节点记 KV 位置)、prefetch/write-back 策略、page-first 布局、计算-传输重叠;**计算层**:spec decode(DSPARK 仅此有 / DFLASH / MTP / EAGLE,drafter 共置串行执行模型、`PoolName.DRAFT` drafter KV 池) |
 | `3rdparty/mooncake` | kvcache-ai/Mooncake | **transfer-engine**(RDMA 零拷贝)→ Transfer Bus;**mooncake-store** → KV Pool(L3) |
 | `3rdparty/lmcache` | LMCache/LMCache | 跨请求/跨实例 KV 复用、多存储后端、`rust/` 工程模式 |
 | `3rdparty/vllm` | vllm-project/vllm | **计算层**:PagedAttention、worker/`GPUModelRunner`、`KVConnectorBase_V1` 接口(存算分离接入点)、spec decode |

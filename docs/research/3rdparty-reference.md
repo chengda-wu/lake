@@ -28,6 +28,8 @@
 
 源码入口:`3rdparty/sglang/docs/advanced_features/hicache_design.md`、`python/sglang/srt/mem_cache/`。
 
+> SGLang **同时是计算层参考**:spec decode 执行模型(drafter-after-target 共置串行)、DSPARK(**仅 SGLang 有**)/DFLASH/MTP/EAGLE、drafter KV 池(`PoolName.DRAFT`)、多层 MTP chain/non-chain。见 [`../architecture/compute-layer.md`](../architecture/compute-layer.md) "投机解码"与"vLLM / SGLang 支持梳理"。(SGLang spec decode 暂未在 `docs/research/sglang/` 单列文档,按 `3rdparty/sglang/python/sglang/srt/speculative/` 源码回溯。)
+
 ### 借鉴点
 
 | HiCache 设计 | 我们对应 | 说明 |

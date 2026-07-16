@@ -138,7 +138,7 @@ lake/
 │       ├── vllm/                  #   vLLM 深度分析（计算层参考）
 │       └── dynamo/                #   Dynamo 深度分析（编排层/控制面参考）
 ├── 3rdparty/                   # 参考源码（git submodule，只读）
-│   ├── sglang/                 #   SGLang（HiCache 分层 KV）
+│   ├── sglang/                 #   SGLang（HiCache 分层 KV + spec decode 计算层）
 │   ├── lmcache/                #   LMCache（跨实例 KV 复用）
 │   ├── mooncake/               #   Mooncake（KVCache-centric 分离架构）
 │   ├── vllm/                   #   vLLM（计算层：PagedAttention/KV connector）
