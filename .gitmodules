@@ -10,3 +10,6 @@
 [submodule "3rdparty/vllm"]
 	path = 3rdparty/vllm
 	url = https://github.com/vllm-project/vllm
+[submodule "3rdparty/dynamo"]
+	path = 3rdparty/dynamo
+	url = https://github.com/ai-dynamo/dynamo

@@ -4,7 +4,7 @@
 
 ## 源码深度参考(3rdparty submodule)
 
-四个项目源码已引入 `3rdparty/`(submodule),各有分目录的深度分析文档:
+五个项目源码已引入 `3rdparty/`(submodule),各有分目录的深度分析文档:
 
 - **SGLang HiCache** → [`sglang/`](sglang/):[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md)
   - L1/L2/L3 三层(L1/L2 私有、L3 共享)、HiRadixTree、prefetch/write-back 策略。
@@ -14,8 +14,10 @@
   - RDMA 零拷贝传输引擎、对象级 KV 池、PD 分离。
 - **vLLM** → [`vllm/`](vllm/):[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md)
   - **计算层参考**:PagedAttention、worker/model runner、`KVConnectorBase_V1` 接口、spec decode。
+- **Dynamo** → [`dynamo/`](dynamo/):[总览](dynamo/overview.md)
+  - **编排层/控制面参考**(NVIDIA,Rust):推理引擎之上的编排层,KV-aware router + KVBM(GPU→CPU→SSD→远端 三层 offload)+ 多后端通信(etcd/nats/tcp/zmq)。Rust 写控制面/编排,是 lake Rust 存储控制面的直接参照系。
 
-四者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
+五者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
 
 ---
 
@@ -47,4 +49,4 @@
 
 - **DeepSpeed-Inference**, **TensorRT-LLM**, **Orca** (continuous batching): 推理引擎基线，本系统在其上做存算分离的解耦。
 
-> 注：以上为方向性参考。SGLang/Mooncake/LMCache/vLLM 四者源码已引入 `3rdparty/`(submodule),与本项目设计的逐层对应、借鉴点与关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
+> 注：以上为方向性参考。SGLang/Mooncake/LMCache/vLLM/Dynamo 五者源码已引入 `3rdparty/`(submodule),与本项目设计的逐层对应、借鉴点与关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
