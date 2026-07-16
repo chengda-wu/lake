@@ -1,11 +1,12 @@
 # 3rdparty 源码参考
 
-本仓库在 `3rdparty/` 以 git submodule 引入四个项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
+本仓库在 `3rdparty/` 以 git submodule 引入五个项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
 
 - [`sglang/`](sglang/) — SGLang HiCache:[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md) · [thinking 控制](sglang/thinking-control.md)
 - [`lmcache/`](lmcache/) — LMCache:[总览](lmcache/overview.md) · [跨实例复用与后端](lmcache/sharing-and-backends.md)
 - [`mooncake/`](mooncake/) — Mooncake:[总览](mooncake/overview.md) · [传输引擎](mooncake/transfer-engine.md) · [KV 存储与池化](mooncake/kv-store.md)
 - [`vllm/`](vllm/) — vLLM:[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md)
+- [`dynamo/`](dynamo/) — Dynamo(NVIDIA):[总览](dynamo/overview.md) · 数据中心级推理编排(KV-aware router + KVBM 三层 + Rust 控制面)
 
 本文把它们的关键组件与本系统(`docs/architecture/`)逐层对应,并标注**借鉴点**与**关键差异**(我们的设计更彻底)。
 
@@ -17,8 +18,9 @@
 | `3rdparty/lmcache` | [LMCache/LMCache](https://github.com/LMCache/LMCache) | nightly | 跨实例复用 + 多后端 + Rust I/O |
 | `3rdparty/mooncake` | [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake) | main HEAD | 传输引擎 + 对象级 KV 池 |
 | `3rdparty/vllm` | [vllm-project/vllm](https://github.com/vllm-project/vllm) | main HEAD (ab132ee98) | **计算层**(PagedAttention/worker/connector/spec decode) |
+| `3rdparty/dynamo` | [ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo) | main HEAD | **编排层/控制面**:KV-aware router + KVBM 三层 offload + Rust 编排 + 多后端通信 |
 
-> 四者本就生态相连:vLLM 是计算引擎,其 `KVConnectorBase_V1` 接口被 LMCache/Mooncake/NIXL/FlexKV 实现为 connector;SGLang HiCache 把 Mooncake 作为 L3 后端之一。vLLM 提供计算面,另三者提供存储/传输面——我们站在四者之上做更彻底的存算分离:把 vLLM 的状态面(KV/调度/元数据)剥离给存储池与控制面,把 connector 接口从可选插件升为存储池必经路径。
+> 五者本就生态相连:vLLM 是计算引擎,其 `KVConnectorBase_V1` 接口被 LMCache/Mooncake/NIXL/FlexKV 实现为 connector;SGLang HiCache 把 Mooncake 作为 L3 后端之一;Dynamo 把 vLLM/SGLang 作为可插拔 worker,在其上做 KV-aware 编排。vLLM 提供计算面,SGLang/LMCache/Mooncake 提供存储/传输面,Dynamo 提供编排面——我们站在五者之上做更彻底的存算分离:把 vLLM 的状态面(KV/调度/元数据)剥离给存储池与控制面,把 connector 接口从可选插件升为存储池必经路径。
 
 ---
 
@@ -94,7 +96,7 @@
 
 源码入口:`3rdparty/vllm/vllm/v1/`、`vllm/distributed/kv_transfer/kv_connector/`、`vllm/model_executor/`。
 
-vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目(SGLang/LMCache/Mooncake)提供存储/传输面,vLLM 提供计算面——四者恰好覆盖我们三语言子项目的参考来源(计算层 Python / 存储层 Rust / 传输与池化)。详见 [`vllm/`](vllm/)。
+vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目(SGLang/LMCache/Mooncake)提供存储/传输面,vLLM 提供计算面,Dynamo 提供编排面——五者恰好覆盖我们三语言子项目的参考来源(计算层 Python / 存储层 Rust / 控制面 Rust+Go / 传输与池化)。详见 [`vllm/`](vllm/)。
 
 ### 借鉴点
 
@@ -118,7 +120,32 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 
 ---
 
-## 设计取舍:站在四者之上
+## 5. Dynamo → 我们的编排层 / 控制面 / KVBM 分层
+
+源码入口:`3rdparty/dynamo/lib/`(Rust 核心)、`components/`、`lib/runtime/`。Dynamo 是 NVIDIA 的"推理引擎之上的编排层",把 vLLM/SGLang/TRT-LLM 作为可插拔 worker 协调成多节点系统。**Rust 写核心性能路径 + 控制面**,是 lake 三语言分层(Rust 存储/Go 控制/Python 计算)中 Rust 控制面/编排的直接参照系。深度分析见 [`dynamo/overview.md`](dynamo/overview.md)。
+
+### 借鉴点
+
+| Dynamo 设计 | 我们对应 | 说明 |
+|------|----------|------|
+| **`StorageTier`(Device/HostPinned/Disk/External)** | L0/L1/L2/L3 | tier=介质非位置,与 lake"层=介质非位置"一致;`from_kv_medium` 字符串→tier 映射可参考 wire 格式 |
+| **`Placement { owner, tier }`** | `locations` 多层位置 | `PlacementOwner`(LocalWorker/Shared)区分私有/共享,对应 lake"副本归池非 worker 私有" |
+| **`ExternalSequenceBlockHash`(父哈希链式)** | `block_hash = hash(parent ‖ tokens)` | 注释明示 parent block hash 编入,印证 lake 链式哈希防误复用 |
+| **`PlacementEvent` 位置变更推送** | 位置视图权威变更触发推送 | 事件驱动镜像推送 |
+| **KVBM logical/physical/engine 三层** | 存储池 元数据/传输/运行时 | 分层组织可借鉴(`kvbm-logical`=radix+locations,`kvbm-physical`=布局+传输,`kvbm-engine`=运行时+offload+object) |
+| **KV-aware router(`overlap_blocks` 量化)** | Router 命中感知选路 | 命中 overlap 量化,比 lake"命中/不命中"更细 |
+| **transports 多后端可插拔**(etcd/nats/tcp/zmq) | 通信选型(见 #3) | 按部署形态选通信栈;KV 事件走 NATS、discovery 走 K8s CRD/etcd——"控制面存储 vs 事件面"分离 |
+
+### 关键差异(我们更彻底)
+
+- **存算分离彻底度**:Dynamo 的 KV 仍由 engine 持有,KVBM 是"offload 层"(把 engine 的 KV 卸到 CPU/SSD/远端);lake **HBM 归池、worker 不拥有任何内存**,KVBM 式 offload 在 lake 是池的统一放置(方案 Z),非引擎私有缓存的延伸。
+- **控制面一致性**:Dynamo KV 事件走 NATS(best-effort 事件流)、discovery 多后端,无全局强一致位置视图;lake 位置视图进 etcd 强一致,Router 一跳命中(见 [`../architecture/consistency.md`](../architecture/consistency.md) §1)。Dynamo 偏"事件流编排",lake 偏"强一致权威 + 镜像"。
+- **radix 归属**:Dynamo KV-aware router 用 block 哈希 overlap,radix 前缀树/内容寻址仍依赖底层 engine;lake 把 radix 归存储池统一管。
+- **执行模式**:Dynamo 侧重 PD/E-P-D 物理隔离;lake 多 D-direct(本地命中零传输)与混部,Dynamo 无明确对应。
+
+---
+
+## 设计取舍:站在五者之上
 
 | 我们的设计层 | 主要参考 | 我们多做的(更彻底) |
 |--------------|----------|---------------------|
@@ -129,6 +156,7 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 | 前缀复用 | SGLang RadixAttention + LMCache | radix 归存储池 + 位置视图一跳 + 反向回传生长 |
 | 执行模式 | DistServe/Splitwise + HiCache PD | 三模式逐请求选路 + D-direct(本地命中直跳) |
 | 放置/调度边界 | (我们的方案 Z,原创) | 存储池主动放置 + 调度器单向消费 |
+| **编排层/控制面** | **Dynamo**(KVBM logical/physical/engine + KV-aware router) | 位置视图进 etcd 强一致(Dynamo 走 NATS 事件流);HBM 归池而非 engine offload;Rust 存储控制面 + Go 调度控制面分工(Dynamo 单一 Rust 编排) |
 
 ## 实现参考顺序建议
 
@@ -140,15 +168,15 @@ P4(KV Pool 原型,Rust)时按此顺序参考源码:
 5. **LMCache rust/ + 跨实例复用**:Rust 存储层工程模式 + 复用场景验证。
 6. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**:计算层 worker 接入存储池的接口形态 + layer-wise save/load 流水线 + block table 维护 → 我们 Python worker 的 runtime client 与执行循环。
 
-> 参考源码时注意:四个 submodule 各带自己的 `.claude/` 规则(如 sglang 的 modify-component-must-read、mooncake 的 skills),那些是**修改它们自身代码**的约束,与我们参考其设计无关,忽略。
+> 参考源码时注意:五个 submodule 各带自己的 `.claude/` 规则(如 sglang 的 modify-component-must-read、mooncake 的 skills),那些是**修改它们自身代码**的约束,与我们参考其设计无关,忽略。
 
 ## submodule 使用约定
 
 - `3rdparty/` 只读参考,**不修改** submodule 内代码。如需改造,fork 后换 URL。
 - clone 本仓库后需 `git submodule update --init --recursive` 拉取。
 - 升级 submodule:在对应目录 `git checkout <ref>` 后回根目录 `git add` 提交指针更新;在本文"检出"列同步记录。
-- submodule 体积较大(SGLang/Mooncake/vLLM 各数百 MB),磁盘紧张或 CI 提速用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(浅克隆后无法在 submodule 内切换 ref,升级需先 `git submodule deinit -f <path>` 再深克隆 init)。
+- submodule 体积较大(SGLang/Mooncake/vLLM/Dynamo 各数百 MB),磁盘紧张或 CI 提速用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(浅克隆后无法在 submodule 内切换 ref,升级需先 `git submodule deinit -f <path>` 再深克隆 init)。
 
 ## 非 submodule 文献参考
 
-除上述四个源码 submodule 外,本系统还参考了 **DualPath**(论文 arXiv:2602.21548v2,非 submodule,未引入源码)——双网络隔离下的双路径 KV 加载,直接对应 [`../architecture/kv-cache-pool.md`](../architecture/kv-cache-pool.md) "双网络路径"与 [`../architecture/data-flow.md`](../architecture/data-flow.md) §3.4 D→P 流。分析(机制/借鉴点/关键差异)见 [`dualpath.md`](dualpath.md),文献总览见 [`references.md`](references.md)。
+除上述五个源码 submodule 外,本系统还参考了 **DualPath**(论文 arXiv:2602.21548v2,非 submodule,未引入源码)——双网络隔离下的双路径 KV 加载,直接对应 [`../architecture/kv-cache-pool.md`](../architecture/kv-cache-pool.md) "双网络路径"与 [`../architecture/data-flow.md`](../architecture/data-flow.md) §3.4 D→P 流。分析(机制/借鉴点/关键差异)见 [`dualpath.md`](dualpath.md),文献总览见 [`references.md`](references.md)。
