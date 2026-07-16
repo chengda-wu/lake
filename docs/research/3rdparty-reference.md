@@ -168,6 +168,45 @@ P4(KV Pool 原型,Rust)时按此顺序参考源码:
 5. **LMCache rust/ + 跨实例复用**:Rust 存储层工程模式 + 复用场景验证。
 6. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**:计算层 worker 接入存储池的接口形态 + layer-wise save/load 流水线 + block table 维护 → 我们 Python worker 的 runtime client 与执行循环。
 
+### Dynamo 参考补充(编排层/控制面,跨阶段)
+
+Dynamo 跨 **P4(存储)** 与 **控制面(选路/通信)**,不进上面"抄源码顺序",按职责分块借鉴(符号锚点:`grep -n "符号名" 3rdparty/dynamo/<路径>`)。
+
+**P4 存储层(Rust)— KVBM 三层结构:**
+
+| lake 需求 | Dynamo 可复用符号 | 文件:行 | 改造点 |
+|---|---|---|---|
+| 强一致位置视图 | `presence_markers: HashMap<TypeId,u32>` + `mark_present/absent/has_block/has_any_block` | `lib/kvbm-logical/src/registry/handle.rs:128-188` | `T` 换 L0–L3;补 L0 跟踪(Dynamo G1 不进) |
+| 每层一个池 | `BlockManager<T>` + `BlockStore<T>`(单 mutex + `SlotState` 状态机) | `lib/kvbm-logical/src/manager/mod.rs:31`、`pools/store.rs:110` | L0 也实例化(Dynamo 不实例化 G1) |
+| radix 索引 | `BlockRegistry` + `PositionalRadixTree<Weak>` | `lib/kvbm-logical/src/registry/mod.rs:110` | 几乎直接用 |
+| 驱逐策略可插拔 | `InactiveIndex` trait + backends(`LruBackend`/`LineageBackend`≈前缀亲和) | `lib/kvbm-logical/src/pools/store.rs:54` | 实现 LFU-Aging + 前缀亲和 |
+| 冷热迁移策略链 | `OffloadPolicy<T>` + `Either<Ready,BoxFuture>`(零分配;`PresenceAndLFUFilter`≈LFU) | `lib/kvbm-engine/src/offload/policy.rs:219,47` | 加 promote 方向(Dynamo demote-only) |
+| demote pipeline | `Pipeline<Src,Dst>` 5 段 + `auto_chain` | `lib/kvbm-engine/src/offload/pipeline.rs:65`、`engine.rs:537` | 镜像出 promote pipeline |
+| L3 对象存储 SSOT | `ObjectBlockOps` + `ObjectLockManager`(`.meta`/`.lock` 分布式锁) + `KeyFormatter` | `lib/kvbm-engine/src/object/mod.rs:152,280,39` | 直接用 |
+| 布局/介质解耦 | `PhysicalLayout{layout,location}` + `StorageKind` | `lib/kvbm-physical/src/layout/physical.rs:30` | 直接用 |
+| 传输引擎抽象 | `TransferManager` + `execute_transfer` + `export/import_metadata` | `lib/kvbm-physical/src/manager/mod.rs:42,227,112` | 池级共享视图替代 worker 本地 |
+| 跨层 block 携带 | `TieredBlock` + `BlockAccessor::find` | `lib/kvbm-engine/src/leader/accessor.rs:20,96` | 扩成 L0–L3 四态 |
+
+**控制面(选路/通信)— kv-router + transports/discovery:**
+
+| lake 需求 | Dynamo 可复用符号 | 文件:行 |
+|---|---|---|
+| 本地命中视图镜像(前缀匹配→每 worker 命中块数) | `RadixTree::find_match_details` | `lib/kv-router/src/indexer/radix_tree.rs:89` |
+| 命中感知选路纯函数 | `DefaultWorkerSelector::worker_logit`(`adjusted_prefill = raw - Σ(weight×overlap)`) | `lib/kv-router/src/scheduling/selector.rs:110` |
+| 分层 overlap 加权 | `cache_hit_estimates_from_tiered_matches` + `OverlapSignals` | `lib/kv-router/src/scheduling/overlap.rs:201,24` |
+| 链式哈希递推 + parent 校验 | `compute_next_sequence_hash` + `apply_stored`(含自引用检查) | `lib/tokens/src/lib.rs:77`、`lib/kv-router/src/indexer/radix_tree.rs:227` |
+| 拓扑传输约束(硬/软) | `KvTransferEnforcement`(Required/Preferred) | `lib/kv-router/src/protocols.rs:232` |
+| 位置视图事件流→索引 + gap/replay | `ListenerLoop::apply_live_batch` | `lib/kv-router/src/services/indexer/listener.rs:320` |
+| 服务发现统一接口 + 多后端 | `Discovery` trait + `Arc<dyn Discovery>`(etcd/memory/file/k8s) | `lib/runtime/src/discovery/mod.rs:781`、`distributed.rs:57` |
+| etcd key space 隔离 | `v1/<类别>/<namespace>/<component>/...` bucket 前缀 | `lib/runtime/src/discovery/kv_store.rs:21-23` |
+| worker 存活自动收敛 | etcd lease 绑定实例生命周期 | `lib/runtime/src/transports/etcd/lease.rs:17` |
+| 权威 etcd vs 高频事件流分离 | `Store/Bucket`(etcd) + `EventTransportTx/Rx`(NATS/ZMQ) | `lib/runtime/src/storage/kv.rs:116`、`transports/event_plane/transport.rs:28` |
+
+**关键差异(lake 更彻底,需自补):**
+- **L0 归池**:Dynamo G1(HBM)无 `BlockManager`,KV 由 engine 外部拥有(`lib/kvbm-engine/src/offload/engine.rs:468-470` "G1 is externally owned");lake 必须有 `BlockManager<L0>` + `presence_markers` 覆盖全四层。
+- **双向 pipeline**:Dynamo offload demote-only(G1→G2→G3/G4),promote 走 leader session 拉取;lake 要自建 promote pipeline(L3→L2→L1→L0 预放置)。
+- **控制面一致性**:Dynamo KV 事件走 NATS(best-effort,`lib/runtime/src/distributed.rs:483` 丢了即跳过);lake 位置视图进 etcd 强一致,Router 一跳命中。
+
 > 参考源码时注意:五个 submodule 各带自己的 `.claude/` 规则(如 sglang 的 modify-component-must-read、mooncake 的 skills),那些是**修改它们自身代码**的约束,与我们参考其设计无关,忽略。
 
 ## submodule 使用约定
