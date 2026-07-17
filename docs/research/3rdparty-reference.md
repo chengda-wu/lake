@@ -114,9 +114,13 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 
 ### 关键差异
 
-- vLLM 的 KV/调度/元数据**进程私有、单实例视角**(`KVCacheManager`/`BlockPool`/`Scheduler` 全在引擎进程内);我们归存储池/控制面**集群权威**。
-- vLLM **无 radix tree**(APC 用 hash 顺序匹配,断链即停)、**无位置视图/本地命中概念**;我们 radix + 位置视图 + D-direct。
+> 注:vLLM 自 2026 Q3 roadmap([#48168](https://github.com/vllm-project/vllm/issues/48168))起主动向存算分离演进:原生多层 KV offload(`vllm/v1/kv_offload/`:CPU/FS/Obj)+ KV Events(`vllm/distributed/kv_events.py`)已落地 HEAD `ab132ee98`;`session_id`/`continuation_id` 跨 session 协调(#48501)、layerwise/sparse offload API(#48203)仍是 RFC。差距已收窄,详见 [`vllm/overview.md`](vllm/overview.md) "KV 大规模管理演进"。
+
+- vLLM 的 KV/调度/元数据仍 **per-instance、单实例视角**(`KVCacheManager`/`BlockPool`/`Scheduler` + `kv_offload` 全在引擎进程内,tier 私有);我们归存储池/控制面**集群权威**。
+- vLLM 多层 offload 是**单实例内级联**(GPU↔CPU↔NVMe/Obj 同机);我们是**跨节点池**统一管 L0–L3。
+- vLLM **无 radix tree**(APC hash 顺序匹配 + `OffloadKey` 平铺键)、**无集群位置视图/本地命中**(KV Events `medium` 仅单实例介质标记);我们 radix + 位置视图 + D-direct。
 - vLLM connector 是**可选 per-instance 插件**;我们是**必经集群级路径**(存储池 client 常驻)。
+- vLLM HBM **引擎自分配**(offload/connector 只借传输);我们**池管 HBM 放置**(方案 Z,vLLM 无对应)。
 - vLLM attention 主路径 **C++/CUDA**(FlashAttention);我们选 **Python + Triton**(自定义核门槛与生态不同)。
 - vLLM worker **有状态**(加载模型 + HBM KV,崩溃丢 KV);我们 **无状态**(状态全剥离,秒级伸缩,F4 续推)。
 

@@ -1,6 +1,6 @@
 # vLLM — 计算层抽象与存算分离接入点
 
-> 源码:`vllm/v1/`、`vllm/distributed/kv_transfer/`、`vllm/model_executor/`。本文聚焦**计算层可复用抽象**与**KV connector 接口**——本系统 worker 接入存储池的直接参考。
+> 源码:`vllm/v1/`、`vllm/distributed/kv_transfer/`、`vllm/distributed/kv_events.py`、`vllm/v1/kv_offload/`、`vllm/model_executor/`。本文聚焦**计算层可复用抽象**、**KV connector 接口**、**KV Events** 与**原生多层 KV offload 子系统**——本系统 worker 接入存储池的直接参考。
 
 ## PagedAttention 内存模型
 
@@ -93,6 +93,63 @@ connector 分两侧(同文件):
 
 **对本系统**:`SupportsHMA` **不对应**方案 Z("外部管 HBM")——vLLM 的 HBM 始终由引擎自身分配,connector 只借(`register_kv_caches`)做传输,无论是否 HMA。方案 Z 的"存储池放置 KV 到 HBM、worker 消费"在 vLLM **无对应能力标记**,是我们相对 vLLM 的增量,需自行设计(见 [`../../architecture/compute-layer.md`](../../architecture/compute-layer.md) "待写:HBM 池化下的入图与 KV 管理")。本系统存储池 client ≈ 一个常驻的 `KVConnectorBase_V1`;区别:vLLM connector 是可选插件、per-instance,本系统是必经路径、集群级权威。
 
+## KV Events(引擎→外可见性通道 ★)
+
+`vllm/distributed/kv_events.py` 是 vLLM 把**引擎内 KV 生命周期**以事件形式发布给外部消费者的机制(经 zmq)。这是 vLLM 向"控制面外建集群 KV 索引"演进的关键设施——Dynamo/llm-d 等控制面消费这些事件构建集群级 KV 位置图,无需 mirror 引擎内部状态。
+
+事件类型(msgspec struct,`omit_defaults` 向后兼容):
+
+| 事件 | 字段 | 语义 |
+|------|------|------|
+| `BlockStored` | `block_hashes: list[ExternalBlockHash]`、`parent_block_hash`、`token_ids`、`block_size`、`medium`、`group_idx`、`kv_cache_spec_kind`、`extra_keys` | 块被写入某介质;`medium`(`"GPU"`/…)标记块所在介质——**vLLM 向位置感知迈出的一步** |
+| `BlockRemoved` | `block_hashes`、`medium`、`group_idx` | 块被驱逐/释放 |
+| `AllBlocksCleared` | — | 清空 |
+
+- `KVEventBatch` 带 `ts` + `data_parallel_rank`;`KVEventAggregator` 跨 worker(TP)聚合,只返回所有 worker 都emit的事件(去重)。
+- 配置:`vllm/config/kv_events.py`::`KVEventsConfig`;示例:`examples/features/kv_events/kv_events_subscriber.py`。
+- 发射点:`block_pool.py` 的 `_build_block_stored_event`/`emit_cached_block_events`/`cache_partial_block`(store/removed 均在 block_pool 侧发射)。
+
+**对本系统**:KV Events 的 schema(`BlockStored` 携 `ExternalBlockHash` + `medium` + `group_idx`)是我们控制面构建集群 KV 位置视图的**现成事件源形态**。差异:vLLM 事件只描述**单实例内**的块生命周期(`medium` 是实例内介质),无跨实例坐标;我们需在此基础上补集群级位置视图(或等 #48501 的 `session_id`/`continuation_id` 落地)。我们的存储池元数据更新可参考此事件模型,但权威在池而非引擎事件。
+
+## KV offload 子系统(原生多层 ★)
+
+`vllm/v1/kv_offload/` 是 vLLM **引擎内一等的多层 KV offload 子系统**(独立于 connector,2026 起密集施工)。这是 vLLM 向我们"L1/L2/L3 分层"方向最直接的收敛——但仍是 **per-instance**(跑在该引擎的 Scheduler 进程内,tier 是引擎私有,非集群池)。
+
+### 核心抽象(`base.py`)
+
+- `OffloadKey` = `block_hash + group_idx`(编码为 bytes 避 GC,`make_offload_key`/`get_offload_block_hash`/`get_offload_group_idx`)——**内容寻址**,与我们 `(model_id,layer,block_hash)` 同形,但无前缀树(平铺键)。
+- `OffloadingManager`(ABC):`lookup() → LookupResult`(`MISS`/`HIT`/`HIT_PENDING`/`RETRY`)——三态 + pending,对应异步传输未就绪。本系统存储池查询可参考此三态(我们的"Pool 命中待传"≈ `HIT_PENDING`)。
+- `ReqContext`(req_id + kv_transfer_params):请求上下文,供 session-aware 驱逐(RFC #45405 的落点)。
+- `OffloadPolicy`:`BLOCK_LEVEL`(仅新算块,prefix-hit 块已 offloaded 则跳过)/ `REQUEST_LEVEL`(含前缀命中块,某些 tier 需完整 KV 上下文)。
+- `LoadStoreSpec`:每层 KV 的 load/store 形状描述。
+
+### CPU 主层(`cpu/`)
+
+直接访问 GPU,是 GPU↔offload 网关:`SharedOffloadRegion`、驱逐策略 `lru`/`arc`(`policies/{lru,arc}.py`)、`CPUOffloadingWorker`、`swap_blocks_triton`(block 粒度 swap kernel)。
+
+### 二级层(`tiering/`)
+
+`SecondaryTierManager`(ABC):**二级层不能直接访问 GPU**,所有传输经 CPU 主层级联:
+- **store**:GPU → CPU(主层)→ secondary(cascade)
+- **load**:secondary → CPU(主层)→ GPU(promotion)
+
+异步作业模型:`submit_load`/`submit_store`/`get_finished_jobs`,`JobMetadata`(带 `is_promotion`/`req_context`/`keys`/`block_ids`)、`JobResult`、`JobId`。已实现二级层:`fs/`(文件系统/NVMe)、`obj/`(对象存储)、`example/`;`async_lookup.py` 异步查询;`TieringOffloadingSpec` 组合 CPU 主层 + 可配置 secondary tiers。
+
+**全部跑在 Scheduler 进程,方法须轻量非阻塞**。
+
+### 与 connector 的关系
+
+`OffloadingConnector`/`SimpleCPUOffloadConnector` 是把 `kv_offload` 子系统**暴露为 `KVConnectorBase_V1` 插件**的适配层(`v1/offloading_connector.py`、`v1/simple_cpu_offload_connector.py`)——即 `kv_offload` 是底层能力,connector 是其插件外壳。Mooncake connector 也已扩展为完整目录(`mooncake/`:store/connector + mooncake_connector + rdma_utils + stats),新增 `hf3fs`、`moriio` connector。
+
+**对本系统**:
+- **可借鉴**:`OffloadingManager`/`LookupResult`/`OffloadPolicy` 三态查找 + 策略枚举(直接映射我们的"Pool 命中/待传/miss");`OffloadKey` 内容寻址编码;secondary tier 的 cascade/promotion 异步作业模型(`JobMetadata.is_promotion`)——与我们"L2→L1 promotion / L1→L2 demotion"同构。
+- **关键差异**:
+  - vLLM `kv_offload` **per-instance**(引擎 Scheduler 进程内,tier 私有);我们归**存储池集群权威**,跨节点统一编址 L0–L3。
+  - vLLM tier 间是**单实例内级联**(GPU↔CPU↔NVMe/Obj 同机);我们是**跨节点池**(DRAM/NVMe block 放本机还是远端 KV Node 由池放置决定)。
+  - vLLM **无 radix**(`OffloadKey` 平铺);我们 radix + 位置视图 + D-direct。
+  - vLLM HBM 仍引擎自分配(offload 只借做传输);**方案 Z"池管 HBM 放置"无对应**。
+  - vLLM 的"统一管全部分层"是**单实例内**的;我们的 F3"存储池统一管理 L0–L3"是**集群级**的——这是量级差异。
+
 ## Worker / Model Runner
 
 | 类 | 文件 | 职责 |
@@ -178,7 +235,35 @@ connector 分两侧(同文件):
 | FlexKV connector | `…/flexkv_connector.py`::`FlexKVConnectorV1` (L35) |
 | 组合 connector | `…/multi_connector.py`::`MultiConnector` (L128) |
 | offload connector | `…/offloading_connector.py`::`OffloadingConnector` (L46) / `…/simple_cpu_offload_connector.py`::`SimpleCPUOffloadConnector` (L45) |
+| Mooncake connector(已扩目录) | `…/mooncake/`::`store/connector.py::MooncakeStoreConnector` (L87) / `mooncake_connector.py` / `rdma_utils.py` / `stats.py` |
+| 新增 connector | `…/hf3fs/` / `…/moriio/` / `…/offloading/`(子目录带 metrics) |
 | KV 布局协商 | `vllm/v1/kv_cache_interface.py`::`KVCacheConfig` (L920) / `KVCacheSpec` (L100) / `FullAttentionSpec` (L206) / `MLAAttentionSpec` (L363) / `MambaSpec` (L669) |
+
+### KV Events(★ 引擎→外可见性)
+
+| 机制 | 文件:符号 |
+|------|-----------|
+| 事件基类 / batch | `vllm/distributed/kv_events.py`::`KVCacheEvent` / `EventBatch` / `KVEventBatch`(`data_parallel_rank`) |
+| 块写入事件 | `kv_events.py`::`BlockStored`(`block_hashes`/`parent_block_hash`/`medium`/`group_idx`/`kv_cache_spec_kind`/`extra_keys`) |
+| 块释放事件 | `kv_events.py`::`BlockRemoved` / `AllBlocksCleared` |
+| 跨 worker 聚合 | `kv_events.py`::`KVEventAggregator` |
+| 配置 | `vllm/config/kv_events.py`::`KVEventsConfig` |
+| 事件发射点 | `vllm/v1/core/block_pool.py`::`_build_block_stored_event` / `emit_cached_block_events` / `cache_partial_block` |
+| 订阅示例 | `examples/features/kv_events/kv_events_subscriber.py` |
+
+### KV offload 子系统(★ 原生多层)
+
+| 机制 | 文件:符号 |
+|------|-----------|
+| 内容寻址键 / 请求上下文 / 策略 | `vllm/v1/kv_offload/base.py`::`OffloadKey` / `make_offload_key` / `ReqContext` / `OffloadPolicy`(BLOCK_LEVEL/REQUEST_LEVEL) |
+| 管理器 ABC + 查询三态 | `vllm/v1/kv_offload/base.py`::`OffloadingManager`(`lookup`→`LookupResult`) / `LookupResult`(MISS/HIT/HIT_PENDING/RETRY) / `LoadStoreSpec` / `CanonicalKVCaches` |
+| 工厂 | `vllm/v1/kv_offload/factory.py` / `vllm/v1/kv_offload/file_mapper.py` |
+| CPU 主层 | `vllm/v1/kv_offload/cpu/`::`SharedOffloadRegion` / `CPUOffloadingWorker` / `spec.py::CPUOffloadingSpec` / `policies/{lru,arc}.py` / `swap_blocks_triton.py` / `shared_offload_region.py` |
+| 二级层 ABC + 异步作业 | `vllm/v1/kv_offload/tiering/base.py`::`SecondaryTierManager` / `JobMetadata`(`is_promotion`/`req_context`) / `JobResult` / `JobId` |
+| 二级层管理器 + spec | `vllm/v1/kv_offload/tiering/manager.py`::`TieringOffloadingManager` / `CPUPrimaryTierOffloadingManager` / `spec.py::TieringOffloadingSpec` / `factory.py::SecondaryTierFactory` |
+| 二级层实现 | `vllm/v1/kv_offload/tiering/fs/`(NVMe/文件系统)、`obj/`(对象存储)、`example/` |
+| 异步查询 | `vllm/v1/kv_offload/tiering/async_lookup.py` |
+| simple offload(独立路径) | `vllm/v1/simple_kv_offload/`::`manager.py` / `copy_backend.py` / `worker.py` / `cuda_mem_ops.py` |
 
 ### Worker / Runner
 
@@ -233,15 +318,23 @@ connector 分两侧(同文件):
 2. **`KVConnectorBase_V1` 接口形态**:本系统存储池 client ≈ 常驻 connector;scheduler/worker 双侧 + metadata 协调 + layer-wise save/load 流水线 mixin 直接参考。
 3. **`ExternalBlockHash`**:worker 向存储池查前缀的自然键,与存储池 `(model_id,layer,block_hash)` 内容寻址对接。
 4. **`SupportsHMA` 能力标记**:声明 connector 支持 hybrid memory allocator(多 KV cache group 混合架构),要求 `request_finished_all_groups` 与多 group 释放时序对齐。**注意:它不对应方案 Z**——vLLM 的 HBM 始终引擎自分配,connector 只借做传输;方案 Z 的"池管 HBM 放置"是本系统增量,vLLM 无对应标记。
-5. **权重 offloader(UVA/预取)**:权重流式加载原型,参考"权重归存储池、计算层流式喂 GPU"。
-6. **`AttentionMetadataBuilder`**:调度器输出→attention 输入的衔接点形态。
-7. **spec decode proposer↔speculator**:Draft 池↔Decode 池划分参考。
+5. **KV Events 事件 schema**(★ 新):`BlockStored`/`BlockRemoved` 携 `ExternalBlockHash` + `medium` + `group_idx`,是控制面构建集群 KV 位置视图的现成事件源形态;`KVEventAggregator` 跨 worker 聚合去重可参考。
+6. **`OffloadingManager` / `LookupResult` / `OffloadPolicy`**(★ 新):三态查找(MISS/HIT/HIT_PENDING/RETRY)+ 策略枚举(BLOCK_LEVEL/REQUEST_LEVEL)直接映射我们"Pool 命中/待传/miss";`OffloadKey`(hash+group_idx)内容寻址编码可参考。
+7. **secondary tier cascade/promotion 异步作业模型**(★ 新):`SecondaryTierManager` 的 GPU→CPU→secondary 级联 store、secondary→CPU→GPU promotion load、`JobMetadata.is_promotion` 与我们"L2→L1 promotion / L1→L2 demotion"同构。
+8. **权重 offloader(UVA/预取)**:权重流式加载原型,参考"权重归存储池、计算层流式喂 GPU"。
+9. **`AttentionMetadataBuilder`**:调度器输出→attention 输入的衔接点形态。
+10. **spec decode proposer↔speculator**:Draft 池↔Decode 池划分参考。
 
 ## 关键差异(我们更彻底)
 
-- vLLM **KV/调度/元数据进程私有、单实例**;我们归存储池/控制面集群权威。
-- vLLM **无 radix**(hash 顺序匹配)、**无位置视图/本地命中**;我们 radix + 位置视图 + D-direct。
+> 注:vLLM 自 2026 起主动演进(见 [overview.md](overview.md) "KV 大规模管理演进"):原生 `vllm/v1/kv_offload/` 多层 + KV Events 已落地。差距已从"vLLM 完全没有"收窄为"vLLM 有 per-instance 多层 + 事件,但无集群权威"。下列差异按此理解。
+
+- vLLM KV/调度/元数据仍 **per-instance、单实例**(`kv_offload` 跑在引擎 Scheduler 进程内,tier 私有);我们归存储池/控制面**集群权威**。
+- vLLM 多层 offload 是**单实例内级联**(GPU↔CPU↔NVMe/Obj 同机);我们是**跨节点池**(block 放本机还是远端 KV Node 由池放置决定)。
+- vLLM **无 radix**(APC hash 顺序匹配 + `OffloadKey` 平铺键)、**无集群位置视图/本地命中**(KV Events `medium` 仅单实例介质标记);我们 radix + 位置视图 + D-direct。
+- vLLM 跨 session/实例协调(`session_id`/`continuation_id`、P2P KV Events)仍是 **RFC**(#48501/#48203,未落地);我们设计即为集群级。
 - vLLM connector 是**可选 per-instance 插件**;我们是**必经集群级路径**。
+- vLLM HBM **引擎自分配**(offload/connector 只借传输);我们**池管 HBM 放置**(方案 Z,vLLM 无对应)。
 - vLLM attention 主路径 **C++/CUDA**;我们选 **Python + Triton**(自定义核门槛不同)。
 - vLLM worker **有状态**(加载模型+HBM KV);我们 **无状态**(状态全剥离,秒级伸缩)。
 
