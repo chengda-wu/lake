@@ -132,7 +132,7 @@ lake/
 │       ├── references.md
 │       ├── 3rdparty-reference.md  # 3rdparty 源码与本设计的逐层对应(汇总)
 │       ├── dualpath.md            #   DualPath 双路径 KV 加载分析
-│       ├── sglang/                #   SGLang HiCache 深度分析
+│       ├── sglang/                #   SGLang HiCache 深度分析(+ 上游痛点)
 │       ├── lmcache/               #   LMCache 深度分析
 │       ├── mooncake/              #   Mooncake 深度分析
 │       ├── vllm/                  #   vLLM 深度分析（计算层参考）

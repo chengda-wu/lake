@@ -1,6 +1,7 @@
 # SGLang HiCache — 总览
 
-> 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache),不涉及 SGLang 的调度/模型加载等其余能力。
+> 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache),不涉及 SGLang 的调度/模型加载等其余能力。  
+> block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md)。
 
 ## 一句话定位
 
@@ -83,7 +84,9 @@ HiCache 是在 RadixAttention 之上构建的三层(GPU HBM / 主机内存 / 分
 
 ## 劣势
 
-1. **L1/L2 私有,跨实例无法共享** — 跨实例复用必须经 L3,L2 命中不跨实例,冷实例仍需 L3→L2→L1 全程。
+> 机制层摘要如下。**上游 issue / roadmap 暴露的组合痛点、可修 vs 难消掉的分类、与 lake 对照**见 [pain-points.md](pain-points.md)(调研快照 2026-07-17,submodule `37f94cb7a0`)。
+
+1. **L1/L2 私有,跨实例无法共享** — 跨实例复用必须经 L3,L2 命中不跨实例,冷实例仍需 L3→L2→L1 全程。上游未做全局共享,而是分三类部分缓解(同机去重 #26691/#27370、同机 VMM 共享 #31435/#29326、跨机直传 #21591/#28515),详见 [pain-points.md 1.11](pain-points.md#111-l1l2-实例私有--跨机必经-l3的部分解进行中)。
 2. **L3 元数据非强一致** — 实时查后端(`batch_exists`)而非同步元数据,存在窗口期:刚写入的页他实例可能未命中(后端最终一致);`MetadataCache` TTL 缓存可能陈旧。
 3. **单实例视角** — HiRadixTree 每实例独立,无全局 radix 视图;跨实例前缀感知依赖外部 kv_events router(旁路)。
 4. **链式哈希导致前缀耦合** — L3 key = H(parent‖page),非独立内容寻址;相同 token 串在不同前缀位置 key 不同,中间页驱逐/重算可能断链。
