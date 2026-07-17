@@ -56,7 +56,7 @@ PD 总路线 [#21703](https://github.com/sgl-project/sglang/issues/21703) 另缺
 
 | Issue | 现象 |
 |-------|------|
-| [#31505](https://github.com/sgl-project/sglang/issues/31505) | 期望多机 DRAM(L2)拼成虚拟 offload 池——**HiCache 明确不做**(L2 实例私有,跨机只能经 L3) |
+| [#31505](https://github.com/sgl-project/sglang/issues/31505) | 期望多机 DRAM(L2)拼成虚拟 offload 池——**HiCache 明确不做全局共享**;上游改为同机去重 + 跨机直传绕 L3(部分解见 [1.11](#111-l1l2-实例私有--跨机必经-l3的部分解进行中)) |
 | [#31458](https://github.com/sgl-project/sglang/issues/31458) | RFC:**KV Indexer**(独立 Rust 服务)吃 `BlockStored`/`BlockRemoved`,维护 `hash→worker→tier`;旁路、最终一致,KV 字节仍归 worker |
 
 [#25760](https://github.com/sgl-project/sglang/issues/25760) SessionAware Router:`cache_aware`(吃 KVEvent 建近似前缀树)、sticky/load、PD backpressure、agent hint 透传多数未做。
@@ -124,11 +124,68 @@ PD 总路线 [#21703](https://github.com/sgl-project/sglang/issues/21703) 另缺
 
 完整列表见 [overview.md](overview.md)「劣势」。与上表重叠的摘要:
 
-1. L1/L2 实例私有 → 跨机必经 L3(#31505)。  
+1. L1/L2 实例私有 → 跨机必经 L3(#31505;**已有部分解在推进,见 1.11**)。  
 2. L3 元数据弱一致 + 单实例 radix。  
 3. 链式哈希前缀耦合(非位置无关)。  
 4. Prefetch/terminate 路径多次 `all_reduce`(#30760)。  
 5. 无内建 decode→prefill 主动前缀生长(依赖旁路事件)。
+
+### 1.11 「L1/L2 实例私有 → 跨机必经 L3」的部分解(进行中)
+
+上游**没有**把 L1/L2 做成全局共享,而是把这个痛点拆成三类分别推进,主干挂在 roadmap [#21846](https://github.com/sgl-project/sglang/issues/21846)。结论:**同机重复存**已在正面消除;**跨机**仍用"传输/路由"削弱"必经 L3",而非真共享;**全局共享池**停在 RFC + 依赖 Mooncake。
+
+**(a) 同机跨 rank 共享 / 去重 L1/L2** —— 直击"实例私有导致同机各存一份":
+
+| PR | 状态 | 做法 |
+|----|------|------|
+| [#26691](https://github.com/sgl-project/sglang/pull/26691) | open | MLA 下各 TP rank 的 host KV 是同一份字节 → 只在 rank0 存一份,load 时用**专用 NCCL group** 广播回其余 rank,省 `(N-1)/N` host 池 |
+| [#27370](https://github.com/sgl-project/sglang/pull/27370) | open | HiSparse CPU 内存跨 TP 共享:新增 `SharedMemoryHostTensorAllocator`(`memory_pool_host.py`)+ 环境变量 `SGLANG_HISPARSE_CPU_SHARE`,rank0 写、其余 mmap 同一 host buffer |
+| [#31435](https://github.com/sgl-project/sglang/pull/31435) | open | GLM-5.2 DSA:同机单 NVLink 域内 CP rank 用 **CUDA VMM** 直读 peer 的 HBM 页(L1 也共享),L2 只存一份聚合副本 |
+| [#29326](https://github.com/sgl-project/sglang/pull/29326) | open | host 池放 `/dev/shm`(`mmap_allocator.py::alloc_shm` + `ShmHostTensorAllocator`),共享 fd,与外部 offloading daemon(UDS)**零拷贝**——接分布式后端的前置件 |
+
+注意:以上基本都是**单节点内**(same-host / one NVLink domain),解决"同机重复存",**不是**跨机共享 L1/L2。
+
+**(b) 跨机:不共享 L1/L2,而是直传 DRAM / 绕开 L3**:
+
+| PR / roadmap 子项 | 状态 | 关键点 |
+|-------------------|------|--------|
+| [#21591](https://github.com/sgl-project/sglang/pull/21591) PD Host TransferMode | merged | Prefill 把 KV **直传 Decode 的 DRAM**,不经 GPU 中转 → 跨机 L2↔L2 直传 |
+| Incremental KV Transfer(#21846 子项) | done | Decode 先查命中前缀,Prefill 只传"增量"部分 |
+| [#23515](https://github.com/sgl-project/sglang/pull/23515) | open | 跨机 RDMA 与 GPU 计算重叠(layer-pipelined) |
+| [#19746](https://github.com/sgl-project/sglang/pull/19746) | merged | Decode 侧 radix,跨机复用 decode 前缀 |
+| [#26561](https://github.com/sgl-project/sglang/pull/26561) | open | cache-aware DP routing:控制器收各 worker 的 cache digest(chunk SHA256),路由到前缀命中最长的 rank——**靠路由而非搬数据的"软共享"** |
+| [#28515](https://github.com/sgl-project/sglang/pull/28515) | WIP | Decode→Prefill(D2P)KV 反向复制,多轮命中 prefill radix |
+
+**(c) 真·分布式共享池 + 全局元数据(RFC / 跨仓)**:
+
+- [#31458](https://github.com/sgl-project/sglang/issues/31458) **KV Indexer**(见 1.2):独立 Rust 服务维护 `hash→worker→tier`,旁路、最终一致。
+- [#27574](https://github.com/sgl-project/sglang/issues/27574) Programmatic KV(agentic):跨请求/跨实例显式 KV 管理的需求源头。
+- [#30796](https://github.com/sgl-project/sglang/pull/30796) `kv_hints` 保留整 prompt KV 到 **Mooncake 共享 L3**(配套 Dynamo #11534 + Mooncake #2835)。
+- Mooncake `Group Semantics`([kvcache-ai/Mooncake#1887](https://github.com/kvcache-ai/Mooncake/issues/1887)):把 L2/L3 做成共享对象池的分组可见性/驱逐语义。
+
+**对 lake 的读数**:进展不对称——**同机去重**已正面解决;**跨机共享 L1/L2** 上游选择不做(用直传+路由绕);**全局强一致 KV 目录** SGLang 自身仍缺(靠旁路 Indexer + Mooncake 外部 store)。这正是 lake"存储池统一编址 L0–L3 + 控制面强一致位置视图"想补的空白(见第 4 节)。
+
+**(d) 实现语言**:贯穿上游三个 RFC 的同一条线(#28420 原文)——**"genuine GPU compute in Python, pure CPU-bound control flow and bookkeeping → Rust"**。分布式 KV 管理各组件语言:
+
+| 组件 | 语言 | 位置 | 出处 |
+|------|------|------|------|
+| **KV Indexer**(放置元数据 `hash→worker→tier`) | **Rust** | **树外独立服务**,ZMQ 吃 KV 事件 + gRPC 查询,最终一致,只存元数据不存字节 | [#31458](https://github.com/sgl-project/sglang/issues/31458) |
+| **UnifiedRadixCache 逻辑骨干**(树/匹配/LRU/驱逐/host-tier 记账) | **Rust**(迁移中) | 引擎内,Python 留作 parity oracle + fallback | [#28420](https://github.com/sgl-project/sglang/issues/28420) |
+| Router / cache-aware 路由 / gRPC | **Rust**(已是) | `sgl-router` | [#23206](https://github.com/sgl-project/sglang/issues/23206) |
+| 非 GPU 前半程(HTTP/gRPC server、tokenizer、请求 FSM) | **Rust**(迁移中) | thread-per-core 单进程 | [#23206](https://github.com/sgl-project/sglang/issues/23206)(PR #29799) |
+| KV 字节存取 / 内存池 / 布局 / transfer | **Python + CUDA** | **明确 out of scope,不迁** | #23206 |
+| KV 字节实际共享存储(L2/L3 store) | **外部项目**:Mooncake(C++ 核 + Rust/Py 绑定)、3FS、NIXL | 树外 | #21846 |
+
+**与 lake 选型对照**:思路重合但分工不同。
+
+| | SGLang | lake(已定) |
+|---|--------|-----------|
+| 存储层(KV Pool / 分层) | Python/CUDA 引擎内 + 外部 Mooncake(C++) | **Rust** |
+| 控制面(Router/Scheduler/元数据) | **Rust**(Indexer/radix/router) | **Go** |
+| 计算层 | Python + Triton/CUDA | Python + Triton |
+| KV 位置一致性 | 旁路 Indexer,**最终一致** | 控制面 **etcd 强一致**位置视图 |
+
+关键差异:SGLang 把控制面元数据放 Rust + **最终一致旁路 Indexer**,KV 字节留 Python 引擎、跨机共享靠外挂 Mooncake;lake 把控制面放 **Go + etcd 强一致**,存储层用 **Rust 直接管 L0–L3 字节**。
 
 ---
 
@@ -136,7 +193,7 @@ PD 总路线 [#21703](https://github.com/sgl-project/sglang/issues/21703) 另缺
 
 | 痛点 | 为何难 | 能做什么 |
 |------|--------|----------|
-| L1/L2 跨实例热共享 | HiCache 设计即实例私有 | 加强 L3/prefetch;或换 lake 式池化 HBM/DRAM——**改架构** |
+| L1/L2 跨实例热共享 | HiCache 设计即实例私有 | 同机去重/共享已在做(1.11a);**跨机热共享上游不做**,仍靠直传+路由;或换 lake 式池化 HBM/DRAM——**改架构** |
 | L3 强一致 + 低延迟 | 每实例树 + 异步 prefetch;强一致要集体同步 | MIN-all_reduce / 事件编号;**无法同时零同步税 + 零发散** |
 | 位置无关 KV 复用(PIC) | RoPE/位置编码使同内容不同 offset 的 KV 不同;链式 hash 必须含 parent(lake [#2](https://github.com/chengda-wu/lake/issues/2) 同理) | MLA delta-rotation / 延迟 RoPE / 训专用模块——非通用免费午餐 |
 | 引擎内「看懂」agent 图 | 工具时隙、subagent 在编排层(#27574 原则) | 只能做 soft hint;**智能放 router** |
@@ -180,7 +237,7 @@ flowchart TB
 
 | SGLang 痛点 | lake 设计里能对应做的事 | 前提 / 尚未验证 |
 |-------------|------------------------|-----------------|
-| L1/L2 实例私有,不能跨机(#31505) | 把 DRAM/HBM 也纳入存储池作物理载体,让"跨机命中"成为放置结果而非实例缓存 | 池化 HBM 的入图约束、放置延迟能否守 SLO,全待 P4/P7 验证 |
+| L1/L2 实例私有,不能跨机(#31505;上游仅同机去重+跨机直传,见 1.11) | 把 DRAM/HBM 也纳入存储池作物理载体,让"跨机命中"成为放置结果而非实例缓存(而非上游的按需直传) | 池化 HBM 的入图约束、放置延迟能否守 SLO,全待 P4/P7 验证 |
 | 弱一致位置 / 旁路 Indexer(#31458) | 由控制面维护位置视图、Router 持本地镜像(见 lake [#4](https://github.com/chengda-wu/lake/issues/4)) | 强一致视图的刷新延迟、镜像陈旧兜底尚未实测;是否真比旁路事件流划算未知 |
 | prefetch 每 req all_reduce → hang(#30760) | 选路走本地镜像读、纯函数决策,不在 per-req 路径放集体通信 | 仅是设计约束,实际调度器还没写 |
 | PD abort 半传垃圾(#30233) | 传输契约设为全有或全无,失败统一走 F4 重路由 | 契约与 F4 目前只在文档;实现细节未定 |
@@ -202,6 +259,8 @@ flowchart TB
 | P0 | [#31458](https://github.com/sgl-project/sglang/issues/31458) Indexer | 元数据 API 形态;对照 lake 位置视图设计 |
 | P0 | [#21846](https://github.com/sgl-project/sglang/issues/21846) / [#27574](https://github.com/sgl-project/sglang/issues/27574) | agent hint / Pin-Prefetch |
 | P0 | [#30760](https://github.com/sgl-project/sglang/issues/30760) / [#22607](https://github.com/sgl-project/sglang/issues/22607) | 集体同步反模式 |
+| P0 | [#26691](https://github.com/sgl-project/sglang/pull/26691) / [#27370](https://github.com/sgl-project/sglang/pull/27370) / [#29326](https://github.com/sgl-project/sglang/pull/29326) | L1/L2 同机去重/共享(1.11a);对照 lake 池化载体 |
+| P1 | [#21591](https://github.com/sgl-project/sglang/pull/21591) / [#28515](https://github.com/sgl-project/sglang/pull/28515) | 跨机 DRAM 直传 / D2P 反向复制(1.11b) |
 | P1 | [#25760](https://github.com/sgl-project/sglang/issues/25760) | Router cache_aware / bucket |
 | P1 | [#29099](https://github.com/sgl-project/sglang/issues/29099) | Session 钉死 vs 共享 |
 | P1 | [#28420](https://github.com/sgl-project/sglang/issues/28420) | Rust radix 拆分 |
