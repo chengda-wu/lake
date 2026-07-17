@@ -6,16 +6,16 @@
 
 | 面 | 内容 | 一致性 | 机制 |
 |----|------|--------|------|
-| 控制面 | KV block 位置元数据、radix 前缀树、节点拓扑、配额、引用汇总 | **强一致** | etcd（SSOT 位置视图） |
+| 控制面 | KV block 位置元数据、radix 前缀树、节点拓扑、配额、引用汇总 | **强一致** | 控制面进程内存（权威）+ etcd（降频 checkpoint） |
 | 数据面 | KV 字节、权重字节、跨节点传输、本地命中视图镜像 | **最终一致** | RDMA/TCP 直传 + 推送刷新 |
 
 **为何分两面**：hot step loop 每步都要定位/组装 block table，不可能每步 RPC 强一致查控制面（撑不住 5ms 预算）。故**正确性地基**（block 在哪、是否可驱逐、radix 结构）归控制面强一致；**性能路径**（字节搬运、本地决策）归数据面最终一致，读镜像 + miss 兜底。
 
-- **控制面是权威**：位置视图、radix、引用汇总的唯一真相在 etcd。任何本地副本（agent 视图镜像、Router 命中视图镜像）都是它的缓存。
-- **数据面读镜像**：agent / Router 各持本地镜像（零 RPC 决策），由控制面**推送**刷新（etcd watch / gRPC stream），触发 = 位置视图权威变更（放置 / 驱逐覆写 / 迁移 / 满块注册）。详见 [`scheduling.md`](scheduling.md) §1 前缀解析。
+- **控制面是权威**：位置视图、radix、引用汇总的唯一真相在**存储控制面进程内存**（单写者线性一致）。**etcd 不承载高频位置写**——满块注册（每次 prefill 新块都触发）是高频写，进 etcd 会被 Raft 复制 + watch 放大拖垮；etcd 只存**降频 checkpoint**（节点/模型/配额/revision + 位置快照），供控制面崩溃重建、Router 冷启动建镜像、stream 断时回退。强一致权威在内存而非 etcd 的依据见 §8。
+- **数据面读镜像**：agent / Router 各持本地镜像（零 RPC 决策），由控制面**推送**刷新（gRPC stream；同机可用共享内存直读），触发 = 位置视图权威变更（放置 / 驱逐覆写 / 迁移 / 满块注册）。详见 [`scheduling.md`](scheduling.md) §1 前缀解析、[`control-plane.md`](control-plane.md) Router 镜像节。
 - **陈旧只损性能不损正确性**：镜像滞后导致误判本地命中 → agent pull 向控制面确认 → miss 则从池（L1/L2，未命中退 L3）回填（多一跳）。热点前缀变动少、基本不陈旧；陈旧风险集中在冷门 block，miss 代价也小。
 
-> **参考对照**：LMCache 一致性节明示"无全局强一致"，靠 controller ZMQ 消息 + 心跳 + 序列号 + `RWLockWithTimeout`、full-sync best-effort（`sharing-and-backends.md`）；Mooncake 元数据全在 leader 内存、etcd 仅存 OpLog（`mooncake/kv-store.md` MasterService）。lake 比两者都强：位置视图本身进 etcd 强一致，而非靠 best-effort 复制。
+> **参考对照**：LMCache 一致性节明示"无全局强一致"，靠 controller ZMQ 消息 + 心跳 + 序列号 + `RWLockWithTimeout`、full-sync best-effort（`sharing-and-backends.md`）；Mooncake 元数据全在 leader 内存、etcd 仅存 OpLog（`mooncake/kv-store.md` MasterService）。lake 的位置视图权威在控制面进程内存强一致（单写者线性一致），etcd 降频做持久后盾——既不靠 best-effort 复制（强于 LMCache），又不在高频写上压 etcd（学 Mooncake 把热元数据留内存的思路，但 lake 有全局权威而非 per-instance）。
 
 ## 2. 写一次读多次（KV immutability）
 
@@ -124,8 +124,8 @@ block 在 L0 产出 ── 每 N 步写回 L2(NVMe) ──> 落 L3(冷下沉,非
 
 | 关注点 | 一致性 | 权威 | 见 |
 |--------|--------|------|-----|
-| block 位置 / radix / 引用汇总 | 强一致 | etcd | §1 |
-| 本地命中视图镜像 / agent 视图 | 最终一致 | etcd 推送 | §1、[`scheduling.md`](scheduling.md) §1 |
+| block 位置 / radix / 引用汇总 | 强一致 | 控制面进程内存（权威）+ etcd（降频 checkpoint） | §1、§8 |
+| 本地命中视图镜像 / agent 视图 | 最终一致 | 控制面推送（gRPC stream / 同机共享内存） | §1、[`scheduling.md`](scheduling.md) §1 |
 | KV 字节（单 token range） | 写一次读多次（immutable） | 产出即定 | §2 |
 | ref（本地） | 强一致（agent 内） | 池 agent | §3 |
 | ref（全局） | 最终一致 | etcd 汇总 | §3 |
@@ -134,7 +134,125 @@ block 在 L0 产出 ── 每 N 步写回 L2(NVMe) ──> 落 L3(冷下沉,非
 | L3 SSOT | 永久权威 | 对象存储 | §4、§5 |
 | 字节删除 | 元数据先于字节 | 控制面 | §6 |
 
-## 8. 开放问题
+## 8. 位置一致性的理论定位
+
+前面各节给出了 lake 一致性的**结论**（控制面强一致 / 数据面最终一致、写一次读多次、两级 ref、持久语义分层）。本节回答"这些结论的强度究竟是什么、为什么这么分档合理"——用多核 / DSM / disaggregated memory 的成熟理论把 lake 的位置一致性定位清楚。结论是一句话：**lake 的位置一致性不是单一强一致，是三个经典范式的组合**。
+
+```
+lake 位置一致性 = 目录一致性 (directory coherence)   ← MESI 的集群 scale 版
+               + 释放一致   (release consistency)     ← DSM 经典（TreadMarks/Munin）
+               + flat disaggregated memory           ← 当代内存池化
+```
+
+### 8.1 一致性谱系：lake 各路径要哪档
+
+| 强度 | 术语 | 含义 | lake 对应 |
+|---|---|---|---|
+| 最强 | 线性一致（linearizability） | 写后立即可见，全局单序 | 搬 KV 那一刻同步查权威 |
+| 释放一致（release） | 同步点刷一致，普通操作松 | **请求结束 = 写回屏障**（§3 writeback ref） |
+| 最终一致（eventual） | 不再写后收敛 | Router 选路镜像 / GC 视图 |
+
+关键：**全局 KV 管理要的是"不丢 + 最终收敛"，不是线性一致；自由流动要的是"搬时查准"（同步查询），不是全局实时推送。** 线性一致只在"搬 KV 时查权威"那一刻需要，而那是查询不是高频写——没有写瓶颈。
+
+### 8.2 范式 1：目录一致性（位置管理的骨架）
+
+MESI 解决多核 cache 一致性：多 cache 副本 + 主存，写一个要让其他副本失效。但 MESI 靠 **bus snooping（总线广播）**，scale 到几十核就吃力；集群级无总线，改用 **directory（目录）**——目录记录每个 block 在哪些 cache 有副本，写时查目录**定向失效**，不广播。
+
+```
+多核 MESI (snoop, 不 scale):           lake (directory, scale):
+
+  Core0 cache ─┐                         Router 镜像 ─┐
+  Core1 cache ─┼─ bus 广播失效            agent 镜像 ──┼─→ 控制面（目录）
+  Core2 cache ─┘ (谁改了谁喊)            Router 镜像 ─┘   查目录→定向失效
+                                                        (不广播)
+```
+
+**lake 的目录 = 存储控制面**（持"哪个 block 在哪些节点的 L0/L1/L2"）。block 被驱逐/迁移时，控制面**查目录知道谁持镜像 → 定向发失效**（摘视图），不是全集群广播。这正是 §3"归 0 不摘位置视图，只有驱逐覆写才摘视图并推送"的语义——**lake 已在用 write-invalidate**。
+
+MESI 状态机可借分类（不照搬协议）映射到 lake block 位置状态：
+
+| MESI | 含义 | lake block 状态 |
+|---|---|---|
+| M (Modified) | 独占且已改 | 独占放某节点 L0，刚写未写回 L2 |
+| E (Exclusive) | 独占未改 | 独占放某节点 L0（单副本） |
+| S (Shared) | 多副本共享 | 多节点 L0/L1 有缓存副本 |
+| I (Invalid) | 无效 | 已驱逐覆写，镜像摘除 |
+
+不照搬 MESI 的理由：MESI 是硬件级纳秒强一致 + snoop 总线；lake 是软件级、集群规模、只要 release 一致——借**状态分类 + write-invalidate 语义**，不借 snoop 总线与硬件强一致。
+
+### 8.3 范式 2：释放一致（请求结束 = release 屏障）
+
+**Release consistency（DSM 经典，TreadMarks/Munin）**：普通读写可松，**只在同步点（release/acquire）保证一致**——进入/离开临界区才 flush。
+
+lake 直接对应：§3 的 **writeback ref + 请求结束屏障**就是 release 一致。满块注册（请求执行中）可松——晚几毫秒被 Router 看见无所谓；**请求结束那刻 = release**：flush 该请求全部已注册 block 的 L2 写回 + ack，writeback ref 随 durable ack 归零，保证此后该请求的 KV 对全局可见、可被引用、GC 可管。
+
+```
+R 执行中（prefill 产出 block B1..Bn）:
+  t1  B1 满块 → 注册 → 控制面内存（可松：Router 此刻没看到 B1，无所谓）
+  t2  B2 满块 → 注册 → 控制面内存（同上）
+  —— 一致性"松"：B1..Bn 在控制面权威，Router 镜像可能还没更新 ——
+
+t_end  R 请求结束 → RELEASE 屏障（§3）:
+       flush(B1..Bn 全部 durable 写回 L2) + ack
+       —— 一致性"刷"：此后 B1..Bn 全局可见、可被引用、GC 可管 ——
+
+t_end+  别的请求 R' 复用 B1..Bn 前缀:
+        Router 镜像已收敛（或 miss 回填）→ 命中 → D-direct
+```
+
+为什么这合理：满块注册高频，但**不必即时全局可见**——同一请求的 block 在请求结束前不会被别人引用（因果上，复用发生在 R 结束后）。release 屏障卡在"可能被引用"的边界，既不阻塞高频注册，又保证正确性。这正是 §1"控制面权威在内存、etcd 只存降频 checkpoint"的理论依据：满块注册写内存（release 一致，可松），请求结束才 flush 到 durable，etcd 的 checkpoint 自然落在低频的 release 点而非每个满块。
+
+### 8.4 范式 3：flat disaggregated memory（L0↔池 的分层）
+
+当代内存池化两种路线：**coherent**（硬件一致，如 CXL.cache）vs **flat**（软件显式管，local cache + far authority，miss 显式 pull）。lake 选 flat——不依赖硬件 coherence，软件管 L0↔L1↔L2↔L3。
+
+```
+flat disaggregated memory:           lake 分层:
+
+  local cache ──miss──→ far memory     L0（本机 HBM）──miss──→ L1/L2/L3（池）
+     ↑ 拉远端，显式 pull                    ↑ 控制面查位置 → RDMA pull
+     ↑ 软件管放置/驱逐                       ↑ 池管放置/驱逐
+```
+
+搬 KV = flat memory 的显式 pull：agent 要远端 block → 同步查控制面（权威，准）→ 拿到位置 → RDMA 拉。这一查是**线性一致查询**（那一刻要准），但**是查询不是高频写**——无写瓶颈，只有 ms 级查询延迟（搬 KV 本就 ms 级，可接受）。
+
+```
+D→P 回传 KV 例子（P 要复用 D 产出的前缀 block B，已在池）:
+  1. P 的 agent 同步查控制面:"B 在哪?"        ← 线性一致查询（强）
+  2. 控制面查目录:"B 在 D 节点 L0"            ← 权威，准
+  3. P 的 agent → RDMA pull B 从 D            ← flat memory 显式 pull
+  4. B 入 P 的 L0，控制面更新目录（S 副本）     ← 定向失效给持镜像者
+```
+
+第 1 步强一致（查权威），但不写、不广播、不进 etcd 高频路径——这是"自由流动不需要全局强一致推送"的落点：流动时查准即可，平时不必全推。
+
+### 8.5 三档一致性汇总
+
+| 用途 | 一致性档 | 机制 | 瓶颈 |
+|---|---|---|---|
+| 搬 KV（查 block 在哪） | **线性一致查询** | 同步查控制面目录（非推送） | 无写瓶颈，ms 查询延迟 |
+| 全局 GC/配额/迁移 | **不丢 + 最终收敛** | agent 上报带 ack+序号，可攒批 | 可控（攒批降频） |
+| Router 选路镜像 | **最终一致** | gRPC stream 推送，增量+gap replay | 可松（错了 miss 回填） |
+| 满块注册写权威 | **release 一致** | 写控制面内存，请求结束 flush（§3） | 不进 etcd，无 Raft 放大 |
+
+由此澄清两个常见混淆：**强一致 ≠ 必须进 etcd**（权威可放控制面进程内存，单写者线性一致）；**不丢 ≠ 强一致**（全局管理靠 ack + 序号 + 攒批做到"不丢 + 最终收敛"，不是线性一致）。
+
+### 8.6 dynamo 在此框架里的位置
+
+dynamo 没有上述三档的完整组合，因为它**不需要全局管理**（KV 归 engine，无全局 GC/配额/迁移权威）：
+
+| | dynamo | lake |
+|---|---|---|
+| 目录一致性 | 无全局目录（router radix 副本 + 每实例本地） | **有**（控制面 = 集群目录） |
+| 释放一致 | 无（事件流 best-effort，无 release 屏障） | **有**（请求结束 = 写回屏障，§3） |
+| flat memory | 部分（`find_matches` 搬时查本地权威） | **完整**（L0↔L1↔L2↔L3） |
+| 一致性强度 | 最终一致（best-effort，可丢） | release 一致（不丢）+ 线性查询（搬时） |
+
+dynamo 最接近的是 `find_matches`（`3rdparty/dynamo/lib/kvbm-engine/src/leader/mod.rs:31`）——搬 KV 时查本地强一致视图，即 flat memory 的 pull。但缺目录（无全局副本失效）和 release 屏障（无写回屏障），因为它的"全局管理"由 engine 各自负责、不做集群级权威。lake 因 HBM 归池，必须自补这两层。
+
+> **reference 说明**：理论范式（directory coherence / release consistency / flat disaggregated memory）属经典 DSM / 多核理论，**本项无直接 3rdparty 参考实现**；dynamo `find_matches` 是 flat memory pull 的最近参照。反证依据：dynamo `distributed.rs` 把 KV 事件踢出 etcd 走 NATS/ZMQ（"approximate mode" 可丢），印证"高频位置写不该进 etcd"。
+
+## 9. 开放问题
 
 - 写回频率 N（风险窗口 vs 写放大 vs 前缀生长时效）待 P7。
 - 满块写回频率（满一个写 vs 攒几个）待 P7。
