@@ -1,7 +1,7 @@
 # SGLang — 上游痛点与 lake 对照
 
 > 源码:`3rdparty/sglang`(submodule)。本文整理 **上游 GitHub issue / roadmap** 暴露的尚未解决痛点,并区分「可修工程债 / 架构债 / 物理或职责边界上难消掉的点」,供 lake 设计取舍。  
-> HiCache 机制本身见 [overview.md](overview.md) / [hicache.md](hicache.md);PD 控制机制见 [../pd-disaggregation.md](../pd-disaggregation.md);thinking 能力缺口见 [thinking-control.md](thinking-control.md)。
+> HiCache 机制本身见 [overview.md](overview.md) / [hicache.md](hicache.md);block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);PD 控制机制见 [../pd-disaggregation.md](../pd-disaggregation.md);thinking 能力缺口见 [thinking-control.md](thinking-control.md)。
 >
 > **调研快照**:2026-07-17 · submodule `37f94cb7a0`(`origin/main`) · 议题以当时 open 状态为准,编号可漂移,以 GitHub 为准。
 

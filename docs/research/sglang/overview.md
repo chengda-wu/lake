@@ -1,7 +1,7 @@
 # SGLang HiCache — 总览
 
 > 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache),不涉及 SGLang 的调度/模型加载等其余能力。  
-> 上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md)。
+> block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md)。
 
 ## 一句话定位
 
