@@ -2,7 +2,7 @@
 
 本仓库在 `3rdparty/` 以 git submodule 引入五个项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
 
-- [`sglang/`](sglang/) — SGLang HiCache:[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md) · [thinking 控制](sglang/thinking-control.md)
+- [`sglang/`](sglang/) — SGLang HiCache:[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md) · [thinking 控制](sglang/thinking-control.md) · [上游痛点](sglang/pain-points.md)
 - [`lmcache/`](lmcache/) — LMCache:[总览](lmcache/overview.md) · [跨实例复用与后端](lmcache/sharing-and-backends.md)
 - [`mooncake/`](mooncake/) — Mooncake:[总览](mooncake/overview.md) · [传输引擎](mooncake/transfer-engine.md) · [KV 存储与池化](mooncake/kv-store.md)
 - [`vllm/`](vllm/) — vLLM:[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md)
@@ -14,7 +14,7 @@
 
 | 路径 | 来源 | 检出 | 主要参考 |
 |------|------|------|----------|
-| `3rdparty/sglang` | [sgl-project/sglang](https://github.com/sgl-project/sglang) | main HEAD | 分层 + HiRadixTree + prefetch/write-back |
+| `3rdparty/sglang` | [sgl-project/sglang](https://github.com/sgl-project/sglang) | main HEAD (`37f94cb7a0`, 2026-07-17) | 分层 + HiRadixTree + prefetch/write-back;痛点见 [sglang/pain-points.md](sglang/pain-points.md) |
 | `3rdparty/lmcache` | [LMCache/LMCache](https://github.com/LMCache/LMCache) | nightly | 跨实例复用 + 多后端 + Rust I/O |
 | `3rdparty/mooncake` | [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake) | main HEAD | 传输引擎 + 对象级 KV 池 |
 | `3rdparty/vllm` | [vllm-project/vllm](https://github.com/vllm-project/vllm) | main HEAD (ab132ee98) | **计算层**(PagedAttention/worker/connector/spec decode) |

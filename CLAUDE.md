@@ -93,6 +93,7 @@ docs/
 1. **先定主题**：本次讨论涉及哪个机制（分层缓存 / KV 传输 / 前缀复用 / 放置调度 / 后端抽象 / HA / GC…）。
 2. **按主题定位文档**：
    - 分层 + radix 节点记位置 + prefetch/write-back 策略 + 内存布局 + 计算-传输重叠 → `docs/research/sglang/{overview,hicache,storage-backends}.md`
+   - 上游 issue/roadmap 痛点与 lake 对照 → `docs/research/sglang/pain-points.md`
    - 跨实例复用 + 多存储后端 + 内容寻址 + 控制器元数据 + Rust 裸设备 I/O → `docs/research/lmcache/{overview,sharing-and-backends}.md`
    - RDMA 零拷贝传输 + 多 NIC 聚合 + 对象级 KV store + 分配策略 + HA → `docs/research/mooncake/{overview,transfer-engine,kv-store}.md`
    - **计算层**:PagedAttention/worker/model runner + KV connector 接口(worker↔存储池接入点) + spec decode + 权重加载 → `docs/research/vllm/{overview,compute}.md`

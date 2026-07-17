@@ -1,6 +1,7 @@
 # SGLang HiCache — 总览
 
-> 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache),不涉及 SGLang 的调度/模型加载等其余能力。
+> 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache),不涉及 SGLang 的调度/模型加载等其余能力。  
+> 上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md)。
 
 ## 一句话定位
 
@@ -82,6 +83,8 @@ HiCache 是在 RadixAttention 之上构建的三层(GPU HBM / 主机内存 / 分
 10. **异步流水线** — prefetch/backup 独立线程 + 队列,L3 I/O 与计算/调度解耦。
 
 ## 劣势
+
+> 机制层摘要如下。**上游 issue / roadmap 暴露的组合痛点、可修 vs 难消掉的分类、与 lake 对照**见 [pain-points.md](pain-points.md)(调研快照 2026-07-17,submodule `37f94cb7a0`)。
 
 1. **L1/L2 私有,跨实例无法共享** — 跨实例复用必须经 L3,L2 命中不跨实例,冷实例仍需 L3→L2→L1 全程。
 2. **L3 元数据非强一致** — 实时查后端(`batch_exists`)而非同步元数据,存在窗口期:刚写入的页他实例可能未命中(后端最终一致);`MetadataCache` TTL 缓存可能陈旧。
