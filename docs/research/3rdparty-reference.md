@@ -5,7 +5,7 @@
 - [`sglang/`](sglang/) — SGLang HiCache:[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md) · [block 生命周期](sglang/block-lifecycle.md) · [thinking 控制](sglang/thinking-control.md) · [上游痛点](sglang/pain-points.md)
 - [`lmcache/`](lmcache/) — LMCache:[总览](lmcache/overview.md) · [跨实例复用与后端](lmcache/sharing-and-backends.md)
 - [`mooncake/`](mooncake/) — Mooncake:[总览](mooncake/overview.md) · [传输引擎](mooncake/transfer-engine.md) · [KV 存储与池化](mooncake/kv-store.md)
-- [`vllm/`](vllm/) — vLLM:[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md)
+- [`vllm/`](vllm/) — vLLM:[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md) · [block 生命周期](vllm/block-lifecycle.md) · [上游痛点与 lake 对照](vllm/pain-points.md)
 - [`dynamo/`](dynamo/) — Dynamo(NVIDIA):[总览](dynamo/overview.md) · 数据中心级推理编排(KV-aware router + KVBM 三层 + Rust 控制面)
 
 本文把它们的关键组件与本系统(`docs/architecture/`)逐层对应,并标注**借鉴点**与**关键差异**(我们的设计更彻底)。
@@ -114,9 +114,13 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 
 ### 关键差异
 
-- vLLM 的 KV/调度/元数据**进程私有、单实例视角**(`KVCacheManager`/`BlockPool`/`Scheduler` 全在引擎进程内);我们归存储池/控制面**集群权威**。
-- vLLM **无 radix tree**(APC 用 hash 顺序匹配,断链即停)、**无位置视图/本地命中概念**;我们 radix + 位置视图 + D-direct。
+> 注:vLLM 自 2026 Q3 roadmap([#48168](https://github.com/vllm-project/vllm/issues/48168))起主动向存算分离演进:原生多层 KV offload(`vllm/v1/kv_offload/`:CPU/FS/Obj)+ KV Events(`vllm/distributed/kv_events.py`)已落地 HEAD `ab132ee98`;`session_id`/`continuation_id` 跨 session 协调(#48501)、layerwise/sparse offload API(#48203)仍是 RFC。差距已收窄,详见 [`vllm/overview.md`](vllm/overview.md) "KV 大规模管理演进"。
+
+- vLLM 的 KV/调度/元数据仍 **per-instance、单实例视角**(`KVCacheManager`/`BlockPool`/`Scheduler` + `kv_offload` 全在引擎进程内,tier 私有);我们归存储池/控制面**集群权威**。
+- vLLM 多层 offload 是**单实例内级联**(GPU↔CPU↔NVMe/Obj 同机);我们是**跨节点池**统一管 L0–L3。
+- vLLM **无 radix tree**(APC hash 顺序匹配 + `OffloadKey` 平铺键)、**无集群位置视图/本地命中**(KV Events `medium` 仅单实例介质标记);我们 radix + 位置视图 + D-direct。
 - vLLM connector 是**可选 per-instance 插件**;我们是**必经集群级路径**(存储池 client 常驻)。
+- vLLM HBM **引擎自分配**(offload/connector 只借传输);我们**池管 HBM 放置**(方案 Z,vLLM 无对应)。
 - vLLM attention 主路径 **C++/CUDA**(FlashAttention);我们选 **Python + Triton**(自定义核门槛与生态不同)。
 - vLLM worker **有状态**(加载模型 + HBM KV,崩溃丢 KV);我们 **无状态**(状态全剥离,秒级伸缩,F4 续推)。
 
