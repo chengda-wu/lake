@@ -70,7 +70,7 @@ docs/
 
 | 路径 | 来源 | 主要参考点 |
 |------|------|-----------|
-| `3rdparty/sglang` | sgl-project/sglang | **HiCache**:L1/L2/L3 分层、HiRadixTree(节点记 KV 位置)、prefetch/write-back 策略、page-first 布局、计算-传输重叠;**计算层**:spec decode(DSPARK 仅此有 / DFLASH / MTP / EAGLE,drafter 共置串行执行模型、`PoolName.DRAFT` drafter KV 池) |
+| `3rdparty/sglang` | sgl-project/sglang | **HiCache**:L1/L2/L3 分层、HiRadixTree(节点记 KV 位置)、prefetch/write-back 策略、page-first 布局、计算-传输重叠;**计算层**:Worker→ModelRunner、spec decode(DSPARK 仅此有 / DFLASH / MTP / EAGLE,drafter 共置串行、`PoolName.DRAFT`)→ 见 [`docs/research/sglang/model-runner.md`](docs/research/sglang/model-runner.md) |
 | `3rdparty/mooncake` | kvcache-ai/Mooncake | **transfer-engine**(RDMA 零拷贝)→ Transfer Bus;**mooncake-store** → KV Pool(L3) |
 | `3rdparty/lmcache` | LMCache/LMCache | 跨请求/跨实例 KV 复用、多存储后端、`rust/` 工程模式 |
 | `3rdparty/vllm` | vllm-project/vllm | **计算层**:PagedAttention、worker/`GPUModelRunner`、`KVConnectorBase_V1` 接口(存算分离接入点)、spec decode |
@@ -93,11 +93,12 @@ docs/
 1. **先定主题**：本次讨论涉及哪个机制（分层缓存 / KV 传输 / 前缀复用 / 放置调度 / 后端抽象 / HA / GC…）。
 2. **按主题定位文档**：
    - 分层 + radix 节点记位置 + prefetch/write-back 策略 + 内存布局 + 计算-传输重叠 → `docs/research/sglang/{overview,hicache,storage-backends}.md`
+   - **计算层(SGLang)**:Worker→ModelRunner + drafter 适配 + 与 vLLM 对照(V2/dummy、DP/TP/PP 控制面) → `docs/research/sglang/model-runner.md`
    - block 生命周期(何时释放/降层/彻底放弃,现状 vs 未来) → `docs/research/sglang/block-lifecycle.md`
    - 上游 issue/roadmap 痛点与 lake 对照 → `docs/research/sglang/pain-points.md`
    - 跨实例复用 + 多存储后端 + 内容寻址 + 控制器元数据 + Rust 裸设备 I/O → `docs/research/lmcache/{overview,sharing-and-backends}.md`
    - RDMA 零拷贝传输 + 多 NIC 聚合 + 对象级 KV store + 分配策略 + HA → `docs/research/mooncake/{overview,transfer-engine,kv-store}.md`
-   - **计算层**:PagedAttention/worker/model runner + KV connector 接口(worker↔存储池接入点) + spec decode + 权重加载 → `docs/research/vllm/{overview,compute}.md`
+   - **计算层(vLLM)**:PagedAttention/worker/model runner + KV connector 接口(worker↔存储池接入点) + spec decode + 权重加载 → `docs/research/vllm/{overview,compute}.md`
    - **编排层/控制面**:KV-aware router(overlap 量化) + KVBM logical/physical/engine 三层 offload + Placement/StorageTier(介质非位置) + 链式 block 哈希 + 多后端通信(etcd/nats/tcp/zmq) → `docs/research/dynamo/overview.md`
    - 跨项目逐层对应与借鉴顺序 → `docs/research/3rdparty-reference.md`
 3. **沿代码回溯**：每个参考文档末尾都有「代码索引」节，把概念/机制映射到 `文件:符号`。符号名是稳定锚点（行号会漂移，找不到时 `grep -n "符号名" 3rdparty/<repo>/<文件路径>`）。需要确认实现细节时，直接读对应符号的源码。
