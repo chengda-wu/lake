@@ -625,10 +625,24 @@ Scheduler[dp_i] → (TP/PP 广播) → ModelRunner…
 | 默认策略 | **`cache_aware`**(`main.rs` CLI default) |
 | 其它策略 | `random` / `round_robin` / `power_of_two` / `prefix_hash` / `manual`;PD 可对 prefill/decode 分设 |
 | cache_aware 机制 | 每 worker 维护**近似 radix 树**(按请求文本历史插入,非实时查引擎 HiCache);负载均衡时走最短队列;平衡时走最长前缀匹配;`cache_threshold` 以下改选「树更小=缓存更空」的 worker;可 mesh 同步树操作 |
-| 与真实 KV | **软共享**:靠路由历史猜前缀亲和,不是控制面强一致位置视图。引擎侧 `kv_events` / 规划中的 KV Indexer(#31458)、cache-aware DP digest(#26561) 是补强方向,多数未成闭环——见 [pain-points.md](pain-points.md) |
+| 与真实 KV | **软共享**:靠路由历史猜前缀亲和,不是控制面强一致位置视图。补强见下「层 B 演进」 |
 | PD | `pd_router` 分别 `pick` prefill/decode worker,仍吃同一套 policy |
+| DP-aware | 网关可把选择落到具体 `routed_dp_rank`(透传层 A),见 `mini_lb.py` 等;默认仍常叠层 A |
 
 ≈ vLLM **External LB**(网关定 worker),但默认带 **近似 cache-aware**,比纯轮询强一档、比 lake「读存储池命中视图」弱一档。
+
+#### 层 B 演进(与 lake 全局 Router 重叠的上游轴)
+
+SGLang **战略上也在做「全局 Router 调度」**,问题域与 lake §1.1 高度重叠;差异在一致性与是否取消层 A。详见 [pain-points.md](pain-points.md) §1.2。
+
+| 阶段 | 组件 | KV 信息从哪来 | 状态 |
+|------|------|---------------|------|
+| 生产现状 | `sgl-model-gateway` `cache_aware` | 请求文本历史 → 近似树 | **已上线**(默认) |
+| 事件进 router | `experimental/sgl-router` `cache_aware_zmq` | 引擎 `ZmqEventPublisher` → `KvEventIndex` / `HashTree` | **树内实验代码**,非生产默认 |
+| 独立目录 | [#31458](https://github.com/sgl-project/sglang/issues/31458) KV Indexer | 旁路 bridge → `hash→worker→tier` gRPC | **RFC**(2026-07),树外 Rust 服务 |
+| SessionAware 产品化 | [#25760](https://github.com/sgl-project/sglang/issues/25760) | bucket + `sticky→cache_aware→load_based`;长期接 [#21846](https://github.com/sgl-project/sglang/issues/21846) agent hint | Step 0–1 勾完;真 KVEvent cache_aware / HA **未勾** |
+
+演进轴:**近似历史 → KVEvent 进 router → 独立 Indexer**。全程旁路/最终一致、字节仍归 worker;默认双层权威(层 B+层 A)未被 roadmap 废除。
 
 #### 两层如何叠(4 机 × 8 卡示例)
 
@@ -639,26 +653,28 @@ Scheduler[dp_i] → (TP/PP 广播) → ModelRunner…
 | gateway + 每机 `dp=1` | gateway 直接选到卡/实例 | 无 Controller | 仅层 B |
 | 上层指定 `routed_dp_rank` | 可先定到某 serve | Controller 直达该 rank | 上层(+层 A 透传) |
 
-痛点与 lake 对照:[pain-points.md](pain-points.md) SessionAware Router / #26561「靠路由软共享」——SGLang 战略上也想把智能上移到 router,但引擎内 Controller 与近似树并存,真实 KV 目录仍旁路/未完成。
+痛点与 lake 对照:[pain-points.md](pain-points.md) §1.2——上游承认智能应在 router(#25760 / #27574),并已有 `cache_aware_zmq` 原型;但层 A 与近似/旁路目录并存,尚未收束为单一选路权威。
 
 #### 与 lake §1.1 倾向的映射
 
 | SGLang | lake 取舍 |
 |--------|-----------|
-| 层 B gateway + cache_aware 近似树 | **强化并收束为唯一权威**:Go Router + **存储池命中视图镜像**(真本地命中/D-direct),不是近似文本树 |
+| 层 B gateway + cache_aware 近似树(+ 演进中的 `cache_aware_zmq` / Indexer) | **强化并收束为唯一权威**:Go Router + **存储池命中视图镜像**(真本地命中/D-direct);可借鉴事件→树的形态,不照搬最终一致旁路 |
 | 层 A DataParallelController | **默认取消权威二次分发**(External 式);负载信号仍可上报给 Router |
 | `routed_dp_rank` 透传 | Router 输出即终点;调试可保留显式 rank 覆盖 |
 | kv_events / Indexer 旁路 | 控制面 etcd **强一致**位置视图,非最终一致旁路 |
+| SessionAware bucket + sticky/load 链(#25760) | 负载/亲和作 Router 加权输入;不设 mode-to-mode 降级链(失败走 F4) |
 
-锚点:层 A — `data_parallel_controller.py::{DataParallelController,LoadBalanceMethod,maybe_external_dp_rank_routing,event_loop}`;层 B — `sgl-model-gateway/src/policies/cache_aware.rs::CacheAwarePolicy`,`policies/mod.rs::LoadBalancingPolicy`,`routers/http/pd_router.rs`,`main.rs`(`--policy` default `cache_aware`)。
+锚点:层 A — `data_parallel_controller.py::{DataParallelController,LoadBalanceMethod,maybe_external_dp_rank_routing,event_loop}`;层 B 生产 — `sgl-model-gateway/src/policies/cache_aware.rs::CacheAwarePolicy`,`routers/http/pd_router.rs`,`main.rs`(`--policy` default `cache_aware`);层 B 实验 — `experimental/sgl-router/src/policies/kv_events/{mod.rs,index.rs,tree.rs}`、`config/types.rs::PolicyKind::CacheAwareZmq`。
 
 ### 对 lake
 
 - **选路形态倾向 External 式**(已写入 [`../../architecture/scheduling.md`](../../architecture/scheduling.md) §1.1):对外逻辑上只有一层 **KV 感知 Router** 做 `f → (模式, 节点/rank)`,计算端点不再内建 Internal/Hybrid 式二次 DP LB(不照搬 head 上 `DPLBAsyncMPClient` / SGLang **层 A** `DataParallelController` 权威分发)。
-- 对标 SGLang 时:吸取**层 B 上移智能**的方向,用真命中视图升级其 cache_aware;拒绝「Gateway 选机 + 机内 Controller 再选 rank」的默认双层权威。
+- 对标 SGLang 时:吸取**层 B 上移智能**的方向(#25760 / `cache_aware_zmq` / #31458);用真命中视图升级其 cache_aware;拒绝「Gateway 选机 + 机内 Controller 再选 rank」的默认双层权威。
 - Router 可多实例水平扩展(无状态 + 命中视图镜像),但扩展的是同质选路面,不是「每机再嵌 DPLB」。计算侧独立副本 vs TP/PP 联合由部署决定;Router 只选定逻辑执行单元。
 - 引擎侧 waiting/running 等只作**上报信号**供 Router 加权,不作第二层权威分发——否则看不见存储池本地命中,损害 D-direct。
 - 执行层若保留跨 rank MoE/DP collective,空闲 rank 的「陪跑」语义必须有(IDLE 或 dummy),且宜由**池/控制面可见的同步原语**驱动,而非引擎私有调度器隐式 all_gather。
+- 持续跟踪上游:#25760 Step 3(真 KVEvent cache_aware)、#31458 一致性语义、实验 `sgl-router` 是否并入 `sgl-model-gateway`。
 - 本项参考实现见上锚点。
 
 ---
@@ -850,6 +866,8 @@ Worker × (TP×PP)          ← 每 GPU 一个;无独立 Scheduler
 | attn DP 布局 | `layers/dp_attention.py::compute_dp_attention_world_info` |
 | 外部网关 / 策略 | `sgl-model-gateway/`:`policies/cache_aware.rs::CacheAwarePolicy`、`policies/mod.rs::LoadBalancingPolicy`、`routers/http/pd_router.rs` |
 | 网关默认 policy | `sgl-model-gateway/src/main.rs`(`--policy` default `cache_aware`) |
+| 实验 KVEvent 路由 | `experimental/sgl-router/src/policies/kv_events/mod.rs`(`KvEventIndex`) · `tree.rs::HashTree` · `config/types.rs::PolicyKind::CacheAwareZmq` |
+| DP rank 透传 | `managers/data_parallel_controller.py::maybe_external_dp_rank_routing`;gateway `mini_lb.py` 写 `routed_dp_rank` |
 
 ### Tensor / Pipeline Parallel(SGLang)
 

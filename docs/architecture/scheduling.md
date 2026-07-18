@@ -64,15 +64,16 @@
 |--------|------|------|
 | **层 B** `sgl-model-gateway` | 独立 Rust 网关；默认 **`cache_aware`**：按请求历史建近似 radix + 失衡时最短队列；PD 分选 P/D worker | **方向对齐**——智能在网关；lake 用**存储池命中视图**(真本地命中)替换近似文本树 |
 | **层 A** `DataParallelController` | 单次 serve 内按 ROUND_ROBIN / 负载再选 `dp_rank`；可用 `routed_dp_rank` 透传跳过 | **默认去掉权威二次分发**；避免「gateway 选机 + 机内再选 rank」 |
-| kv_events / Indexer 规划 | 旁路、最终一致，补 cache_aware 真值 | lake 控制面 **etcd 强一致**位置视图，不走旁路猜 |
+| 层 B 演进 | [#25760](https://github.com/sgl-project/sglang/issues/25760) SessionAware；`experimental/sgl-router` `cache_aware_zmq`(吃 KVEvent)；[#31458](https://github.com/sgl-project/sglang/issues/31458) KV Indexer——**全局 Router 调度与 lake 问题域重叠**，仍旁路/最终一致 | 可借鉴事件→索引形态；权威仍用 etcd **强一致**位置视图，不照搬旁路 Indexer |
+| kv_events / Indexer | 旁路、最终一致，补 cache_aware 真值；未取消层 A | lake 控制面强一致视图 + **唯一**选路面 |
 
-即：SGLang 生产常是 External(网关) + Internal(引擎 DP) **叠加**；lake 只保留并强化「网关那一层」为唯一选路权威。
+即：SGLang 生产常是 External(网关) + Internal(引擎 DP) **叠加**，并正把层 B 从「猜历史」推到「吃事件 / 独立 Indexer」；lake 只保留并强化「网关那一层」为唯一选路权威，且用池命中视图而非旁路目录。细节见 [`../research/sglang/model-runner.md`](../research/sglang/model-runner.md)「层 B 演进」、[`../research/sglang/pain-points.md`](../research/sglang/pain-points.md) §1.2。
 
 **为何倾向 External 式**：
 
-1. **KV/本地命中是一等输入**——只有持全局命中视图镜像的 Router 能正确做 D-direct / 前缀亲和；引擎内 waiting/running 打分**看不见**存储池放置，二次 LB 会稀释甚至抵消命中收益。SGLang 层 A 即此问题；层 B 的 cache_aware 仍是近似树，不是池权威。
+1. **KV/本地命中是一等输入**——只有持全局命中视图镜像的 Router 能正确做 D-direct / 前缀亲和；引擎内 waiting/running 打分**看不见**存储池放置，二次 LB 会稀释甚至抵消命中收益。SGLang 层 A 即此问题；层 B 生产仍是近似树，`cache_aware_zmq`/Indexer 仍弱于池权威。
 2. **职责边界**：过载归 Gateway，选模选点归 Router，执行归 Worker——引擎内再 LB 会把「去哪」拆成两段，难守 5ms 模式选择预算与单向耦合（方案 Z）。
-3. **对照**：vLLM External = 外部定 rank；SGLang 层 B = 外部定 worker(+软 cache-aware)；lake Router ≈ 二者之上 + 真命中视图。队列打分只作**负载信号输入**（worker 上报 → Router 加权），不作为第二层权威分发。
+3. **对照**：vLLM External = 外部定 rank；SGLang 层 B = 外部定 worker(+软/演进中的事件 cache-aware)；lake Router ≈ 二者之上 + 真命中视图。队列打分只作**负载信号输入**（worker 上报 → Router 加权），不作为第二层权威分发。
 
 **开放细节（不阻塞本倾向）**：
 
