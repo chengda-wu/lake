@@ -30,6 +30,57 @@
 4. **SLO 感知与优先级调度（Router 职责）**：Router 在选路时纳入 SLO 预算（如 D-direct 模式选择开销须 < 5ms，否则吃掉本地命中省传输的收益）与请求优先级——**优先级队列**决定已准入请求的执行顺序与抢占（被抢占者 KV 在存储池保留，见第 3 节）。**不设降级链**：若选不到合适节点或执行失败（故障/超时），不写 mode-to-mode 的预设 fallback、不"拒绝"已准入请求，而是触发 F4 故障恢复 → Router 依最新集群状态重跑 `f(请求, 集群状态) → (模式, 节点)` 重选模选点。
    - **边界**：过载层面的**入口准入 / 限并发 / 按优先级丢弃**归 gateway/外部控制面（决定请求"进/不进"，过载拒绝不计推理系统失败率）；Router 只对**已准入**请求做 SLO 路由与优先级**排队顺序**（决定"去哪/何时/怎么跑"，不丢请求）。Worker 不自 shedding，只上报剩余容量、队列长度、in-flight 等信号。详见 [`../features/slo.md`](../features/slo.md) "过载控制"节。
 
+### 1.1 选路形态：KV 感知 Router 与 External 式分发（倾向）
+
+> 对照参考：vLLM Internal / Hybrid / External LB、SGLang `DataParallelController`——见 [`../research/sglang/model-runner.md`](../research/sglang/model-runner.md)「Data Parallel」。本节落 lake 取舍。
+
+**问题**：有了**命中视图驱动的 Router**（§1 前缀解析 + 模式/节点选择）之后，计算侧还要不要再做一层「DP 内部 LB」（类 vLLM `DPLBAsyncMPClient` / SGLang Controller）？
+
+**结论（倾向）**：对外选路权威收束到 **Router 这一层**；计算节点按部署形态独立或联合执行，**默认不再在引擎内做跨 rank 二次分发**——形态上对齐 vLLM **External LB**（外部决定去哪个 rank/端点），而不是 Internal（head 上 DPLB 在全集 engine 里打分）或 Hybrid（上游选机 + 机内再 DPLB）。
+
+| 角色 | 职责 |
+|------|------|
+| **Gateway** | 鉴权 / 限流 / 过载准入（进不进） |
+| **Router**（逻辑单一选路面） | `f(请求, 命中视图镜像, 负载信号) → (模式, 节点/rank)`；**完全决定**请求落到哪个执行端点 |
+| **计算端点** | 只消费已派发请求：节点级 continuous batching；副本内若 TP/PP 联合，则按「一份调度 + 多卡执行」锁步（见 research TP/PP 节），**不**再选别的 DP rank |
+
+**「对外 1 个 Router」的精确含义**：
+
+- **逻辑上**只有一层 KV 感知选路（Router），客户端/Gateway 不直连各 GPU rank 的私有 LB。
+- **物理上** Router **仍可水平扩展**（多实例、无状态、共用命中视图镜像推送；见下「调度器一致性」乐观并发）——扩展的是同质选路面，不是「每机再嵌一套 DPLB」。
+- 与「4 机 32dp、head 上默认 32 个 `DPLBAsyncMPClient`」的 Internal 默认相反：lake **不把**「在 32 个 EngineCore 上打分」做成计算栈内建能力。
+
+**计算节点：独立 vs 联合**（Router 选完之后）：
+
+| 部署形态 | Router 选的「点」 | 计算侧行为 |
+|----------|------------------|------------|
+| 独立副本（每卡/每机组一个可服务端点，普通 DP） | 直接选该端点 | 该端点独立 Scheduler/队列；其它副本无感（除非 MoE/集体通信要 IDLE/dummy 陪跑） |
+| 联合副本（单端点内 TP×PP） | 选该联合组的入口（一组 GPU 的逻辑 rank0 / EngineCore） | 组内 Executor/广播锁步；**组内不分 DP** |
+| 混合 | Router 输出仍是「逻辑执行单元」ID | 单元内部拓扑是部署配置，不进入二次选路 |
+
+**对照 SGLang 双层管理**（详见 [`../research/sglang/model-runner.md`](../research/sglang/model-runner.md)「SGLang 双层管理模式」）：
+
+| SGLang | 说明 | lake |
+|--------|------|------|
+| **层 B** `sgl-model-gateway` | 独立 Rust 网关；默认 **`cache_aware`**：按请求历史建近似 radix + 失衡时最短队列；PD 分选 P/D worker | **方向对齐**——智能在网关；lake 用**存储池命中视图**(真本地命中)替换近似文本树 |
+| **层 A** `DataParallelController` | 单次 serve 内按 ROUND_ROBIN / 负载再选 `dp_rank`；可用 `routed_dp_rank` 透传跳过 | **默认去掉权威二次分发**；避免「gateway 选机 + 机内再选 rank」 |
+| 层 B 演进 | [#25760](https://github.com/sgl-project/sglang/issues/25760) SessionAware；`experimental/sgl-router` `cache_aware_zmq`(吃 KVEvent)；[#31458](https://github.com/sgl-project/sglang/issues/31458) KV Indexer——**全局 Router 调度与 lake 问题域重叠**，仍旁路/最终一致 | 可借鉴事件→索引形态；权威仍用 etcd **强一致**位置视图，不照搬旁路 Indexer |
+| kv_events / Indexer | 旁路、最终一致，补 cache_aware 真值；未取消层 A | lake 控制面强一致视图 + **唯一**选路面 |
+
+即：SGLang 生产常是 External(网关) + Internal(引擎 DP) **叠加**，并正把层 B 从「猜历史」推到「吃事件 / 独立 Indexer」；lake 只保留并强化「网关那一层」为唯一选路权威，且用池命中视图而非旁路目录。细节见 [`../research/sglang/model-runner.md`](../research/sglang/model-runner.md)「层 B 演进」、[`../research/sglang/pain-points.md`](../research/sglang/pain-points.md) §1.2。
+
+**为何倾向 External 式**：
+
+1. **KV/本地命中是一等输入**——只有持全局命中视图镜像的 Router 能正确做 D-direct / 前缀亲和；引擎内 waiting/running 打分**看不见**存储池放置，二次 LB 会稀释甚至抵消命中收益。SGLang 层 A 即此问题；层 B 生产仍是近似树，`cache_aware_zmq`/Indexer 仍弱于池权威。
+2. **职责边界**：过载归 Gateway，选模选点归 Router，执行归 Worker——引擎内再 LB 会把「去哪」拆成两段，难守 5ms 模式选择预算与单向耦合（方案 Z）。
+3. **对照**：vLLM External = 外部定 rank；SGLang 层 B = 外部定 worker(+软/演进中的事件 cache-aware)；lake Router ≈ 二者之上 + 真命中视图。队列打分只作**负载信号输入**（worker 上报 → Router 加权），不作为第二层权威分发。
+
+**开放细节（不阻塞本倾向）**：
+
+- Router 多实例时如何避免同前缀热点扎堆（已有开放问题「前缀亲和 vs 负载」）。
+- MoE/dp-attn 类「有活则全体陪跑」时，Router 是否需感知 collective 组拓扑（选一个逻辑单元而非单卡）。
+- 显式 `routed_rank` 调试接口与生产默认路径的关系。
+
 ## 2. 池间调度
 
 - Prefill → Decode 的 KV 传递通过存储池传输引擎(RDMA 数据面,见 [`kv-cache-pool.md`](kv-cache-pool.md) "跨实例 KV 传输"),需在 Prefill 完成时序上对齐 Decode 就绪（**仅 PD 分离模式**;混部/D-direct 为本地完成、无跨节点传输,见 [`execution-modes.md`](execution-modes.md)）。

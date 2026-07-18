@@ -1,7 +1,7 @@
 # SGLang HiCache — 总览
 
-> 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache),不涉及 SGLang 的调度/模型加载等其余能力。  
-> block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md)。
+> 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache)。  
+> **Worker / ModelRunner / 投机解码 / 与 vLLM 对照(dummy、DP/TP/PP) / DP 双层管理(引擎 Controller + Gateway cache_aware) / 层 B 演进(`cache_aware_zmq` · SessionAware · KV Indexer)**见 [model-runner.md](model-runner.md);block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md)。
 
 ## 一句话定位
 

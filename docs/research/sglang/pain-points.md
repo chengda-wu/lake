@@ -57,9 +57,27 @@ PD 总路线 [#21703](https://github.com/sgl-project/sglang/issues/21703) 另缺
 | Issue | 现象 |
 |-------|------|
 | [#31505](https://github.com/sgl-project/sglang/issues/31505) | 期望多机 DRAM(L2)拼成虚拟 offload 池——**HiCache 明确不做全局共享**;上游改为同机去重 + 跨机直传绕 L3(部分解见 [1.11](#111-l1l2-实例私有--跨机必经-l3的部分解进行中)) |
-| [#31458](https://github.com/sgl-project/sglang/issues/31458) | RFC:**KV Indexer**(独立 Rust 服务)吃 `BlockStored`/`BlockRemoved`,维护 `hash→worker→tier`;旁路、最终一致,KV 字节仍归 worker |
+| [#31458](https://github.com/sgl-project/sglang/issues/31458) | RFC:**KV Indexer**(独立 Rust 服务)吃 `BlockStored`/`BlockRemoved`,维护 `hash→worker→tier`;旁路、最终一致,KV 字节仍归 worker。开放问题含「是否存 prefix-chain」「与引擎事件的一致性保证」——与 lake 位置视图同问题域、弱一致旁路版 |
 
-[#25760](https://github.com/sgl-project/sglang/issues/25760) SessionAware Router:`cache_aware`(吃 KVEvent 建近似前缀树)、sticky/load、PD backpressure、agent hint 透传多数未做。
+[#25760](https://github.com/sgl-project/sglang/issues/25760) **SessionAware Router**(roadmap,open):把跨 worker 选路智能上移到全局 Router——与 lake「KV 感知 Router 作唯一选路面」**方向重叠**,实现路径不同。
+
+| Step | 内容 | 状态(2026-07 核对) |
+|------|------|-------------------|
+| 0–1 | 轻量 `sglang-router` 骨架、多 P/D engine group(role/bucket/endpoint/capacity) | **已勾** |
+| 2 | bucket 分发:`uncached_prefill_tokens` / `estimated_sequence_length` 选组 | 未完成 |
+| 3 | 组内策略链 `sticky → cache_aware → load_based`;`cache_aware` **吃 KVEvent** 建 per-engine 前缀树 | 未完成(生产网关仍是请求历史近似树) |
+| 4 | PD 转发、backpressure、runtime state / metrics | 未完成 |
+| 5 | 接 [#21846](https://github.com/sgl-project/sglang/issues/21846) agentic KV + Agent Hint;KV event HA | 未完成 |
+
+**代码侧已出现的演进**(补 roadmap 勾选之外的事实):
+
+| 组件 | 路径 | 相对生产 `cache_aware` 的进步 |
+|------|------|------------------------------|
+| 生产网关 | `sgl-model-gateway` 默认 `cache_aware` | 按**请求文本历史**插近似 radix,不查引擎 HiCache |
+| 实验轻量路由 | `experimental/sgl-router`,policy `cache_aware_zmq` | 订阅引擎 `ZmqEventPublisher` → router 侧 `HashTree` / `KvEventIndex`(**真事件**,仍最终一致) |
+| 元数据服务 | [#31458](https://github.com/sgl-project/sglang/issues/31458) Indexer(树外) | `hash→worker→tier` 查询 API,供 router/scheduler 跨机复用 |
+
+演进轴:**近似历史树 → KVEvent 进 router → 独立 Indexer**。全程仍是旁路/最终一致、KV 字节归 worker;层 A `DataParallelController` 默认仍可二次分发——见 [model-runner.md](model-runner.md)「双层管理」。
 
 ### 1.3 并行度 × HiCache:树发散与集体死锁
 
@@ -171,7 +189,7 @@ PD 总路线 [#21703](https://github.com/sgl-project/sglang/issues/21703) 另缺
 |------|------|------|------|
 | **KV Indexer**(放置元数据 `hash→worker→tier`) | **Rust** | **树外独立服务**,ZMQ 吃 KV 事件 + gRPC 查询,最终一致,只存元数据不存字节 | [#31458](https://github.com/sgl-project/sglang/issues/31458) |
 | **UnifiedRadixCache 逻辑骨干**(树/匹配/LRU/驱逐/host-tier 记账) | **Rust**(迁移中) | 引擎内,Python 留作 parity oracle + fallback | [#28420](https://github.com/sgl-project/sglang/issues/28420) |
-| Router / cache-aware 路由 / gRPC | **Rust**(已是) | `sgl-router` | [#23206](https://github.com/sgl-project/sglang/issues/23206) |
+| Router / cache-aware 路由 / gRPC | **Rust**(已是) | 生产 `sgl-model-gateway`;实验 `experimental/sgl-router`(`cache_aware_zmq`) | [#23206](https://github.com/sgl-project/sglang/issues/23206) · [#25760](https://github.com/sgl-project/sglang/issues/25760) |
 | 非 GPU 前半程(HTTP/gRPC server、tokenizer、请求 FSM) | **Rust**(迁移中) | thread-per-core 单进程 | [#23206](https://github.com/sgl-project/sglang/issues/23206)(PR #29799) |
 | KV 字节存取 / 内存池 / 布局 / transfer | **Python + CUDA** | **明确 out of scope,不迁** | #23206 |
 | KV 字节实际共享存储(L2/L3 store) | **外部项目**:Mooncake(C++ 核 + Rust/Py 绑定)、3FS、NIXL | 树外 | #21846 |
@@ -261,7 +279,7 @@ flowchart TB
 | P0 | [#30760](https://github.com/sgl-project/sglang/issues/30760) / [#22607](https://github.com/sgl-project/sglang/issues/22607) | 集体同步反模式 |
 | P0 | [#26691](https://github.com/sgl-project/sglang/pull/26691) / [#27370](https://github.com/sgl-project/sglang/pull/27370) / [#29326](https://github.com/sgl-project/sglang/pull/29326) | L1/L2 同机去重/共享(1.11a);对照 lake 池化载体 |
 | P1 | [#21591](https://github.com/sgl-project/sglang/pull/21591) / [#28515](https://github.com/sgl-project/sglang/pull/28515) | 跨机 DRAM 直传 / D2P 反向复制(1.11b) |
-| P1 | [#25760](https://github.com/sgl-project/sglang/issues/25760) | Router cache_aware / bucket |
+| P0 | [#25760](https://github.com/sgl-project/sglang/issues/25760) | SessionAware Router Step 2–5;`experimental/sgl-router` `cache_aware_zmq` 是否并入生产 |
 | P1 | [#29099](https://github.com/sgl-project/sglang/issues/29099) | Session 钉死 vs 共享 |
 | P1 | [#28420](https://github.com/sgl-project/sglang/issues/28420) | Rust radix 拆分 |
 | P2 | [#31482](https://github.com/sgl-project/sglang/issues/31482) / [#28874](https://github.com/sgl-project/sglang/issues/28874) | 稀疏长上下文质量 |
@@ -276,6 +294,8 @@ flowchart TB
 | prefetch 终止 / all_reduce | `python/sglang/srt/mem_cache/hiradix_cache.py`::`can_terminate_prefetch` / `check_prefetch_progress` |
 | L3 命中查询 | `python/sglang/srt/managers/cache_controller.py`::`_storage_hit_query` |
 | KV 事件旁路 | `python/sglang/srt/disaggregation/kv_events.py`(`BlockStored`/`BlockRemoved`) |
+| 生产网关 cache_aware | `sgl-model-gateway/src/policies/cache_aware.rs::CacheAwarePolicy` |
+| 实验 KVEvent 路由 | `experimental/sgl-router/src/policies/kv_events/`(`KvEventIndex` / `HashTree` / `PolicyKind::CacheAwareZmq`) |
 | PD 队列状态机 | `python/sglang/srt/disaggregation/prefill.py` / `decode.py` |
 | HiCache 设计 | `docs/advanced_features/hicache_design.md`(上游树内) |
-| lake 分层对照 | [overview.md](overview.md) · [../3rdparty-reference.md](../3rdparty-reference.md) |
+| lake 分层对照 | [overview.md](overview.md) · [../3rdparty-reference.md](../3rdparty-reference.md) · 选路对照 [model-runner.md](model-runner.md) |

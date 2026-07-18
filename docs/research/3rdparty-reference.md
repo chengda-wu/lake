@@ -28,7 +28,7 @@
 
 源码入口:`3rdparty/sglang/docs/advanced_features/hicache_design.md`、`python/sglang/srt/mem_cache/`。
 
-> SGLang **同时是计算层参考**:spec decode 执行模型(drafter-after-target 共置串行)、DSPARK(**仅 SGLang 有**)/DFLASH/MTP/EAGLE、drafter KV 池(`PoolName.DRAFT`)、多层 MTP chain/non-chain。见 [`../architecture/compute-layer.md`](../architecture/compute-layer.md) "投机解码"与"vLLM / SGLang 支持梳理"。(SGLang spec decode 暂未在 `docs/research/sglang/` 单列文档,按 `3rdparty/sglang/python/sglang/srt/speculative/` 源码回溯。)
+> SGLang **同时是计算层参考**:spec decode(drafter 共置串行、DSPARK/DFLASH/MTP/EAGLE、`PoolName.DRAFT`)、DP/TP/PP 控制面(每 GPU 一 Scheduler + 请求广播 / PP proxy;对照 vLLM 一 Scheduler + Executor 扇出)。research 专文见 [`sglang/model-runner.md`](sglang/model-runner.md);lake 落点见 [`../architecture/compute-layer.md`](../architecture/compute-layer.md) "投机解码"。
 
 ### 借鉴点
 

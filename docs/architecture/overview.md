@@ -6,7 +6,7 @@ lake 以 **KV 为中心**做彻底存算分离:所有有状态物(权重、KV ca
 
 ```
                        ┌──────────────────────┐
-                       │   Gateway → Router   │   Gateway:鉴权/限流/入口准入(过载 shedding);Router(无状态):请求路由/模式选择 f(请求,集群状态)
+                       │   Gateway → Router   │   Gateway:鉴权/限流/入口准入(过载 shedding);Router(无状态,KV 感知):f → (模式,节点/rank),选路权威收束于此(倾向 External 式,计算侧不再二次 DP LB;见 scheduling.md §1.1)
                        └──────────┬───────────┘
                                   │
                        ┌──────────┴───────────┐

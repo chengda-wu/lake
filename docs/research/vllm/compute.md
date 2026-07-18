@@ -152,13 +152,73 @@ connector 分两侧(同文件):
 
 ## Worker / Model Runner
 
+vLLM V1 引擎内现有 **两套** GPU ModelRunner,由 `VLLM_USE_V2_MODEL_RUNNER` / `VllmConfig.use_v2_model_runner` 选择(`gpu_worker.py` 分支构造):
+
+| | 路径 | 形态 |
+|--|------|------|
+| **V1** | `vllm/v1/worker/gpu_model_runner.py::GPUModelRunner` | 单体大文件 |
+| **V2** | `vllm/v1/worker/gpu/model_runner.py::GPUModelRunner` | 模块化:`gpu/{states,input_batch,block_table,spec_decode,sample,kv_connector,…}` |
+
 | 类 | 文件 | 职责 |
 |----|------|------|
-| `Worker` | `vllm/v1/worker/gpu_worker.py` (L124) | GPU 进程:`load_model`(L384)、`execute_model`(L932)、分布式环境初始化 |
-| `GPUModelRunner` | `vllm/v1/worker/gpu/model_runner.py` (L120) | 加载模型(L280)+ 前向(L1128)、构造 attention metadata、维护 block table、驱动 spec decode |
-| `WorkerBase` | `vllm/v1/worker/worker_base.py` (L39) | worker 进程基类 |
+| `Worker` | `vllm/v1/worker/gpu_worker.py` | GPU 进程:`load_model`、`execute_model`、分布式环境初始化 |
+| `GPUModelRunner`(V2) | `vllm/v1/worker/gpu/model_runner.py` | 吃 `SchedulerOutput`:更新 `RequestState`、组装 input/attn、前向、驱动内嵌 `speculator`;`execute_model`/`sample_tokens` 可拆 |
+| `GPUModelRunner`(V1) | `vllm/v1/worker/gpu_model_runner.py` | 同上职责的单体实现 |
+| `WorkerBase` | `vllm/v1/worker/worker_base.py` | worker 进程基类 |
 
-**对本系统**:worker 生命周期(`load_model`→`execute_model`→drain)与 block table 维护可直接借鉴。本系统 worker **无状态化**:模型从存储池流式加载、KV 从存储池读写、block table 物理位置由存储池元数据定。
+**V2 相对 V1 / 相对 SGLang**:V2 把 request state、block table、input buffers、speculator、KVConnector 收进 runner,是「GPU 侧状态机 + 执行」。SGLang `ModelRunner` 更薄(只 forward/sample/池),请求生命周期在 Scheduler、投机在外层 SpecWorker——对照见 [`../sglang/model-runner.md`](../sglang/model-runner.md)「与 vLLM ModelRunner V2 对照」。
+
+### Dummy run(V2)
+
+复用生产入口:`GPUModelRunner._dummy_run` 造假 `SchedulerOutput`,再调 `execute_model(..., dummy_run=True, skip_attn_for_dummy_run=…, is_profile=…)`。`dummy_run` 分支跳过真实 `add/update/free_requests`,走 `InputBatch.make_dummy` / `prepare_dummy_attn`;可选再 `speculator.propose` 保 DP/EP。用途:profile、CUDA graph capture、`Worker.execute_dummy_batch`、`gpu/warmup.py::warmup_kernels`。SGLang 不复用生产入口、另造 `ForwardBatch`(见同对照节)。
+
+**对本系统**:worker 生命周期(`load_model`→`execute_model`→drain)与 block table 维护可直接借鉴;模块拆分/connector 注入点偏 V2;runner 宜保持薄(仿 SGLang)。本系统 worker **无状态化**:模型从存储池流式加载、KV 从存储池读写、block table 物理位置由存储池元数据定。
+
+## Data Parallel(EngineCore / Coordinator / LB)
+
+> 官方:`docs/serving/data_parallel_deployment.md`。与 SGLang 对照见 [`../sglang/model-runner.md`](../sglang/model-runner.md)「Data Parallel」。
+
+**拓扑**:`--data-parallel-size=N` 时,**每 DP rank 一个独立 `EngineCore` 进程**,各自内嵌 `Scheduler` + Executor/Worker——**不**共享全局 Scheduler。API server(可 `--api-server-count`)选路;DP>1 另有 `DPCoordinator` 汇聚队列统计、管理 request wave、广播 `START_DP_WAVE`。TP>1 时每 EngineCore 再挂 TP 个 GPU worker。
+
+**选路(Internal LB)**:`DPLBAsyncMPClient.get_core_engine_for_request` — 显式 `data_parallel_rank` 直达,否则按 `score = waiting*4 + running` 选最闲 engine;统计来自 Coordinator(~100ms)。首请求唤醒 paused engines 经 Coordinator。另有 Hybrid / External LB 模式(见官方文档)。
+
+**空闲与单请求**:
+
+| 状态 | 行为 |
+|------|------|
+| 全局无未完成请求 | all-reduce 共识后 `engines_running=False`,wave 结束 pause |
+| 仅一 rank 有请求(尤其 MoE 需对齐) | 有活 rank 正常 `execute_model`;无活 rank `execute_dummy_batch` → V2 `_dummy_run` → `execute_model(dummy_run=True)` |
+
+**对本系统**:「每副本独立调度 + 前端选路」可对照 lake Router;MoE/collective 陪跑勿做成引擎隐式全局 Scheduler。KV 每 EngineCore 独立;`max-num-seqs` 按 **per rank** 理解。
+
+## Tensor / Pipeline Parallel(Executor 扇出)
+
+> 与 SGLang 对照见 [`../sglang/model-runner.md`](../sglang/model-runner.md)「Tensor / Pipeline Parallel」。官方:`docs/serving/parallelism_scaling.md`。
+
+**拓扑(单 DP rank)**:1 个 `EngineCore` = **1 个 Scheduler** + `Executor` + **`TP×PP` 个 Worker**(每 GPU 一个)。与 SGLang「每 GPU 一个完整 Scheduler」不同。
+
+**TP 控制**:
+
+```
+EngineCore.scheduler.schedule() → SchedulerOutput
+  → Executor.collective_rpc("execute_model", SchedulerOutput)
+       → 全部 Worker 经 mp MessageQueue / Ray DAG 收到同一份输出
+            → GPUModelRunner.execute_model
+                 → 层内 NCCL TP collectives
+```
+
+扇出在 **Executor 控制面**(SHM MQ / Ray),不是 driver worker 用 TP 组广播 `SchedulerOutput`。
+
+**PP 控制**:
+
+| 层面 | 机制 |
+|------|------|
+| 流水填充 | `EngineCore.batch_queue` / `step_with_batch_queue`;深度≈`pp_size` |
+| 各 stage 同一步 | 仍 `collective_rpc` 同一 `SchedulerOutput` |
+| 激活 | 非首段 `irecv_tensor_dict`,非末段 `isend`(`gpu_worker.Worker.execute_model`) |
+| 采样回传 | V2 `PPHandler`(`worker/gpu/pp_utils.py`)侧流 broadcast,供前段更新状态 |
+
+**对本系统**:副本内宜保持「一份调度决策 + 多卡执行」(偏本路径);PP 激活 P2P 留在计算面,勿与存储池 ready/done 握手缠死。
 
 ## 权重加载与 offload(权重存算分离原型)
 
@@ -167,7 +227,7 @@ connector 分两侧(同文件):
 
 ## Executor / 并行
 
-`Executor`(L37,ABC)拥有 worker 并派发 `execute_model`:单进程 / 多进程 / Ray。`ParallelConfig`(TP/PP/DP)。**对本系统**:多卡编排参考;但本系统 worker 无状态、可独立伸缩,executor 边界会与控制面调度重叠,需重新切分。
+`Executor`(ABC)拥有 worker 并派发 `execute_model`:单进程(`uni`) / 多进程(`mp`,默认) / Ray。`ParallelConfig` 含 TP/PP/DP。TP/PP 扇出与 PP 流水见上节「Tensor / Pipeline Parallel」。**对本系统**:多卡编排参考;worker 无状态、可独立伸缩时,Executor 边界会与控制面调度重叠,需重新切分——倾向保留「一份 schedule + 扇出执行」。
 
 ## Speculative Decoding
 
@@ -269,10 +329,22 @@ connector 分两侧(同文件):
 
 | 机制 | 文件:符号 |
 |------|-----------|
-| GPU worker 进程 | `vllm/v1/worker/gpu_worker.py`::`Worker` (L124;`load_model` L384、`execute_model` L932) |
-| GPU model runner | `vllm/v1/worker/gpu/model_runner.py`::`GPUModelRunner` (L120;`load_model` L280、`execute_model` L1128) |
-| worker 基类 | `vllm/v1/worker/worker_base.py`::`WorkerBase` (L39) / `WorkerWrapperBase` (L187) |
-| 分布式环境初始化 | `gpu_worker.py`::`init_worker_distributed_environment` (L1296) |
+| V2 开关 | `vllm/config/vllm.py::VllmConfig.use_v2_model_runner` |
+| GPU worker 进程 | `vllm/v1/worker/gpu_worker.py`::`Worker`(`load_model` / `execute_model`;按 `use_v2_model_runner` 选 runner) |
+| GPU model runner **V2** | `vllm/v1/worker/gpu/model_runner.py`::`GPUModelRunner`(`execute_model` / `sample_tokens` / `_dummy_run`) |
+| GPU model runner **V1** | `vllm/v1/worker/gpu_model_runner.py`::`GPUModelRunner` |
+| V2 dummy / DP idle | `GPUModelRunner._dummy_run`;`Worker.execute_dummy_batch`;`engine/core.py::execute_dummy_batch` |
+| DP 协调 / wave | `vllm/v1/engine/coordinator.py::DPCoordinator` |
+| DP busy loop | `vllm/v1/engine/core.py::run_busy_loop` / `_has_global_unfinished_reqs` |
+| 内部 LB | `vllm/v1/engine/core_client.py::DPLBAsyncMPClient.get_core_engine_for_request` |
+| 每 rank 引擎 | `vllm/v1/engine/core.py::EngineCore`(内嵌 `Scheduler`) |
+| V2 kernel warmup | `vllm/v1/worker/gpu/warmup.py::warmup_kernels` |
+| worker 基类 | `vllm/v1/worker/worker_base.py`::`WorkerBase` / `WorkerWrapperBase` |
+| 与 SGLang 对照 | [`../sglang/model-runner.md`](../sglang/model-runner.md)「与 vLLM ModelRunner V2 对照」「Data Parallel」 |
+| Executor 扇出 | `vllm/v1/executor/abstract.py::collective_rpc`;`multiproc_executor.py::MultiprocExecutor` |
+| PP 批队列 | `vllm/v1/engine/core.py::step_with_batch_queue` |
+| PP 激活 / token | `worker/gpu_worker.py::execute_model`;`worker/gpu/pp_utils.py::PPHandler` |
+| 官方 DP / 并行文档 | `docs/serving/data_parallel_deployment.md` / `docs/serving/parallelism_scaling.md` |
 
 ### 权重加载 / offload
 
