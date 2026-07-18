@@ -35,3 +35,5 @@ Thumbs.db
 checkpoints/
 data/
 logs/
+
+.claude/settings.json
