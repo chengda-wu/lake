@@ -122,7 +122,7 @@ Req  →  ScheduleBatch  →  ForwardBatch
 ### 留在 host 的 `Req` 字段(`managers/schedule_batch.py::Req`)
 
 - 身份/文本:`rid`、`origin_input_text`、`origin_input_ids`、`output_ids`
-- 控制:`sampling_params`、finish reason、stream/logprob/LoRA/grammar
+- 控制:`sampling_params`、finish reason、stream/logprob/LoRA/grammar(guided decoding 与 overlap/spec 同步见 [../guided-decoding.md](../guided-decoding.md))
 - 调度:`kv_committed_len`、`ReqKvInfo`、`extend_range`、chunked 计数
 - 缓存策略:`last_node`、host hit 长度、`cache_protected_len`
 - `req_pool_idx`:host `int`,指向 device 表的一行

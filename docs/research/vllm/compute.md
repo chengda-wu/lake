@@ -236,6 +236,10 @@ EngineCore.scheduler.schedule() → SchedulerOutput
 
 **对本系统**:proposer↔speculator 划分对应 Draft 池↔Decode 池;draft 候选跨节点传输延迟见 compute-layer 开放问题。
 
+## Structured Output / Guided Decoding
+
+FSM / bitmask fill 在 scheduler 侧 CPU(`StructuredOutputManager`);`execute_model` 与 `get_grammar_bitmask` 可重叠,`sample_tokens` 前 apply GPU kernel。async scheduling 遇 `pending_structured_output_tokens` 会 defer sample——**非绝对无空闲**。专文与 SGLang 对照见 [`../guided-decoding.md`](../guided-decoding.md)。
+
 ## 代码索引
 
 > 沿代码回溯用。符号名锚定,行号会漂移——找不到时 `grep -n "符号名" 3rdparty/vllm/<文件路径>`。
@@ -345,6 +349,7 @@ EngineCore.scheduler.schedule() → SchedulerOutput
 | PP 批队列 | `vllm/v1/engine/core.py::step_with_batch_queue` |
 | PP 激活 / token | `worker/gpu_worker.py::execute_model`;`worker/gpu/pp_utils.py::PPHandler` |
 | 官方 DP / 并行文档 | `docs/serving/data_parallel_deployment.md` / `docs/serving/parallelism_scaling.md` |
+| structured output × async | [`../guided-decoding.md`](../guided-decoding.md);`structured_output/__init__.py::StructuredOutputManager`;`async_scheduler.py` |
 
 ### 权重加载 / offload
 

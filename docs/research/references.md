@@ -17,6 +17,8 @@
   - **KV 大规模管理演进**(Q3 2026 roadmap):原生多层 KV offload(`vllm/v1/kv_offload/`)+ KV Events 已落地;`session_id`/`continuation_id`、layerwise offload 仍是 RFC。
 - **Dynamo** → [`dynamo/`](dynamo/):[总览](dynamo/overview.md)
   - **编排层/控制面参考**(NVIDIA,Rust):推理引擎之上的编排层,KV-aware router + KVBM(GPU→CPU→SSD→远端 三层 offload)+ 多后端通信(etcd/nats/tcp/zmq)。Rust 写控制面/编排,是 lake Rust 存储控制面的直接参照系。
+- **Guided / structured decoding** → [`guided-decoding.md`](guided-decoding.md)
+  - SGLang × vLLM:xgrammar/llguidance 仅 GPU apply、FSM 仍在 CPU;overlap/async 近零 vs spec+grammar / pending token 的同步气泡;与 lake 重叠契约及抢占时 FSM 游标交接。
 
 五者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
 
