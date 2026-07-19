@@ -5,7 +5,7 @@
 
 ## 一句话结论
 
-两边共享 OpenAI 风格核心采样（temperature / top_p / top_k / min_p / penalties / stop / n），但**命名、挂载位置、扩展能力不同**。SGLang 的 `n` 是**同 prompt 复制成 n 条独立采样**（不是 beam search）；vLLM 在开启 speculative decoding 时**硬禁** `min_p` 与 `logit_bias`——因为 spec 路径根本不装这两个 logits processor，装了也会与 rejection sampling 分布不一致。
+两边共享 OpenAI 风格核心采样（temperature / top_p / top_k / min_p / penalties / stop / n），但**命名、挂载位置、扩展能力不同**。SGLang 的 `n` 是**同 prompt 复制成 n 条独立采样**（不是 beam search）；vLLM 在开启 speculative decoding 时**硬禁** `min_p` 与 `logit_bias`——因为 spec 路径根本不装这两个 logits processor，装了也会与 rejection sampling 分布不一致。penalty 在 V1 async 下有硬 sync 空泡风险，V2 / SGLang 走设备侧持久统计，详见「深挖 3」。
 
 ## 两边都有（核心采样）
 
@@ -204,6 +204,92 @@ Rejection sampling（Leviathan 等）要求：用 **与最终采样一致的 tar
 
 ---
 
+## 深挖 3：penalty 与 device 空泡（含 vLLM V2 + 上游讨论）
+
+三个参数：`presence_penalty` / `frequency_penalty` / `repetition_penalty`（均依赖已生成 token 历史）。共性：上一步采样结果必须进入 penalty 状态；apply 在 **forward 之后、sample 之前**。不会像 grammar 那样强制关 overlap，但可引入「等上一轮 token」或「每步重建计数」开销。
+
+### SGLang（overlap 友好，仍有边界）
+
+| 环节 | 行为 | 空泡风险 |
+|------|------|----------|
+| 累计 | `cumulate_output_tokens`：host last token → `non_blocking` H2D → GPU `scatter`/`scatter_add` | H2D 异步；前提是 `Req.output_ids` 已有上步 token |
+| overlap apply | `update_penalties` → `acc_additive` / `acc_scaling`（`[B,V]` GPU），sample 时只 `add_` / 缩放 | apply **纯 GPU** |
+| 上步 token | overlap 仍经 `process_batch_result`（`copy_done.synchronize`）再 `prepare_for_decode` | 与 grammar 同类边界，**不**单独关 overlap |
+| 成本 | 每步可能 `zeros([B,V])` | GPU **忙**而非空转；大 vocab 拉长 sample 前准备 |
+
+Spec 用「放松版」：对已累计 buffer `repeat_interleave`（见 `eagle_utils` / dflash 路径）。无 penalty 时 `is_required=False` 整段跳过。
+
+### vLLM V1 + async（硬 sync）
+
+`v1/sample/ops/penalties.py::apply_all_penalties`：每步 Python `list[list[int]]` → pad → `non_blocking` H2D → 全量 bincount；注释自评 *quite inefficient*。
+
+async 下 `_sample` 前调用 `InputBatch.update_async_output_token_ids`：对 placeholder `-1` 填真实 token 时执行 **`async_copy_ready_event.synchronize()`**——典型 device 空泡。async+spec+penalty 还强制 draft token D2H（[#30495](https://github.com/vllm-project/vllm/pull/30495)）。
+
+### vLLM Model Runner V2（目标形态）
+
+源码：`vllm/v1/worker/gpu/sample/penalties.py` + `input_batch.py::post_update`。
+
+**设备侧持久统计**，不再每步从 CPU 重建整段 output history：
+
+| 状态 | 形状 / 位置 | 作用 |
+|------|-------------|------|
+| `prompt_bin_mask` | `[max_reqs, ceil(V/32)]` int32 GPU | prompt 出现过的 token（packed） |
+| `output_bin_counts` | `[max_reqs, V]` int32 GPU | 已生成频次 |
+| 三个 penalty 标量 | `UvaBackedTensor` | presence / frequency / repetition |
+
+流程：
+
+1. **入队**：`add_request` 记系数；`apply_staged_writes` 用 Triton `bincount` 从 `RequestState.all_token_ids`（GPU）建 mask/counts；`index_fill_` 清零时注释 *Avoid sync*。  
+2. **sample 前**：`_penalties_kernel` 读 counts 改 logits；spec 时在 kernel 内用 `input_ids` + `expanded_local_pos` **临时**叠 draft 计数（不写回 persistent，避免错误接受污染）。  
+3. **sample 后**：`post_update` 在 GPU 上给 `output_bin_counts` +1 并更新 `all_token_ids`——**无 D2H、无 Python list pad**。
+
+代价：`output_bin_counts` 很大（源码 TODO：可能占 **数 GB** GPU 显存）。相对 V1，把「等 CPU 历史」空泡路径基本拆掉。
+
+### 空泡对照
+
+| | V1 + async | V2 | SGLang overlap |
+|--|------------|-----|----------------|
+| 历史依赖 | CPU list + **硬 sync** | GPU 持久 counts + `post_update` | GPU scatter 累计 |
+| 每步成本 | O(rows × max_out_len) CPU | Triton apply + 小更新 | `[B,V]` 准备仍重 |
+| 上游态度 | 已知痛点；[#47540](https://github.com/vllm-project/vllm/pull/47540) 拟回灌 V2 模型 | 目标形态 | 修 spec 正确性 + 减 Python 热路径 |
+
+### 上游 Issue / PR（调研快照）
+
+**vLLM**（讨论集中在 async 正确性 → 性能重构）：
+
+| 链接 | 要点 |
+|------|------|
+| [#23569](https://github.com/vllm-project/vllm/pull/23569) Fully overlap model execution | async 落地；评论出现 frequency_penalty + async → CUDA scatter assert（`-1` placeholder） |
+| [#27878](https://github.com/vllm-project/vllm/issues/27878) | 0.11.0 async 下 penalty **不生效**（`output_token_ids` 空） |
+| [#26467](https://github.com/vllm-project/vllm/pull/26467) | BugFix：penalty/bad_words 兼容 async；*minimally-invasive*，计划大幅重构 |
+| [#27910](https://github.com/vllm-project/vllm/pull/27910) | 混 batch（部分有 penalty）时 #26467 仍坏 |
+| [#30495](https://github.com/vllm-project/vllm/pull/30495) | async **+ spec** 支持 penalty/bad_words（draft D2H）——正确性换同步 |
+| [#29699](https://github.com/vllm-project/vllm/pull/29699) | V2：bin counts + UVA（设计入口；能力已在树内） |
+| [#40657](https://github.com/vllm-project/vllm/pull/40657) | V2 Triton 性能/编译（`tl.range`、避免 layout 转换） |
+| [#47540](https://github.com/vllm-project/vllm/pull/47540) OPEN | V2 式持久统计**回灌 V1**；量化 4k history **6ms/step** → 28k **47ms/step**，并点名 async `synchronize()`；DP 下最长序列拖死整 wave |
+
+**SGLang**（偏正确性 + Python 热路径，少谈 async event sync）：
+
+| 链接 | 要点 |
+|------|------|
+| [#5703](https://github.com/sgl-project/sglang/pull/5703) | 加入 repetition penalty |
+| [#26011](https://github.com/sgl-project/sglang/issues/26011) / [#26319](https://github.com/sgl-project/sglang/pull/26319)、[#26027](https://github.com/sgl-project/sglang/pull/26027) | 热路径遍历未激活 penalizer → Python 开销（open perf PR） |
+| [#28179](https://github.com/sgl-project/sglang/issues/28179) / [#28181](https://github.com/sgl-project/sglang/pull/28181) | `repetition_penalty` 曾被忽略（缺 `BatchedRepetitionPenalizer`） |
+| [#28180](https://github.com/sgl-project/sglang/issues/28180) 及 [#28200](https://github.com/sgl-project/sglang/pull/28200)/[#28242](https://github.com/sgl-project/sglang/pull/28242)/[#28535](https://github.com/sgl-project/sglang/pull/28535) | DFlash/spec-v2 下 repetition_penalty 未 cumulate → **死循环** |
+
+社区叙事：vLLM 先修 async 下「不生效/crash」，再承认 V1 每步重建太慢、用 V2 持久计数消空泡；SGLang 已是 GPU 累计 buffer（更近 V2），讨论焦点在 **spec 漏更新** 与 **orchestrator Python 开销**。
+
+### 对本系统
+
+| 点 | 借鉴 |
+|----|------|
+| 统计落点 | **常驻 device**（bin counts / scatter 累计），禁止每步 list→pad→H2D |
+| async/overlap | sample 前避免强制 `event.synchronize()`；token 历史更新与 forward 重叠或纯 GPU `post_update` |
+| 显存 | `[max_reqs, vocab]` int32 要进容量规划（V2 TODO） |
+| 无 penalty 请求 | 整段跳过（`is_required` / `use_penalty`），勿为混 batch 误 sync |
+
+---
+
 ## 命名与挂载差异速查
 
 1. `max_tokens` ↔ `max_new_tokens`；`seed` ↔ `sampling_seed`；`include_stop_str_in_output` ↔ `no_stop_trim`。  
@@ -222,8 +308,15 @@ Rejection sampling（Leviathan 等）要求：用 **与最终采样一致的 tar
 | vLLM spec 时裁剪 logitsprocs | `vllm/v1/sample/logits_processor/__init__.py`::`build_logitsprocs` |
 | vLLM MinP / LogitBias | `vllm/v1/sample/logits_processor/builtin.py`::`MinPLogitsProcessor` / `LogitBiasLogitsProcessor` |
 | vLLM rejection + 部分约束 | `vllm/v1/sample/rejection_sampler.py`::`RejectionSampler`（`apply_with_spec_decode` / penalties / bad_words） |
+| vLLM V1 penalty（每步 CPU rebuild） | `vllm/v1/sample/ops/penalties.py`::`apply_all_penalties` |
+| vLLM async 填 placeholder | `vllm/v1/worker/gpu_input_batch.py`::`update_async_output_token_ids`（`async_copy_ready_event.synchronize`） |
+| vLLM V2 PenaltiesState | `vllm/v1/worker/gpu/sample/penalties.py`::`PenaltiesState` / `_penalties_kernel` / `bincount` |
+| vLLM V2 采样后更新 counts | `vllm/v1/worker/gpu/input_batch.py`::`post_update` / `_post_update_kernel` |
+| vLLM V2 sampler 挂载 | `vllm/v1/worker/gpu/sample/sampler.py`::`apply_sampling_params` |
 | SGLang SamplingParams | `python/sglang/srt/sampling/sampling_params.py`::`SamplingParams` |
 | SGLang n 展开 | `python/sglang/srt/managers/io_struct.py`::`GenerateReqInput._handle_parallel_sampling` / `_expand_inputs` |
+| SGLang penalizer | `python/sglang/srt/sampling/penaltylib/`::`BatchedPenalizerOrchestrator` / `BatchedFrequencyPenalizer` / `BatchedPresencePenalizer` / `BatchedRepetitionPenalizer` |
+| SGLang overlap 预聚 penalty | `sampling_batch_info.py`::`update_penalties` / `copy_for_forward`；`schedule_batch.py`::`cumulate_penalty_output_tokens` |
 | SGLang 请求级 logprob / custom processor | `io_struct.py`::`GenerateReqInput`（`return_logprob` / `custom_logit_processor`） |
 | SGLang custom processor 示例 | `python/sglang/srt/sampling/custom_logit_processor.py` |
 | 官方参数表 | SGLang `docs_new/docs/basic_usage/sampling_params.mdx` |

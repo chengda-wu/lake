@@ -20,7 +20,7 @@
 - **Guided / structured decoding** → [`guided-decoding.md`](guided-decoding.md)
   - SGLang × vLLM:xgrammar/llguidance 仅 GPU apply、FSM 仍在 CPU;overlap/async 近零 vs spec+grammar / pending token 的同步气泡;与 lake 重叠契约及抢占时 FSM 游标交接。
 - **Sampling 参数** → [`sampling-params.md`](sampling-params.md)
-  - SGLang × vLLM 字段对照;`n` 为独立并行采样非 beam;vLLM spec 路径不装 MinP/LogitBias 故硬禁同开。
+  - SGLang × vLLM 字段对照;`n` 为独立并行采样非 beam;vLLM spec 路径不装 MinP/LogitBias 故硬禁同开;penalty 空泡(V1 async sync vs V2/SGLang 设备侧统计)与上游 PR。
 
 五者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
 
