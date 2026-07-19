@@ -109,6 +109,26 @@
 
 所以说「主路径是 n + sampling」=：要多候选时，用 **独立并行采样**；不要指望 SGLang 默认 decode 环里有 HF/vLLM 那种 beam 状态机。vLLM 则把 beam 拆成**另一条 API**（`BeamSearchParams`），与 `SamplingParams.n` 分开。
 
+### 实现结果会不会有差异？
+
+**会有系统性差异——它们不是同一算法的两种实现。**
+
+| | vLLM beam search（`BeamSearchParams`） | SGLang `n` + sampling（≈ vLLM 的 `SamplingParams.n`） |
+|--|----------------------------------------|------------------------------------------------------|
+| 每步 | 各 beam 扩候选，**全局**按累计 logprob 留 `beam_width` 条 | n 条序列**各自** sample，互不看对方 |
+| 目标 | 近似高概率序列（MAP / 搜索） | 从分布里独立抽 n 个样本 |
+| 分数 | `cum_logprob / len^length_penalty`（见 `beam_search/utils.py`） | 无跨序列打分 |
+| 多样性 | 宽度内的竞争路径；`temperature=0` 时偏确定 | 靠 temperature / top_p / seed，路径可完全分叉 |
+| 前缀 | 共享前缀、剪掉弱分支 | 无共享剪枝；弱路径也会跑完 |
+
+典型对照：
+
+1. **同一 prompt、`beam_width = n` 且 temperature=0**：beam 更偏向「模型认为概率高」的几条；`n` 采样若每条都 greedy（top-1）会因无搜索而**全部相同**（同一条贪心路径）；有温度时则是 n 条随机轨迹——候选集合通常与 beam 的 top-n **对不齐**。
+2. **有温度时**：`n` 采样方差大、可重复性依赖 seed；beam 仍由联合分数主导，结果更像「几条高分变体」。
+3. **等价对比对象**：不要拿「vLLM beam」对「SGLang `n`」。要比两边「多候选」是否一致，应对 **vLLM `SamplingParams.n` ↔ SGLang `n`**（都是独立并行采样）；beam 是第三条路径。
+
+用途分工：要「几条好答案 / 搜索」→ beam；要「多样本估计 / 投票 / 多样性」→ `n`。
+
 ---
 
 ## 深挖 2：为何 vLLM 禁止 `min_p` / `logit_bias` 与 speculative decoding 同开？
@@ -179,7 +199,7 @@ Rejection sampling（Leviathan 等）要求：用 **与最终采样一致的 tar
 
 | 点 | 借鉴 |
 |----|------|
-| `n` | 多候选默认用独立并行采样即可；若要真 beam，需单独状态机与 API，勿与 `n` 混名 |
+| `n` | 多候选默认用独立并行采样即可；若要真 beam，需单独状态机与 API，勿与 `n` 混名；**结果集合与 beam 不对齐**（见上） |
 | min_p / logit_bias × spec | 任何「改 target 分布」的约束，必须进入 **verify 展平行** 的同一 apply 路径；做不到就明确拒绝，禁止静默忽略 |
 
 ---
@@ -197,6 +217,7 @@ Rejection sampling（Leviathan 等）要求：用 **与最终采样一致的 tar
 | 机制 | 文件:符号 |
 |------|-----------|
 | vLLM SamplingParams | `vllm/sampling_params.py`::`SamplingParams` / `StructuredOutputsParams` / `BeamSearchParams` |
+| vLLM beam 打分 / 剪枝 | `vllm/entrypoints/generate/beam_search/utils.py`::`get_beam_search_score`；`offline.py` / `online.py`::`_beam_search_step` |
 | vLLM spec 禁 min_p/logit_bias | `sampling_params.py`::`_validate_spec_decode` |
 | vLLM spec 时裁剪 logitsprocs | `vllm/v1/sample/logits_processor/__init__.py`::`build_logitsprocs` |
 | vLLM MinP / LogitBias | `vllm/v1/sample/logits_processor/builtin.py`::`MinPLogitsProcessor` / `LogitBiasLogitsProcessor` |
