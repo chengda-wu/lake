@@ -5,7 +5,7 @@
 
 ## 一句话结论
 
-两边共享 OpenAI 风格核心采样（temperature / top_p / top_k / min_p / penalties / stop / n），但**命名、挂载位置、扩展能力不同**。SGLang 的 `n` 是**同 prompt 复制成 n 条独立采样**（不是 beam search）；vLLM 在开启 speculative decoding 时**硬禁** `min_p` 与 `logit_bias`——因为 spec 路径根本不装这两个 logits processor，装了也会与 rejection sampling 分布不一致。penalty 在 V1 async 下有硬 sync 空泡风险，V2 / SGLang 走设备侧持久统计，详见「深挖 3」。
+两边共享 OpenAI 风格核心采样（temperature / top_p / top_k / min_p / penalties / stop / n），但**命名、挂载位置、扩展能力不同**。SGLang 的 `n` 是**同 prompt 复制成 n 条独立采样**（不是 beam search）；vLLM 在开启 speculative decoding 时**硬禁** `min_p` 与 `logit_bias`——因为 spec 路径根本不装这两个 logits processor，装了也会与 rejection sampling 分布不一致。penalty 在 V1 async 下有硬 sync 空泡风险，V2 / SGLang 走设备侧持久统计（深挖 3）。采样状态跟请求走 Decode 侧、不进 KV 池；spec 兼容是一张矩阵而非单一禁令；`n` 副本可共享前缀 KV（深挖 4）。
 
 ## 两边都有（核心采样）
 
@@ -290,13 +290,96 @@ async 下 `_sample` 前调用 `InputBatch.update_async_output_token_ids`：对 p
 
 ---
 
+## 深挖 4：采样状态归属 · Spec 兼容矩阵 · `n` 与前缀共享
+
+### 4.1 采样状态归属（PD / 混部 / D-direct）
+
+**原则：KV 是「前缀张量」；采样状态是「生成游标」——二者生命周期不同，不要默认一起搬。**
+
+| 状态 | 典型载体 | 是否随 KV 池块走 |
+|------|----------|------------------|
+| 前缀 / 已写回的 KV blocks | 存储池 L0–L3 | ✓（池权威） |
+| `output_ids` / 已采样 token 序列 | 请求对象（Decode worker） | ✗ |
+| presence / frequency / repetition 计数 | GPU buffer 或 CPU list（跟 batch/req） | ✗ |
+| grammar FSM / bitmask 游标 | CPU matcher（挂在 req） | ✗ |
+| stop / min_tokens / finish 判定 | 调度 + sampling metadata | ✗ |
+| RNG / seed 游标 | sampler 侧 | ✗ |
+| logprobs 累积、custom logit processor 句柄 | 请求级 | ✗ |
+
+参考实现里的落点：
+
+1. **SGLang PD**：Prefill 实例在 prefill 完成时**会 sample 出 first token**，写入 `req.output_ids`，并可选 `grammar.accept_token`；随后 `send_kv_chunk` 只推 KV。Decode 侧 `process_prebuilt` 用已缓冲的 last token 重建 `SamplingBatchInfo`，并对 grammar 再 `accept_token`（若尚未 accept）。见 `disaggregation/prefill.py::process_batch_result_disagg_prefill`、`decode_schedule_batch_mixin.py::process_prebuilt`。  
+2. **vLLM PD**：引擎经 KV connector 搬 block；sampling / structured-output 状态留在继续 decode 的 engine 请求上（proxy 把同一逻辑请求从 P 转到 D）。  
+3. **混部**：P+D 同进程，状态本就在同一 `Req` / `InputBatch`，无跨机交接。  
+4. **D-direct**：前缀 KV 已在执行节点 HBM；仍须在该节点**新建或恢复**采样游标（空 output、penalty 零计数、grammar 初始态）。本地命中省的是 KV 传输，不是采样状态。
+
+对 lake：池只权威 KV 位置；Router 选 D 节点后，采样状态在该 Decode 执行上下文初始化/续跑。故障恢复（F4）重路由时——KV 可从 L2/L3 拉回，**penalty / grammar / stop 游标必须按请求元数据重建或随控制面请求状态迁移**，不能指望「拉 KV 就恢复采样」。
+
+### 4.2 Spec × 采样兼容矩阵
+
+下表以当前 submodule 行为为准（会漂移；以源码校验函数为准）。符号：✓ 支持 · △ 支持但有代价/缺口 · ✗ 硬拒绝或不装路径 · — 未作为一等组合强调。
+
+| 能力 | vLLM + spec | SGLang + spec | 备注 |
+|------|-------------|---------------|------|
+| temperature / greedy | ✓ | ✓ | rejection 用 target 分布；bonus 可走完整 sampler |
+| top_p / top_k | △ | ✓（主路径） | vLLM：docstring 写明 **verify 链上**对 top_p/k 支持弱于 bonus（`RejectionSampler`）；bonus 走普通 `Sampler` |
+| min_p | ✗ | ✓（无对等硬禁） | vLLM `_validate_spec_decode`；见深挖 2 |
+| logit_bias | ✗ | 视 custom/字段 | vLLM 同上；自定义 logitsprocs 亦 `STR_SPEC_DEC_REJECTS_LOGITSPROCS` |
+| presence / frequency / repetition | △ | △ | vLLM：rejection 内 `repeat_interleave` + `apply_all_penalties`；async 下有 sync/D2H（深挖 3）。SGLang：GPU 累计 + `repeat_interleave`；曾出 spec 漏 cumulate 死循环（#28180） |
+| bad_words / allowed_token_ids | △ | 近似（custom / 引擎路径） | vLLM：`apply_bad_words_with_drafts` / mask `repeat_interleave` |
+| min_tokens | ✓ | ✓ | vLLM：`MinTokensLogitsProcessor.apply_with_spec_decode`（spec 时**唯一**保留的内置 processor） |
+| structured / grammar | △ | △ | 两边都能跑，但 **async/overlap 代价大**：SGLang `need_grammar_sync` 关 overlap；vLLM draft 需回 scheduler 做 grammar 校验（`spec_decode/utils.py` D2H）——见 [guided-decoding.md](guided-decoding.md) |
+| logprobs | ✓ | ✓ | 额外 gather；不改变 accept 语义，但增带宽/同步 |
+| custom logits processor | ✗（vLLM 硬拒） | △ | 必须进 verify 展平行，否则分布不一致 |
+| `n` 并行采样 | ✓ | ✓ | 与 spec 正交：先展开再各自 draft/verify |
+| beam search | ✗ / 独立路径 | 主路径无 | 勿与 spec 混用假设 |
+
+**读表要点：**
+
+- 「能开」≠「无空泡」。grammar + spec、penalty + async 是正确性已接、性能仍痛的典型格。  
+- 任何改 target 分布的算子：要么进入 **draft 展平行** 的同一 apply，要么请求级拒绝（深挖 2 的原则）。  
+- lake 若做 spec：先固定一张「支持 / 拒绝 / 降级」表写进接口契约，避免半截 processor。
+
+### 4.3 `n` 与前缀 KV 共享
+
+`n` 在入口把同一 prompt **复制成 n 条独立请求**（深挖 1），但**前缀 token 相同 ⇒ 内容寻址 / radix 前缀可命中同一物理 KV**。
+
+```text
+prompt P
+    ├─ req_1 (sample path A) ──┐
+    ├─ req_2 (sample path B) ──┼─ 共享 prefix blocks（ref++）
+    └─ req_n (sample path C) ──┘
+         │
+         └─ 首个分叉 token 之后：各写各的 decode KV，采样状态始终独立
+```
+
+| 层 | 共享？ | 说明 |
+|----|--------|------|
+| 前缀 KV blocks | ✓（可） | SGLang `RadixCache.match_prefix` / `insert`：相同 `input_ids` 命中同一树节点；`req_to_token` 每请求一份映射，物理页可 ref-count 共享。vLLM prefix caching 同理（block hash） |
+| Prefill 计算 | △ | 理想可一次 prefill、n 路复用；实现上常是 n 条调度项各自 match——**命中后跳过重复 prefill**，而非先合并再扇出（取决于调度是否同批） |
+| Decode KV | ✗（分叉后） | 各序列 `output_ids` 不同，后续 block 独立分配 |
+| 采样状态 | ✗ | 各自 temperature / seed / penalty / stop / grammar |
+| Beam 式联合剪枝 | ✗ | `n` 不做跨序列比较（深挖 1） |
+
+对 lake：
+
+| 点 | 含义 |
+|----|------|
+| 池放置 | `n` 条共享同一 `model_id` 前缀键时，**预放置一次**到目标 HBM，Router 可对 n 路同选 D-direct / 同 Decode 节点 |
+| 计费 / 配额 | 前缀块按引用计数，勿按 n 倍全量计 KV 容量 |
+| 调度 | 分叉后 n 路 decode 负载 ≈ n 条独立短请求；前缀命中只省 prefill/传输 |
+| 与 beam 对比 | beam 在搜索树内共享前缀并剪枝；`n` 是「共享前缀 KV + 独立采样」，语义仍是独立样本 |
+
+---
+
 ## 命名与挂载差异速查
 
 1. `max_tokens` ↔ `max_new_tokens`；`seed` ↔ `sampling_seed`；`include_stop_str_in_output` ↔ `no_stop_trim`。  
 2. greedy：vLLM `temperature≈0`；SGLang 强制 `top_k=1`。  
 3. logprobs：vLLM 在 `SamplingParams`；SGLang 在 `GenerateReqInput`。  
 4. 白/黑名单与 thinking 预算：vLLM 一等字段；SGLang 多用 `custom_logit_processor`。  
-5. beam：vLLM 独立 `BeamSearchParams`；SGLang 主路径只有 `n` 并行独立采样。
+5. beam：vLLM 独立 `BeamSearchParams`；SGLang 主路径只有 `n` 并行独立采样。  
+6. 采样状态跟 Decode 请求走，不进 KV 池；`n` 可共享前缀 KV、不共享采样游标（深挖 4）。
 
 ## 代码索引
 
@@ -307,16 +390,21 @@ async 下 `_sample` 前调用 `InputBatch.update_async_output_token_ids`：对 p
 | vLLM spec 禁 min_p/logit_bias | `sampling_params.py`::`_validate_spec_decode` |
 | vLLM spec 时裁剪 logitsprocs | `vllm/v1/sample/logits_processor/__init__.py`::`build_logitsprocs` |
 | vLLM MinP / LogitBias | `vllm/v1/sample/logits_processor/builtin.py`::`MinPLogitsProcessor` / `LogitBiasLogitsProcessor` |
-| vLLM rejection + 部分约束 | `vllm/v1/sample/rejection_sampler.py`::`RejectionSampler`（`apply_with_spec_decode` / penalties / bad_words） |
+| vLLM rejection + 部分约束 | `vllm/v1/sample/rejection_sampler.py`::`RejectionSampler`（`apply_logits_processors` / `apply_penalties` / `apply_bad_words_with_drafts`） |
 | vLLM V1 penalty（每步 CPU rebuild） | `vllm/v1/sample/ops/penalties.py`::`apply_all_penalties` |
 | vLLM async 填 placeholder | `vllm/v1/worker/gpu_input_batch.py`::`update_async_output_token_ids`（`async_copy_ready_event.synchronize`） |
 | vLLM V2 PenaltiesState | `vllm/v1/worker/gpu/sample/penalties.py`::`PenaltiesState` / `_penalties_kernel` / `bincount` |
 | vLLM V2 采样后更新 counts | `vllm/v1/worker/gpu/input_batch.py`::`post_update` / `_post_update_kernel` |
 | vLLM V2 sampler 挂载 | `vllm/v1/worker/gpu/sample/sampler.py`::`apply_sampling_params` |
+| vLLM spec + structured draft 回传 | `vllm/v1/worker/gpu/spec_decode/utils.py`（draft tokens → scheduler grammar） |
 | SGLang SamplingParams | `python/sglang/srt/sampling/sampling_params.py`::`SamplingParams` |
 | SGLang n 展开 | `python/sglang/srt/managers/io_struct.py`::`GenerateReqInput._handle_parallel_sampling` / `_expand_inputs` |
+| SGLang PD prefill 首 token + grammar | `disaggregation/prefill.py`::`process_batch_result_disagg_prefill` |
+| SGLang PD decode 重建 sampling | `disaggregation/decode_schedule_batch_mixin.py`::`process_prebuilt` |
+| SGLang radix 前缀命中 | `mem_cache/radix_cache.py`::`match_prefix` / `insert` / `cache_unfinished_req` |
 | SGLang penalizer | `python/sglang/srt/sampling/penaltylib/`::`BatchedPenalizerOrchestrator` / `BatchedFrequencyPenalizer` / `BatchedPresencePenalizer` / `BatchedRepetitionPenalizer` |
 | SGLang overlap 预聚 penalty | `sampling_batch_info.py`::`update_penalties` / `copy_for_forward`；`schedule_batch.py`::`cumulate_penalty_output_tokens` |
+| SGLang overlap×spec×grammar | `managers/scheduler.py`::`need_grammar_sync` / `is_disable_overlap_for_batch` |
 | SGLang 请求级 logprob / custom processor | `io_struct.py`::`GenerateReqInput`（`return_logprob` / `custom_logit_processor`） |
 | SGLang custom processor 示例 | `python/sglang/srt/sampling/custom_logit_processor.py` |
 | 官方参数表 | SGLang `docs_new/docs/basic_usage/sampling_params.mdx` |
