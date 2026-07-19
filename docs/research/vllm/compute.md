@@ -240,6 +240,10 @@ EngineCore.scheduler.schedule() → SchedulerOutput
 
 FSM / bitmask fill 在 scheduler 侧 CPU(`StructuredOutputManager`);`execute_model` 与 `get_grammar_bitmask` 可重叠,`sample_tokens` 前 apply GPU kernel。async scheduling 遇 `pending_structured_output_tokens` 会 defer sample——**非绝对无空闲**。专文与 SGLang 对照见 [`../guided-decoding.md`](../guided-decoding.md)。
 
+## Sampling Parameters
+
+引擎 `SamplingParams` 字段、与 SGLang 对照、以及 **spec decode 硬禁 `min_p`/`logit_bias`**（spec 路径不装对应 logits processor）见 [`../sampling-params.md`](../sampling-params.md)。
+
 ## 代码索引
 
 > 沿代码回溯用。符号名锚定,行号会漂移——找不到时 `grep -n "符号名" 3rdparty/vllm/<文件路径>`。

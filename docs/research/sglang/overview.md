@@ -1,7 +1,7 @@
 # SGLang HiCache — 总览
 
 > 源码:`3rdparty/sglang`(submodule)。本文聚焦 HiCache(分层 KV cache)。  
-> **Worker / ModelRunner / 投机解码 / 与 vLLM 对照(dummy、DP/TP/PP) / DP 双层管理(引擎 Controller + Gateway cache_aware) / 层 B 演进(`cache_aware_zmq` · SessionAware · KV Indexer)**见 [model-runner.md](model-runner.md);block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md);guided/structured decoding 与 overlap 同步见 [../guided-decoding.md](../guided-decoding.md)。
+> **Worker / ModelRunner / 投机解码 / 与 vLLM 对照(dummy、DP/TP/PP) / DP 双层管理(引擎 Controller + Gateway cache_aware) / 层 B 演进(`cache_aware_zmq` · SessionAware · KV Indexer)**见 [model-runner.md](model-runner.md);block 何时释放/彻底放弃见 [block-lifecycle.md](block-lifecycle.md);上游 issue/roadmap 痛点整理见 [pain-points.md](pain-points.md);guided/structured decoding 与 overlap 同步见 [../guided-decoding.md](../guided-decoding.md);采样参数对照见 [../sampling-params.md](../sampling-params.md)。
 
 ## 一句话定位
 

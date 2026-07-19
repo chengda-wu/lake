@@ -2,7 +2,7 @@
 
 > 源码:`3rdparty/sglang`、`3rdparty/vllm`。本文对照两边对 **grammar-guided / structured output** 的支持，重点回答：在 overlap / async scheduling 下能否避免 host↔device 同步、让 GPU 执行路径**完全无空闲**；以及 xgrammar / llguidance / outlines 等库是否把 FSM 放到了 GPU。
 >
-> 不涉及 HiCache / KV connector（见各 overview）；计算层总览见 [sglang/model-runner.md](sglang/model-runner.md)、[vllm/compute.md](vllm/compute.md)。thinking 开关/长度预算见 [sglang/thinking-control.md](sglang/thinking-control.md)（与 grammar 正交，可叠加）。
+> 不涉及 HiCache / KV connector（见各 overview）；计算层总览见 [sglang/model-runner.md](sglang/model-runner.md)、[vllm/compute.md](vllm/compute.md)。thinking 开关/长度预算见 [sglang/thinking-control.md](sglang/thinking-control.md)（与 grammar 正交，可叠加）。采样参数字段对照见 [sampling-params.md](sampling-params.md)。
 
 ## 一句话结论
 
