@@ -91,6 +91,10 @@ flowchart TB
 
 **重建**：新 leader 从 **etcd checkpoint**（节点/模型/配额/revision + 位置快照，见上「位置视图权威的归属」）重建内存权威（radix + 位置视图 + ref）。重建后陈旧（落后于崩溃前最后几次满块注册），但**陈旧只损性能不损正确性**——误判位置 → agent 回查/miss 回填。真正未 checkpoint 的高频位置变更，其 block 的 **L2 durable 副本还在**（满块写回落 L2），故**数据不丢，位置视图靠 agent 上报重新收敛**。
 
+- **checkpoint 周期**：秒级（量级，待 P7 校准——频次高则重建陈旧少但 etcd 写压力大，即「降频」权衡的两端）。重建窗口 = 一个 checkpoint 周期 + 重建耗时（秒级）。
+- **重建期必须线性一致的 `Locate`**：重建未完成时，控制面权威不可用，agent 搬 KV 的同步 `Locate` **排队/重试**等重建完（见下「降级」），不在重建期强行返回陈旧结果——线性一致查询要么准、要么不答，不返回半截权威。
+- **lease 同机制**：计算节点与 KV Node 都靠 etcd lease 续命、控制面 watch 收敛存活（见 [`kv-cache-pool.md`](kv-cache-pool.md)「KV Node 上的 agent」），leader 切换不影响 lease——节点存活由 etcd 直接管，不依赖控制面在线。
+
 **降级**（故障期秒级切换）：
 - **选路不中断**：Router 镜像还在（只读副本不受控制面切换影响），只是不再更新、更陈旧，miss 回填兜底。
 - **搬 KV 重试**：agent 同步查权威失败 → 退避重试，等新 leader 重建完。搬 KV 本就 ms 级，容忍秒级抖动一次（故障罕见）。
@@ -163,7 +167,7 @@ Dynamo 部署拓扑（`components/src/dynamo/router/CLAUDE.md` "Frontend/Router 
 
 | # | #3 待讨论项 | dynamo 输入 | lake 倾向 |
 |---|---|---|---|
-| 1 | Gateway/Router/Scheduler 拆几个进程 | frontend+router 默认同进程；请求级选路（`LocalScheduler`）内嵌 router | Gateway 外部(Bifrost,不自研)；**集群级调度归 Router、同进程**（节点级 scheduler 不在此列，每计算节点一个） |
+| 1 | Gateway/Router/Scheduler 拆几个进程 | frontend+router 默认同进程；请求级选路（`LocalScheduler`）内嵌 router | Gateway 外部（Bifrost，不自研，见 #5/PR #13）；**集群级调度归 Router、同进程**（节点级 scheduler 不在此列，每计算节点一个） |
 | 2 | Scheduler 独立进程？ | `LocalScheduler`（请求级）在 kv-router 内，无独立进程 | 集群级调度不拆（归 Router 内逻辑）；**节点级 scheduler（每计算节点一个，vLLM 式）另论，跟 Router 无关** |
 | 3 | KV Node 有 agent？ | dynamo 无 KV Node 概念（远端 = 对象存储 + NIXL）；`TransferManager` + `export/import_metadata` 是 RDMA 注册参考 | KV Node 跑 agent（复用计算节点 agent 代码），做 RDMA 注册 / 读写服务 |
 | 4 | 存储控制面单 leader / 多副本？ | per-instance `InstanceLeader` P2P，非单 leader / 非 Raft | **已定**：拒绝 P2P（不满足强一致）；单 leader + etcd lease 选主 + checkpoint 重建（仿 Mooncake），多副本留 P7。见上文「控制面 HA」 |
