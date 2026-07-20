@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package lake;
+
+// KV block 身份与位置 schema（#2 定稿）。
+//
+// 来源:docs/architecture/kv-cache-pool.md「Block 寻址」+ storage-layer.md「数据模型/层间副本 vs 移动」。
+// 设计要点:
+//   1. 内容寻址 + 前缀链式哈希(前缀复用天然成立)
+//   2. 多层位置(L0/L1 缓存副本 + L2 durable),L3 不进 Location、用 l3_present
+//   3. 模型无关(Pool 不解释张量布局,按不透明字节块存取)
+//   4. 多租户 scope 预留(当前不实现、不入寻址)
+//
+// 参考实现:
+//   - vLLM ExternalBlockHash(kv_cache_utils.py::maybe_convert_block_hash)父哈希链式
+//   - Mooncake transfer-engine(SegmentID=uint64 + offset)段式寻址;rkey/lkey per-NIC 动态、不进持久元数据
+//   - SGLang HiCache(L3 用链式 hash 当 key、不记位置,实时查后端)
+//   - SGLang PoolName.DRAFT / vLLM kv_cache_spec_kind:block_kind/pool_kind 字段区分(不物理分池)
+
+// KVBlockID — block 身份(内容寻址 + 前缀链式哈希)
+message KVBlockID {
+  string  model_id    = 1;  // 模型命名空间
+  uint32  layer_idx   = 2;  // 层号
+  bytes   block_hash  = 3;  // 链式哈希 = hash(parent_block_hash || 本块 token_ids);
+                            //   序列起点块 parent = ⊥(空)。相同前缀 → 相同链式 hash → 命中同一 KV
+                            //   算法可插拔(BLAKE3-128 / SHA-256-128 / SHA-256-256),由模型注册元数据声明,
+                            //   proto 只规定 ≥128-bit + 链式。不同 model_id 可用不同算法。
+  PoolKind pool_kind  = 4;  // TARGET | DRAFT 命名空间(draft KV 同款 schema,靠字段区分,不物理分池)
+  string  scope       = 5;  // 多租户预留,默认 "public",当前不入寻址(F8 远期启用时改寻址语义不改结构)
+}
+
+// Location — 单层一个物理位置(仅 L0/L1/L2 段式位置;L3 不进此处)
+message Location {
+  Tier    tier        = 1;  // L0 | L1 | L2
+  string  node_id     = 2;  // 载体节点(compute-X / kvnode-Y)
+  uint64  segment_id  = 3;  // 传输引擎注册段 ID(仿 Mooncake SegmentID;uint64 走传输热路径)
+  uint64  offset      = 4;  // 段内偏移
+  // rkey/lkey 不进 schema —— MR 注册时 per-NIC 动态产生,传输时 agent 查本地 MR 表得 lkey、
+  //   查 peer 发布的 BufferDesc 得 rkey。固化进持久元数据会立刻 stale。
+}
+
+// BlockMeta — 一个 block 的元数据(权威在存储控制面进程内存,etcd 只存降频 checkpoint)
+message BlockMeta {
+  KVBlockID            id         = 1;
+  BlockKind            block_kind = 2;  // T_TYPE | R_TYPE_STATE | R_TYPE_TRAILING
+  repeated Location    locations  = 3;  // L0?/L1?/L2? —— 缓存副本(L0/L1 易失) + L2 durable(F4 恢复点)
+  bool                 l3_present = 4;  // L3(SSOT) 是否有副本;object key = s3://lake/kv/{model_id}/{layer_idx}/{block_hash} 现场拼,不存储
+  uint32               ref_count  = 5;  // 全局引用汇总
+  // 存在性:l3_present=false 且 locations 全空 → block 不存在;
+  //        l3_present=true → 即使 locations 全空仍存在(缓存未命中,从 L3 回填)
+}
+
+enum Tier {
+  TIER_UNSPECIFIED = 0;
+  L0               = 1;  // GPU HBM(易失缓存)
+  L1               = 2;  // DRAM 池化(易失缓存)
+  L2               = 3;  // NVMe 池化(F4 恢复点,durable)
+  L3               = 4;  // 对象存储(SSOT 永久权威,不进 Location,用 l3_present)
+}
+
+enum PoolKind {
+  POOL_UNSPECIFIED = 0;
+  TARGET           = 1;  // target 模型 KV
+  DRAFT            = 2;  // draft 模型 KV(同款 schema,随 target 迁移/跨请求复用)
+}
+
+enum BlockKind {
+  KIND_UNSPECIFIED  = 0;
+  T_TYPE            = 1;  // 逐 token 完整 KV(full attention / MLA)
+  R_TYPE_STATE      = 2;  // Mamba/state-space/卷积 recurrent state 快照
+  R_TYPE_TRAILING   = 3;  // sliding window trailing pages
+  // 复用条件两类一致(全前缀命中);block_kind 只声明 block 内布局,L1–L3 仍统一按 block 不透明存
+}
