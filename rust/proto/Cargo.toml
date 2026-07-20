@@ -1,0 +1,19 @@
+[package]
+name = "lake-proto"
+version = "0.0.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+# 共享 proto crate:tonic-build 从 proto/ 生成 gRPC stub 并作为本 lib 的模块。
+# 其它 crate 依赖 lake-proto 即可用 lake_proto::lake::* / lake_proto::* 类型。
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"

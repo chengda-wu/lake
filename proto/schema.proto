@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package lake;
 
+option go_package = "github.com/chengda-wu/lake/go/pb;lakepb";
+
 // KV block 身份与位置 schema（#2 定稿）。
 //
 // 来源:docs/architecture/kv-cache-pool.md「Block 寻址」+ storage-layer.md「数据模型/层间副本 vs 移动」。

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["proto", "kv-pool", "transfer", "storage-agent"]
+
+# 存储层 Rust 工作区（P2 空壳）。
+# - proto: tonic-build 从 proto/ 在线生成 gRPC stub（不入仓），作为共享 lib
+# - kv-pool / transfer / storage-agent: 空壳 crate,仅能编译,无业务逻辑

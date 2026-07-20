@@ -1,0 +1,11 @@
+[package]
+name = "lake-kv-pool"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lake-proto = { path = "../proto" }
+tonic = "0.12"
+
+# 空壳:KV cache 分布式池(内容寻址/分片/驱逐)。P2 仅验证 proto 生成 + 编译。
