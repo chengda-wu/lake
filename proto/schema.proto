@@ -18,20 +18,26 @@ package lake;
 //   - SGLang PoolName.DRAFT / vLLM kv_cache_spec_kind:block_kind/pool_kind 字段区分(不物理分池)
 
 // KVBlockID — block 身份(内容寻址 + 前缀链式哈希)
+// block = page:128 token × 全部层,page-first 连续(见 kv-cache-pool.md「分块流水线」)。
+//   身份按 token 段(page)而非按层——block_hash 本就 layer-agnostic(链式哈希只吃 token),
+//   layer_idx 不进身份,只在 LayerSlice(子块传输切片)里出现。对齐 SGLang radix(每页一 hash 当 L3 key)、
+//   vLLM prefix caching(token-based hash 跨层共享)。
 message KVBlockID {
   string  model_id    = 1;  // 模型命名空间
-  uint32  layer_idx   = 2;  // 层号
-  bytes   block_hash  = 3;  // 链式哈希 = hash(parent_block_hash || 本块 token_ids);
+  bytes   block_hash  = 2;  // 链式哈希 = hash(parent_block_hash || 本块 token_ids);
                             //   序列起点块 parent = ⊥(空)。相同前缀 → 相同链式 hash → 命中同一 KV
                             //   算法可插拔(BLAKE3-128 / SHA-256-128 / SHA-256-256),由模型注册元数据声明,
                             //   proto 只规定 ≥128-bit + 链式。不同 model_id 可用不同算法。
-  PoolKind pool_kind  = 4;  // TARGET | DRAFT 命名空间(draft KV 同款 schema,靠字段区分,不物理分池)
-  string  scope       = 5;  // 多租户预留,默认 "public",当前不入寻址(F8 远期启用时改寻址语义不改结构)
+  PoolKind pool_kind  = 3;  // TARGET | DRAFT 命名空间(draft KV 同款 schema,靠字段区分,不物理分池)
+  string  scope       = 4;  // 多租户预留,默认 "public",当前不入寻址(F8 远期启用时改寻址语义不改结构)
+  // 寻址/radix key = hash(model_id, block_hash, pool_kind),**忽略 scope**(F8 前)。
+  //   勿 hash(serialize(KVBlockID))——会把默认 scope 编进去,与「不入寻址」矛盾。F8 启用后再纳入 scope。
 }
 
 // Location — 单层一个物理位置(仅 L0/L1/L2 段式位置;L3 不进此处)
 message Location {
-  Tier    tier        = 1;  // L0 | L1 | L2
+  Tier    tier        = 1;  // **硬约束:∈ {L0, L1, L2}**;L3 永不进 Location,只由 l3_present 表达。
+                            //   Tier 枚举含 L3 仅为四层模型概念完整;生成代码/校验须拒绝 tier=L3。
   string  node_id     = 2;  // 载体节点(compute-X / kvnode-Y)
   uint64  segment_id  = 3;  // 传输引擎注册段 ID(仿 Mooncake SegmentID;uint64 走传输热路径)
   uint64  offset      = 4;  // 段内偏移
@@ -44,10 +50,14 @@ message BlockMeta {
   KVBlockID            id         = 1;
   BlockKind            block_kind = 2;  // T_TYPE | R_TYPE_STATE | R_TYPE_TRAILING
   repeated Location    locations  = 3;  // L0?/L1?/L2? —— 缓存副本(L0/L1 易失) + L2 durable(F4 恢复点)
-  bool                 l3_present = 4;  // L3(SSOT) 是否有副本;object key = s3://lake/kv/{model_id}/{layer_idx}/{block_hash} 现场拼,不存储
+  bool                 l3_present = 4;  // L3(SSOT) 是否有副本;object key = s3://lake/kv/{model_id}/{block_hash} 现场拼,不存储
   uint32               ref_count  = 5;  // 全局引用汇总
   // 存在性:l3_present=false 且 locations 全空 → block 不存在;
   //        l3_present=true → 即使 locations 全空仍存在(缓存未命中,从 L3 回填)
+  // 不变量(locations 层间关系,见 storage-layer.md「层间副本 vs 移动」):
+  //   - L0/L1:缓存副本,可各有一份(易失,缺失=未命中)。
+  //   - L2/L3:**稳态二选一**(XOR)——同层冗余无意义、省空间;允许迁移窗口内短暂双有 + 超时收口。
+  //   - L2 同层不冗余(默认无同层 L2 副本,与 #14 一致)。
 }
 
 enum Tier {

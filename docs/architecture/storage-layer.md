@@ -12,8 +12,8 @@
 - 格式:原始 fp16/bf16,可选量化副本(int8/int4/fp8)作为独立 artifact,不在线反量化。
 
 ### KV cache
-- 可变、有生命周期,按 `(model_id, layer_idx, block_hash)` **内容寻址**(见 [`kv-cache-pool.md`](kv-cache-pool.md)):相同前缀 → 相同 block hash → 命中同一 KV,前缀复用天然成立。
-- 粒度:**per-block + 前缀树(radix)**索引(复用友好),per-layer/per-sequence 备选。**block 粒度 = 128 token**(缓存命中/复用/传输/写回的最小单位,初版默认,待 P7 校准;与 SGLang `--page-size`、vLLM `block_size` 同量级,常见 16/128/256)。
+- 可变、有生命周期,按 `(model_id, block_hash, pool_kind)` **内容寻址**(见 [`kv-cache-pool.md`](kv-cache-pool.md)):相同前缀 → 相同 block hash → 命中同一 KV,前缀复用天然成立。block = page(128 token × 全部层,page-first),身份按 token 段不含 layer_idx(layer_idx 只在传输切片 LayerSlice 出现)。
+- 粒度:**per-block + 前缀树(radix)**索引(复用友好)。**block 粒度 = 128 token**(缓存命中/复用/传输/写回的最小单位,初版默认,待 P7 校准;与 SGLang `--page-size`、vLLM `block_size` 同量级,常见 16/128/256)。
 - 持久化:热数据在 HBM/DRAM(L0/L1 缓存),F4 恢复点落 NVMe(L2),冷数据落对象存储(L3 SSOT)。
 
 ### KV 类型:t-type / r-type
