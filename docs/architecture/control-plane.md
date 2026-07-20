@@ -18,6 +18,9 @@ lake 原定"位置视图进 etcd 强一致"。但位置变更含**满块注册**
 
 **结论（已定）：强一致权威在存储控制面进程内存（单写者线性一致），etcd 降频只存低频 checkpoint**（节点 / 模型 / 配额 / revision + 位置快照），供控制面崩溃重建、Router 冷启动建镜像、stream 断时回退。高频位置变更在控制面内存聚合 → 推 Router / agent。dynamo 的实证是反证——它的强一致位置在每实例内存（`InstanceLeader` 持 G2/G3 manager），根本不进外部存储；lake 不能完全照搬（KV 归池要全局权威，不能每实例自治），但"强一致权威放内存、etcd 只做持久后盾"这点一致。
 
+> **radix tree 是位置视图权威的一部分**：前缀树（前缀 → block → 位置）就在控制面进程内存里，是位置视图权威本身，不是单独一层。Router / agent 持只读镜像（stream 推送的副本）。选路查镜像（最终一致、零 RPC）、搬 KV 同步查权威树（线性一致），两类查询分途见 [`kv-cache-pool.md`](kv-cache-pool.md)「前缀树索引」。lake 无 APC（实例私有自维护索引被砍，前缀复用能力保留放大）。
+
+
 为什么这合理（强一致 ≠ 必须进 etcd、不丢 ≠ 强一致、三档一致性分级）的理论依据见 [`consistency.md`](consistency.md) §8。本节只给结论，它是下文 Router 镜像方案选择的前提。
 
 ## Router 持位置视图镜像（对应 #4）

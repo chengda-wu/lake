@@ -54,7 +54,20 @@ KVBlockID = (model_id, layer_idx, block_hash)
 
 ### 前缀树索引
 
-radix tree 归存储池,按 `model_id` 分命名空间。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。Router 一次查询同时拿到可复用 block 列表与各自位置(前缀复用 + 本地命中判定)。
+radix tree 归存储池,按 `model_id` 分命名空间。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。
+
+**权威与镜像**：radix tree 的**权威**在存储控制面进程内存（位置视图权威的一部分,见 [`control-plane.md`](control-plane.md)「位置视图权威的归属」）。Router 与各 agent 各持一份**只读镜像**（控制面 gRPC stream 推送的副本,见 [`control-plane.md`](control-plane.md)「Router 持位置视图镜像」）——它们只读、不写、不拥有;满块注册写权威（控制面内存,release 一致,不进 etcd）,不写任何本地索引。
+
+**两类查询走不同的树**（别混）：
+
+| 查询 | 谁查 | 查哪棵树 | 一致性 | 错了怎么办 |
+|------|------|----------|--------|-----------|
+| **选路**（这前缀在哪个节点 HBM?）| Router | Router 本地**镜像** | 最终一致 | 误判 → agent 回查权威 → miss 回填 |
+| **搬 KV**（block X 准确在哪?）| agent | 控制面**权威树**（同步 RPC）| 线性一致 | 不会错（那一刻要准）|
+
+选路读镜像零 RPC（守 5ms 模式选择预算）;搬 KV 本就 ms 级,同步查权威的延迟可接受。
+
+**无 APC**：lake 不存在"计算层私有、易失、引擎自维护的前缀索引"（即 vLLM/SGLang 那种实例内 APC/RadixCache）。前缀复用能力**保留且放大**——从单实例工作集扩到集群工作集;砍掉的是"实例私有 + 引擎自维护"这两个性质,由池全局权威 radix 取代（见 [`storage-layer.md`](storage-layer.md)「分层缓存」、[`../features/features.md`](../features/features.md)）。引擎不拥有 HBM、不持任何前缀索引、零地址（满块注册由池写,见下「写回与生命周期」）。
 
 ```
 root
@@ -72,6 +85,31 @@ node_id = hash(KVBlockID) % N
 ```
 - 写:产出节点的 agent 通过传输引擎 RDMA write 推到目标 KV Node。
 - 读:消费节点的 agent 通过传输引擎 RDMA read 拉取(跨实例传输机制见上节)。
+
+### KV Node 上的 agent
+
+**KV Node = 存储池的远端物理载体节点**:贡献 DRAM(L1)+ NVMe(L2),无 HBM、无计算、无 worker。计算节点本机的 HBM/DRAM/NVMe 也是池的载体,但**远端**那部分就是 KV Node。
+
+每个有存储介质的节点上都跑一个 agent（池伸到该机的本地手）,KV Node 也不例外。两类 agent 共用一个 Rust crate `lake-storage-agent`,feature flag 出两个 target,**共用传输引擎**（RDMA MR 注册 / segment / submit,两边一字不差）:
+
+| 职责 | 计算节点 agent | KV Node agent |
+|------|---------------|---------------|
+| 传输引擎（注册 MR / segment / RDMA submit）| ✅ 共用 | ✅ 共用 |
+| NVMe serve（bounce buffer 读写）| — | ✅ |
+| view mirror（订阅控制面只读镜像）| ✅ | ❌ |
+| block table 组装 / fence / slot 分配 | ✅ | ❌ |
+| FFI（PyO3,接 worker）| ✅ | ❌ |
+| lease 续命 / 段挂摘 | ✅ | ✅ |
+
+KV Node agent 是计算节点 agent 的**真子集 + NVMe serve**:不持镜像、不组装 block table、不触发计算、无 FFI。
+
+**两个介质,访问方式不同**:
+- **DRAM(L1)——被动 donor**:KV Node 启动时把 DRAM 注册成 RDMA segment,远端 agent 直接 RDMA read/write,**不经 KV Node CPU**（仿 Mooncake `TransferEngine::registerLocalMemory` / `openSegment`,存储侧只注册 + 暴露,见 [`../research/mooncake/transfer-engine.md`](../research/mooncake/transfer-engine.md)）。
+- **NVMe(L2)——要主动 serve**:NVMe 不能裸 RDMA 直达,需 agent 主动服务——读 = NVMe → DRAM bounce → RDMA send;写反之。每个请求走一遍服务循环,逃不掉。默认走 **bounce buffer**(agent 内 DRAM 中转);NVMe-oF 直达留 [`topology.md`](topology.md) P7(拓扑/硬件相关,接口不变,传输引擎内部吸收)。
+
+**存活走 etcd lease**:KV Node mount segment → lease → 控制面 watch(仿 Mooncake `MountSegment` + `client_live_ttl_sec`,见 [`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md))。KV Node 死 → lease 过期 → 控制面标其段失效 → 读重定向到副本/L3。无需额外心跳服务。
+
+> **关键差异(相对参考实现)**:Mooncake 的存储数据节点是**被动 MR donor**(RDMA 直达,master 单独管元数据)——lake 的 DRAM 访问同此;但 Mooncake 无 NVMe serve / 无内容寻址 radix,lake 的 KV Node agent 多 NVMe serve 这层,且元数据权威归 lake 控制面(非 Mooncake master)。Dynamo KVBM 是 engine 持有 + offload 卸载(KV 归 engine),lake 不照搬(HBM/KV 全归池)。
 
 ## 传输协议
 
