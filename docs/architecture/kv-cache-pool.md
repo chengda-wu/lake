@@ -69,6 +69,8 @@ radix tree 归存储池,按 `model_id` 分命名空间。节点 = block hash,路
 
 **无 APC**：lake 不存在"计算层私有、易失、引擎自维护的前缀索引"（即 vLLM/SGLang 那种实例内 APC/RadixCache）。前缀复用能力**保留且放大**——从单实例工作集扩到集群工作集;砍掉的是"实例私有 + 引擎自维护"这两个性质,由池全局权威 radix 取代（见 [`storage-layer.md`](storage-layer.md)「分层缓存」、[`../features/features.md`](../features/features.md)）。引擎不拥有 HBM、不持任何前缀索引、零地址（满块注册由池写,见下「写回与生命周期」）。
 
+**为何池必须自长 radix（Mooncake 界限）**：Mooncake store 是 dumb blob 池——KV 按 `tenant+key` 存不透明字节块，**无内容寻址、无 radix、无前缀匹配**（`master_service.h`，`unordered_map<string, ObjectMetadata>` 线性表；详见 [`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md)）。前缀复用由引擎侧（SGLang RadixAttention）或外部 Conductor 负责，store 只搬字节。lake 把 HBM 归池、引擎零地址——引擎不能持前缀索引，故**池必须自己长出 radix + 位置视图**。lake 的三个核心能力——**前缀复用 / DualPath / D-direct**——全都建立在"池懂前缀（radix）+ 懂位置（位置视图）"之上；Mooncake 两个都没有，三个都做不了（只能做最底层的零拷贝搬字节）。故 lake **借 Mooncake transfer-engine（数据面搬字节）**，**不借 store**（不懂前缀，控制面自长）。DualPath 限制见 [`../research/dualpath.md`](../research/dualpath.md)「关键差异」。
+
 ```
 root
 ├─ [sys_prompt_hash] → KV blocks [0..k]
