@@ -79,10 +79,10 @@ Dynamo 把通信拆**三层正交**（`lib/runtime/src/`），正好印证 lake 
 |---|---|---|
 | 注册/发现（低频强一致） | etcd `Discovery` trait（`discovery/mod.rs:781`），`v1/<类别>/<ns>/<component>/...` 前缀 | 边4/5/6 控制面元数据；lake 一套 etcd + key space 隔离同此模式 |
 | 高频事件流（best-effort） | `EventTransportTx/Rx`（NATS/ZMQ，`transports/event_plane/transport.rs:28`） | 边4/5 位置视图推送；lake 改 gRPC stream（单权威直推，见上） |
-| 请求面 RPC | TCP（`transports/tcp.rs`） | 边2/3/6/11 gRPC |
-| 大块数据 | NIXL RDMA（`kvbm-physical` TransferManager） | 边8/9 RDMA 旁路 |
-| 对象存储 | S3/Azure（`object/mod.rs` `ObjectBlockOps`） | 边10 S3 API |
-| 同进程 | in-process trait 调用 | 边7 FFI（PyO3） |
+| 请求面 RPC | TCP（`transports/tcp.rs`） | 边2 HTTP(OpenAI 兼容,Bifrost↔Router)/ 边3/5/10 gRPC(内部) |
+| 大块数据 | NIXL RDMA（`kvbm-physical` TransferManager） | 边7/8 RDMA 旁路 |
+| 对象存储 | S3/Azure（`object/mod.rs` `ObjectBlockOps`） | 边9 S3 API |
+| 同进程 | in-process trait 调用 | 边6 FFI（PyO3） |
 
 **关键印证**：
 
@@ -108,18 +108,18 @@ Dynamo 部署拓扑（`components/src/dynamo/router/CLAUDE.md` "Frontend/Router 
 **对 lake 的输入**：
 
 - **集群级调度逻辑归 Router，不拆独立进程**：Dynamo 的请求级选路（`LocalScheduler`）内嵌 router 进程，lake 可同——集群级调度（池间 / 弹性）作 Router 内逻辑，同进程同机直接调用，省 gRPC。拆独立进程只在调度变重 / 要独立扩缩时才有必要（先不拆）。注：这里"调度"= 集群级 = Router，**不含**节点级 scheduler（那个在计算节点上，per-engine，跟 Router 无关）。
-- **Gateway + Router 同机可同进程**：dynamo 默认 frontend + router 同进程省一跳。lake Gateway 待定自研 / 外部（见 #3 待讨论 #5）；若自研且与 Router 同机，可同进程。但 lake Router = Go、dynamo router = Rust，"内嵌"机制不同（lake 是 Go 同进程调用，非 PyO3）。
+- **Gateway 不自研，用 Bifrost（外部 AI gateway）**：dynamo 默认 frontend + router 同进程省一跳，但 lake 把入口网关交给外部 Bifrost（鉴权/限流/过载 shedding/可观测归外部控制面，CLAUDE.md 第3条）。**Router 直接吃 OpenAI/Anthropic 格式**——Bifrost 把 lake Router 当一个 OpenAI 兼容 provider 转发，lake 不自研入口 adapter、不定义私有入口 gRPC。对外 OpenAI 兼容，对内（Router↔worker↔pool）gRPC。
 - **存储控制面是独立进程**：dynamo 没有这个（lake 独有），因为 lake 把存储权威从 worker 剥离了。这是 lake 比 dynamo 多出来的一个进程。
 
 ## 待讨论项的 dynamo 输入汇总
 
 | # | #3 待讨论项 | dynamo 输入 | lake 倾向 |
 |---|---|---|---|
-| 1 | Gateway/Router/Scheduler 拆几个进程 | frontend+router 默认同进程；请求级选路（`LocalScheduler`）内嵌 router | Gateway 待定；**集群级调度归 Router、同进程**（节点级 scheduler 不在此列，每计算节点一个） |
+| 1 | Gateway/Router/Scheduler 拆几个进程 | frontend+router 默认同进程；请求级选路（`LocalScheduler`）内嵌 router | Gateway 外部(Bifrost,不自研)；**集群级调度归 Router、同进程**（节点级 scheduler 不在此列，每计算节点一个） |
 | 2 | Scheduler 独立进程？ | `LocalScheduler`（请求级）在 kv-router 内，无独立进程 | 集群级调度不拆（归 Router 内逻辑）；**节点级 scheduler（每计算节点一个，vLLM 式）另论，跟 Router 无关** |
 | 3 | KV Node 有 agent？ | dynamo 无 KV Node 概念（远端 = 对象存储 + NIXL）；`TransferManager` + `export/import_metadata` 是 RDMA 注册参考 | KV Node 跑 agent（复用计算节点 agent 代码），做 RDMA 注册 / 读写服务 |
 | 4 | 存储控制面单 leader / 多副本？ | per-instance `InstanceLeader` P2P，非单 leader / 非 Raft | lake 拒绝 P2P（不满足强一致）；单 leader + etcd（Raft 在 etcd），多副本待 P7 |
-| 5 | Gateway 自研 / 外部？ | dynamo frontend 自研（OpenAI HTTP）或 k8s Gateway API + EPP | 待定；过载 shedding 属外部控制面职责（CLAUDE.md 第3条） |
+| 5 | Gateway 自研 / 外部？ | dynamo frontend 自研（OpenAI HTTP）或 k8s Gateway API + EPP | **已定：不自研，用 Bifrost**（外部 AI gateway）；Router 直吃 OpenAI/Anthropic 格式，无私有入口 gRPC |
 | 6 | 边4 = 边5？ | router 与 worker 同事件流不同订阅者 | 同协议、不同订阅者（是） |
 
 > #4 的结论（Router 镜像走 gRPC stream 主方案 + 同机共享内存优化、1/2 否决、粒度与协议）见上文 "Router 持位置视图镜像" 节；#4 剩余两项（控制面与 Router 是否同机、控制面 HA）归 #3 待讨论 #1 / #4。
