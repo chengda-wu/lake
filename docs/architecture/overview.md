@@ -6,7 +6,7 @@ lake 以 **KV 为中心**做彻底存算分离:所有有状态物(权重、KV ca
 
 ```
                        ┌──────────────────────┐
-                       │   Gateway → Router   │   Gateway:鉴权/限流/入口准入(过载 shedding);Router(无状态,KV 感知):f → (模式,节点/rank),选路权威收束于此(倾向 External 式,计算侧不再二次 DP LB;见 scheduling.md §1.1)
+                       │   Bifrost → Router   │   Bifrost(=Gateway,外部,不自研):鉴权/限流/入口准入(过载 shedding,只决定"进/不进");Router(无状态,KV 感知):f → (模式,节点/rank),选路权威收束于此(倾向 External 式,计算侧不再二次 DP LB;见 scheduling.md §1.1)
                        └──────────┬───────────┘
                                   │
                        ┌──────────┴───────────┐
@@ -63,7 +63,7 @@ GPU HBM(L0) ─ DRAM(L1,池化) ─ NVMe(L2,池化) ─ 对象存储(L3, SSOT)
 ## 请求生命周期
 
 ```
-Request → Gateway
+Request → Bifrost(Gateway)
   → Router 读本地命中视图镜像(radix + 位置视图):前缀复用?是否本地命中?
   → 按命中与负载选模式 + 节点:
       ├─ 本地命中        → D-direct:该节点残差 prefill + decode

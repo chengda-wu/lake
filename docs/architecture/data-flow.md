@@ -7,7 +7,7 @@
 ## 1. 请求生命周期主轴（happy path）
 
 ```
-① Gateway 入口准入(限流/鉴权/过载 shedding) ── 拒绝则不计推理系统失败率
+① Bifrost(Gateway) 入口准入(限流/鉴权/过载 shedding) ── 拒绝则不计推理系统失败率
         ↓ (已准入请求)
 ② Router 读本地命中视图镜像(零 RPC): (model_id, prompt 前缀)
         ← 可复用 block 列表 + 各自位置(含"是否已在某 HBM"= 本地命中判定) + 集群负载视图

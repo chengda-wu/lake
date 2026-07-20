@@ -19,7 +19,7 @@
 
 ```
                              ┌──────────────────────────┐
-                             │     Gateway / Router     │
+                             │   Bifrost/Router(Gateway)│
                              │     路由 + 模式选择      │
                              └────────────┴─────────────┘
                                           │ gRPC
@@ -72,7 +72,7 @@
 
 | 模块 | 语言 | 职责 |
 |------|------|------|
-| **Gateway** | Go | 鉴权 / 限流 / 入口准入 / 过载 shedding（决定请求"进/不进"） |
+| **Gateway** | 外部(Bifrost) | 鉴权 / 限流 / 入口准入 / 过载 shedding（进/不进；去哪归 Router）；不自研，见 [`docs/architecture/control-plane.md`](docs/architecture/control-plane.md)「Gateway 对接约定」 |
 | **Router** | Go | 无状态路由 + 模式选择纯函数 `f(请求,集群状态)→(模式,节点)`，零 RPC 读本地命中视图镜像 |
 | **计算层**（Prefill/Decode/Draft） | Python+Triton | 前向计算（graph replay），引擎零分层逻辑，只消费 ready→算→发 done |
 | **in-process agent** | Rust | 存储池在计算节点的本地端点：组装 block table / 发起传输 / 注册本地内存 / 持本地视图镜像（零 RPC） |
@@ -89,7 +89,7 @@
 - **双网络隔离**：CNIC（计算）/ SNIC（存储）物理分离，两类带宽是池的资源；RDMA 三级退化在传输引擎内吸收、上层接口不变。
 - **两级 ref + 持久语义分层**：本地引用计数（池 agent）+ 全局汇总（控制面）；L2(NVMe) = F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关）/ L3 = SSOT（抗整机级/池级失败）。
 - **失败不设降级链**：执行失败 → F4 重路由，Router 重跑选路纯函数，无 mode-to-mode fallback 阶梯。
-- **过载归 gateway**：限并发 / 拒请求 / 按优先级丢弃归外部控制面，推理系统只管执行 + 上报信号。
+- **过载归 gateway（Bifrost）**：限并发 / 拒请求 / 按优先级丢弃归外部控制面（Bifrost），推理系统只管执行 + 上报信号。
 
 ## 仓库定位
 
