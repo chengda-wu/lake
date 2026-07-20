@@ -54,7 +54,22 @@ KVBlockID = (model_id, layer_idx, block_hash)
 
 ### 前缀树索引
 
-radix tree 归存储池,按 `model_id` 分命名空间。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。Router 一次查询同时拿到可复用 block 列表与各自位置(前缀复用 + 本地命中判定)。
+radix tree 归存储池,按 `model_id` 分命名空间。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。
+
+**权威与镜像**：radix tree 的**权威**在存储控制面进程内存（位置视图权威的一部分,见 [`control-plane.md`](control-plane.md)「位置视图权威的归属」）。Router 与各 agent 各持一份**只读镜像**（控制面 gRPC stream 推送的副本,见 [`control-plane.md`](control-plane.md)「Router 持位置视图镜像」）——它们只读、不写、不拥有;满块注册写权威（控制面内存,release 一致,不进 etcd）,不写任何本地索引。
+
+**两类查询走不同的树**（别混）：
+
+| 查询 | 谁查 | 查哪棵树 | 一致性 | 错了怎么办 |
+|------|------|----------|--------|-----------|
+| **选路**（这前缀在哪个节点 HBM?）| Router | Router 本地**镜像** | 最终一致 | 误判 → agent 回查权威 → miss 回填 |
+| **搬 KV**（block X 准确在哪?）| agent | 控制面**权威树**（同步 RPC）| 线性一致 | 不会错（那一刻要准）|
+
+选路读镜像零 RPC（守 5ms 模式选择预算）;搬 KV 本就 ms 级,同步查权威的延迟可接受。
+
+**无 APC**：lake 不存在"计算层私有、易失、引擎自维护的前缀索引"（即 vLLM/SGLang 那种实例内 APC/RadixCache）。前缀复用能力**保留且放大**——从单实例工作集扩到集群工作集;砍掉的是"实例私有 + 引擎自维护"这两个性质,由池全局权威 radix 取代（见 [`storage-layer.md`](storage-layer.md)「分层缓存」、[`../features/features.md`](../features/features.md)）。引擎不拥有 HBM、不持任何前缀索引、零地址（满块注册由池写,见下「写回与生命周期」）。
+
+**为何池必须自长 radix（Mooncake 界限）**：Mooncake store 是 dumb blob 池——KV 按 `tenant+key` 存不透明字节块，**无内容寻址、无 radix、无前缀匹配**（`master_service.h`，`unordered_map<string, ObjectMetadata>` 线性表；详见 [`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md)）。前缀复用由引擎侧（SGLang RadixAttention）或外部 Conductor 负责，store 只搬字节。lake 把 HBM 归池、引擎零地址——引擎不能持前缀索引，故**池必须自己长出 radix + 位置视图**。lake 的三个核心能力——**前缀复用 / DualPath / D-direct**——全都建立在"池懂前缀（radix）+ 懂位置（位置视图）"之上；Mooncake 两个都没有，三个都做不了（只能做最底层的零拷贝搬字节）。故 lake **借 Mooncake transfer-engine（数据面搬字节）**，**不借 store**（不懂前缀，控制面自长）。DualPath 限制见 [`../research/dualpath.md`](../research/dualpath.md)「关键差异」。
 
 ```
 root
@@ -73,10 +88,56 @@ node_id = hash(KVBlockID) % N
 - 写:产出节点的 agent 通过传输引擎 RDMA write 推到目标 KV Node。
 - 读:消费节点的 agent 通过传输引擎 RDMA read 拉取(跨实例传输机制见上节)。
 
+### KV Node 上的 agent
+
+**KV Node = 存储池的远端物理载体节点**:贡献 DRAM(L1)+ NVMe(L2),无 HBM、无计算、无 worker。计算节点本机的 HBM/DRAM/NVMe 也是池的载体,但**远端**那部分就是 KV Node。每个有介质的节点上都跑一个 agent（池伸到该机的本地手）。
+
+```mermaid
+flowchart TB
+    subgraph CN["计算节点 (Python worker + Rust agent, 同进程)"]
+        HBM["HBM (L0)"]
+        DRAM_CN["DRAM (L1, 本机载体)"]
+        NVMe_CN["NVMe (L2, 本机载体)"]
+        AGENT_CN["agent (Rust .so, FFI 接 worker)<br/>+ view mirror + block table 组装<br/>+ NVMe serve (本机 L2)"]
+    end
+    subgraph KVN["KV Node (远端, 无 HBM/无计算)"]
+        DRAM_KV["DRAM (L1, 远端载体)"]
+        NVMe_KV["NVMe (L2, 远端载体)"]
+        AGENT_KV["agent (Rust, 无 FFI/无镜像)<br/>+ NVMe serve"]
+    end
+    subgraph CP["存储控制面 (Rust, 独立进程)"]
+        AUTH["位置视图权威 (进程内存)<br/>radix + 位置 + ref + 配额 + GC"]
+    end
+    AGENT_CN -->|"gRPC 上报/回查 + stream 订阅"| AUTH
+    AGENT_KV -->|"gRPC lease + stream"| AUTH
+    AGENT_CN -->|"RDMA 传/读写 (L0-L0 / L0-远端L1L2)"| AGENT_KV
+```
+
+两类 agent 共用一个 Rust crate `lake-storage-agent`，**共用传输 core**（传输引擎 + lease/段挂摘），再**按角色 feature 出两套能力**：计算侧独有 FFI / mirror / block table / fence / slot；KV Node 侧独有 NVMe serve（bounce）。**不是**"谁是谁的真子集"——两者共用 core，各自叠加对方没有的能力。
+
+| 职责 | 计算节点 agent | KV Node agent |
+|------|---------------|---------------|
+| 传输引擎（注册 MR / segment / RDMA submit）| ✅ 共用 | ✅ 共用 |
+| lease 续命 / 段挂摘 | ✅ 共用 | ✅ 共用 |
+| NVMe serve（bounce buffer 读写）| ✅ | ✅ |
+| view mirror（订阅控制面只读镜像）| ✅ | ❌ |
+| block table 组装 / fence / slot 分配 | ✅ | ❌ |
+| FFI（PyO3,接 worker）| ✅ | ❌ |
+
+> **计算节点本机 NVMe 也由本机 agent serve**：池放置可能把 block 放计算节点本机 NVMe（L2 = F4 恢复点不挑节点，本机/远端 NVMe 均可作载体，见下「L2 = F4 恢复点」）。若规定"可被远端读的 L2 只放 KV Node"，等于剥夺计算节点本机 NVMe 作 L2 载体的资格，与"四层物理载体分布计算节点 + KV Node"矛盾。故 NVMe serve 两边都有，计算节点 agent 只是再叠加 FFI/mirror/block table。本机读本机 NVMe = 本地 serve（零网络）；远端读则经 SNIC。
+
+**两个介质,访问方式不同**:
+- **DRAM(L1)——被动 donor**:节点启动时把 DRAM 注册成 RDMA segment,远端 agent 直接 RDMA read/write,**不经该节点 CPU**（仿 Mooncake `TransferEngine::registerLocalMemory` / `openSegment`,存储侧只注册 + 暴露,见 [`../research/mooncake/transfer-engine.md`](../research/mooncake/transfer-engine.md)）。
+- **NVMe(L2)——要主动 serve**:NVMe 不能裸 RDMA 直达,需 agent 主动服务——读 = NVMe → DRAM bounce → RDMA send;写反之。每个请求走一遍服务循环,逃不掉。默认走 **bounce buffer**(agent 内 DRAM 中转);NVMe-oF 直达留 [`topology.md`](topology.md) P7(拓扑/硬件相关,接口不变,传输引擎内部吸收)。
+
+**存活走 etcd lease**:节点 mount segment → lease → 控制面 watch(仿 Mooncake `MountSegment` + `client_live_ttl_sec`,见 [`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md))。计算节点与 KV Node **同机制**（都靠 lease 续命，控制面 watch 收敛存活，无需额外心跳）。节点死 → lease 过期 → 控制面标其段失效 → 读回退：L1 其它位置（若有）/ L2 其它放置点（若池曾双写，默认无同层 L2 副本，见 [`storage-layer.md`](storage-layer.md)「层间副本 vs 移动」——L2/L3 间按移动非副本）/ 否则 L3 SSOT。
+
+> **关键差异(相对参考实现)**:Mooncake 的存储数据节点是**被动 MR donor**(RDMA 直达,master 单独管元数据)——lake 的 DRAM 访问同此;但 Mooncake 无 NVMe serve / 无内容寻址 radix,lake 的 KV Node agent 多 NVMe serve 这层,且元数据权威归 lake 控制面(非 Mooncake master)。Dynamo KVBM 是 engine 持有 + offload 卸载(KV 归 engine),lake 不照搬(HBM/KV 全归池)。
+
 ## 传输协议
 
-- **控制平面**:block 元数据(位置、引用计数、热度)→ etcd,强一致。
-- **数据平面**:block 字节 → RDMA,最终一致,best-effort。
+- **控制平面（权威）**：block 元数据（位置、引用计数、热度）权威在**存储控制面进程内存**（单写者线性一致）；etcd 只存降频 checkpoint + lease，非强一致位置表。详见 [`control-plane.md`](control-plane.md)「位置视图权威的归属」。
+- **数据平面**：block 字节 → RDMA，最终一致，best-effort。
 
 **无引擎驱动的 intra-step 重叠;池驱动异步重叠保留**:本系统不照搬 SGLang HiCache "引擎在 `get_key_buffer` 每层 `wait_event`、算 layer N 传 layer N+1" 的**引擎驱动**逐层重叠——那套绑死引擎、破坏 CUDA graph(SGLang 把补拉与 graph 冲突留作 TODO)。我们拒绝的是这种**引擎驱动**的 intra-step 重叠。**池驱动的异步重叠保留**:引擎只调**异步传输接口 + fence**,传输由池的 agent 在独立 stream 上做;两类重叠都是异步自然结果,引擎无感、graph 安全:
 - **消费侧 step 间重叠**:传 step N+1 的 block 时引擎在算 step N(B decode)。
@@ -102,6 +163,16 @@ node_id = hash(KVBlockID) % N
 4. **A publish**:A 产出 KV 进 L0 slot 后调 `publish(block_ids)`,池记进**位置视图**(block → A 的 L0 段)+ 决定是否写回 L2(NVMe,F4 恢复点)。注意:publish 只更新位置视图,**不注册 radix**——radix 注册要等满块(哈希需完整 block,见"写回与生命周期"满块路)。
 
 引擎的全部分层职责仍是 Q1 的 **消费 ready → 算 → 发 done**;pull/publish 只是这一契约在跨实例场景的接口形态。
+
+> **搬 KV 查权威分层（避免控制面成搬字节热路径 QPS 墙）**：「搬 KV 一律同步查权威树」过重——按源类型分层：
+>
+> | 场景 | 查哪 | 为什么 |
+> |------|------|--------|
+> | 源在本机 L0（agent 自己分的 slot） | 本地 free-list / 本地状态，**不查权威** | agent 知道自己刚分配的 slot，无需 RPC |
+> | 源来自镜像且 pull 前 confirm | 批量 `Locate(block_ids[])`，或乐观镜像 + miss 回填 | 镜像最终一致，可批量降 RPC 数 |
+> | Drain / HA 刚切主 / 镜像 gap | **必须查权威**（线性一致） | 这几种镜像不可信，要准 |
+>
+> 常态（PD 直传、本机 L0→L0、镜像已确认的本地 slot）大多命中前两行，不进权威热路径；只有镜像不可信时才查权威。这与 HA 降级「搬 KV 重试等新 leader」一致——那条路径本就是降级态，非常态。
 
 ### PD 分离下的传输流程(engine-to-engine 控制链切断)
 

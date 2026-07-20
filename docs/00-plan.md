@@ -77,7 +77,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
   - **ref 分两级(B1 闭环)**：原"池单点强一致计数"修正为——**本地引用计数**(池本地 agent,请求级,同 vLLM `free_blocks`/sglang `inc_lock_ref` 机制,归池 agent 而非引擎)+ **全局引用汇总**(控制面,最终一致,供 tier up/down 与 GC,不进 hot step loop)。ref 归 0 ≠ 删内存,而是变可驱逐候选(对齐 vLLM `free_block_queue`/sglang `evictable_size_`,内存仍在、可命中复用/作传输源);归 0 不摘位置视图(未驱逐覆写则仍可命中/直传,D-direct 与 D→P 子情况 A 的命中来源);驱逐覆写才摘视图,L2/L3 有副本可回填。step 期间冻结是引用计数自然结果,无需额外 fence。L0/L1 是副本→驱逐 L0 不影响别节点(读各自副本),故全局 ref 只用于 tier/GC,不用于阻止 L0 副本驱逐。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "引用计数与驱逐"。
   - **D→P 流 + 双网络路径 + DualPath 原生支持（本轮新增）**：agent 多轮里上一轮 decode 产出的延伸 KV 是下一轮 prefill 的输入前缀,不必绕一跳存储,可直接由 decode 侧喂回 prefill——这是与 P→D(本次)、D→池(未来)并列的**第三条方向 D→P(服务下一轮)**,即 DualPath(arXiv:2602.21548v2,非 submodule)storage-to-decode 路径的**原生支持**。**双网络隔离**(compute network 跑 L0→L0 RDMA + GPU collective / storage network 跑 L1/L2/L3 访问)是 DualPath 的架构前提,两类带宽是**池的资源**(池统一分配,非引擎"借用",比 DualPath 更彻底)。D→P 选路按"所需 KV 是否已在 D 的 L0"分子情况:**A 零存储读取**(KV 已在 D 的 HBM → D L0 经 compute network 直传 P,连 storage network 都不占,DualPath 不强调,我们独有) / **B**(需从 L1/L2 加载 → 池可选 D 侧加载+compute network 回传,借 D 闲置 storage 带宽绕开 P 侧瓶颈) / 传统 P 侧自拉;由池按 NIC 带宽视图决策,collective 突发窗避让留 P7。engine-to-engine 控制链仍切断(池 agent 发起,引擎不知对方存在)。详见 [`architecture/data-flow.md`](architecture/data-flow.md) §3.4、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "双网络路径"、[`research/dualpath.md`](research/dualpath.md)。
   - **多租户隔离(B2 闭环)**：**lake 不做多租户**(与 goals.md "不做多租户隔离"一致),F8 降级到 Could(远期预留)。当前 `KVBlockID=(model_id, layer, block_hash)` 不含租户维度,同 model_id 内 KV 全局共享复用;多租户隔离归外部控制面/部署切分(按 model_id 命名空间或独立集群)。未来若需,可加 `scope` 维度(public/tenant,靠 scope 过滤隔离、公共只可平台写)——仅预留,不入当前寻址。消了 goals(不做)↔ F8/nonfunctional(要做)的矛盾。详见 [`features/features.md`](features/features.md) F8、[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "Block 寻址"预留。
-  - **Router 命中视图访问(B3 闭环)**：Router 持**本地命中视图镜像**(全局位置视图的本地副本,与 in-process agent 同机制),模式选择 = 本地读镜像 + 本地纯函数决策,**零 RPC**,守 5ms。镜像内容是全局的(本地命中判定需知"哪个节点 HBM 有"),副本存本地。刷新由控制面**推送**(etcd watch/gRPC stream),触发=位置视图权威变更(放置/驱逐覆写/迁移/满块注册);ref 归 0 不推(未驱逐不摘视图)。陈旧由 miss→控制面确认→从池(L1/L2)回填兜底,只影响命中率不影响正确性。统一了 overview/scheduling/data-flow 里"Router 查池/一次 RPC"的措辞。详见 [`architecture/scheduling.md`](architecture/scheduling.md) §1 前缀解析。
+  - **Router 命中视图访问(B3 闭环)**：Router 持**本地命中视图镜像**(全局位置视图的本地副本,与 in-process agent 同机制),模式选择 = 本地读镜像 + 本地纯函数决策,**零 RPC**,守 5ms。镜像内容是全局的(本地命中判定需知"哪个节点 HBM 有"),副本存本地。刷新由控制面**推送**(gRPC stream 主方案,同机走共享内存直读;etcd 只存降频 checkpoint,非推送源),触发=位置视图权威变更(放置/驱逐覆写/迁移/满块注册);ref 归 0 不推(未驱逐不摘视图)。陈旧由 miss→控制面确认→从池(L1/L2)回填兜底,只影响命中率不影响正确性。统一了 overview/scheduling/data-flow 里"Router 查池/一次 RPC"的措辞。详见 [`architecture/scheduling.md`](architecture/scheduling.md) §1 前缀解析。
   - **选路形态倾向 External 式(本轮固化)**：KV 感知下选路权威收束到 Router 一层(逻辑单一选路面,实例可水平扩展);计算节点按部署独立或 TP/PP 联合执行,**默认不在引擎内做 Internal/Hybrid 式二次 DP LB**。对齐 vLLM External + 强化 SGLang 层 B(`sgl-model-gateway`/`cache_aware`)方向,用存储池命中视图替换近似树;拒绝 SGLang 层 A(`DataParallelController`)与 vLLM head `DPLBAsyncMPClient` 作第二权威。详见 [`architecture/scheduling.md`](architecture/scheduling.md) §1.1、[`research/sglang/model-runner.md`](research/sglang/model-runner.md)「SGLang 双层管理模式」。
 - **技术选型已定**（P2 落地）：存储 Rust / 控制 Go / 计算 Python+Triton；元数据 etcd；SSOT 用 S3/MinIO；跨语言 gRPC+Protobuf（大块 KV 走 RDMA 旁路）。3rdparty 五个 submodule（sglang/lmcache/mooncake/vllm/dynamo）作实现参考。
 - **KV 类型 t-type / r-type + 投机解码机制（本轮新增）**：
@@ -127,7 +127,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 | 控制面 | Router / Scheduler / 元数据 | **Go** | 并发原语成熟、生态利于写控制面服务、gRPC 生态 |
 | 计算层 | Prefill / Decode / Draft 前向 | **Python + Triton** | Triton 写自定义 kernel、与 PyTorch/生态兼容、迭代快 |
 | 对象存储 | SSOT | S3 / MinIO | 现成，不自研 |
-| 控制面存储 | 元数据 | etcd | 强一致 + watch，路由表/KV 位置表 |
+| 控制面存储 | 元数据权威 | **控制面进程内存**（强一致）+ etcd（降频 checkpoint + lease） | 强一致权威在进程内存（满块注册高频写不压 etcd）；etcd 只存低频 checkpoint + 节点 lease，非强一致位置表。详见 [`architecture/control-plane.md`](architecture/control-plane.md)「位置视图权威的归属」 |
 | 跨语言通信 | 统一 RPC | **gRPC + Protobuf** | Rust/Go/Python 都有一等支持；数据平面大块 KV 走 RDMA/共享内存旁路 gRPC |
 
 ### 模块与目录划分
@@ -143,7 +143,7 @@ lake/
 ├── go/                         # 控制面
 │   ├── router/                 # 请求路由（无状态）
 │   ├── scheduler/              # 池间/节点级调度 + 弹性
-│   ├── controlplane/           # etcd 元数据、节点拓扑、KV 位置表
+│   ├── controlplane/           # 位置视图权威(进程内存) + etcd(降频 checkpoint/lease)、节点拓扑
 │   └── (无 gateway/——入口用外部 Bifrost，见 control-plane.md「Gateway 对接约定」)
 ├── python/                     # 计算层
 │   ├── prefill/                # Prefill worker（Triton kernels）

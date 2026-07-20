@@ -43,6 +43,42 @@ r-type 状态 checkpoint 的形式/间距与 L1+ 持久化性价比(Mamba state 
 
 > **为何 DRAM 不分本机/远端两层**:DRAM 是一种介质、一个池。一个 block 物理放本机 RAM 还是远端 KV Node 的 RAM,是存储池的**放置决策**(按延迟/容量/前缀亲和),和"L0 放哪个节点 HBM"是同一套机制——不该用 tier 编号固化成两层。同理 NVMe 也是一层(L2),block 放哪个节点 NVMe 由池决定。旧设计的 L1(主机 RAM)/ L3(远端内存池)按位置拆分,现合并为 L1(DRAM 池);旧 L4(对象存储)顺移为 L3。
 
+> **纵切不横切（按职责切，不按层切）**：池的职责切分是**纵切**——全局控制面管**所有层的元数据**（block 在哪、ref、放置、GC），每个节点上的 agent 管**所有层的本地操作**（注册 MR、分 slot、serve、搬字节）。不是横切（agent 管 L0、全局管 L1+，按层分主）。理由：
+> 1. **block 身份跨层不变 → owner 不该换**。一个 block 从 L0 demote 到 L1，`(model_id, prefix_hash, block_id)` 不变。横切意味着 demotion 那刻 owner 从 agent 换成全局，要协调交接（谁管 ref、过渡期归谁）——一个不可变对象的 owner 变了，平添一致性问题。纵切下 owner 恒为全局，demotion 只是 agent 执行一条全局下发的指令并回执。
+> 2. **多副本要求单一权威横跨所有层**。热前缀常 L0+L1+L2 各一份。横切每层一个 owner，同一 block 多个 owner，ref 放谁、谁权威？纵切下全局记一个条目多位置、ref 一份，天然支持多副本。
+> 3. **放置/驱逐/迁移是跨层跨节点决策**。"热块从 L2 promote 到 L0"要看热度、目标容量、副本分布，是全局优化。横切把决策权按层切碎，跨层要协商；纵切下全局看全图决策，agent 只执行。
+> 4. **本地命中省 RPC 不靠 owner 切分**。横切唯一吸引力是"agent 管 L0、引擎不问全局"。但 lake 已用 **agent 只读镜像**满足这点——agent 持全局推送的 radix 副本，查本地命中零 RPC（见 [`kv-cache-pool.md`](kv-cache-pool.md)「前缀树索引」）。镜像吃掉了横切想省的那一跳，又不引入 owner 交接。
+> 5. **与已定原则一致**：CLAUDE.md 第4条"计算节点不拥有任何内存——HBM/DRAM/NVMe 是池的物理载体，不是 worker 私有状态"直接否定横切（横切即"agent 拥有 L0"）。
+
+横切按层分主（L0 归 agent、L1+ 归全局，demotion 时 owner 换手）；纵切按职责（元数据归全局、操作归 agent，切线竖着穿过全部四层，owner 恒为全局）：
+
+```mermaid
+flowchart LR
+    subgraph HZ["横切: 按层分主 (否定)"]
+        direction TB
+        H_L0["L0 HBM ── agent 拥有"]
+        H_CUT["──── 切在这里 ────<br/>demotion 时 owner 换手"]
+        H_L1["L1 DRAM ── 全局拥有"]
+        H_L2["L2 NVMe ── 全局拥有"]
+        H_L3["L3 对象  ── 全局拥有"]
+        H_L0 --- H_CUT --- H_L1
+        H_L1 --- H_L2 --- H_L3
+    end
+    subgraph VT["纵切: 按职责 (采用)"]
+        direction TB
+        V_GLOBAL["全局控制面 ── 所有层元数据<br/>block 在哪 / ref / 放置 / GC"]
+        V_AGENT["每节点 agent ── 所有层本地操作<br/>注册 MR / 分 slot / serve / 搬字节"]
+        V_GLOBAL -->|"指令/视图推送"| V_AGENT
+        V_AGENT -->|"上报 (产出/ref/done)"| V_GLOBAL
+        V_L0["L0 HBM ── agent 注册+分slot, 全局记位置"]
+        V_L1["L1 DRAM ── agent 注册/serve, 全局记位置"]
+        V_L2["L2 NVMe ── agent serve, 全局记位置"]
+        V_L3["L3 对象 ── 全局直接管"]
+        V_AGENT -.- V_L0
+        V_L0 --- V_L1 --- V_L2 --- V_L3
+    end
+```
+
 | 层级 | 介质 | 容量 | 延迟 | 角色 | 管理主体 |
 |------|------|------|------|------|----------|
 | L0 | GPU/NPU HBM | 极小 | ~ns | 池放置的计算载体(易失,缓存) | 存储池(元数据强一致,物理载体在计算节点) |
@@ -111,7 +147,7 @@ r-type 状态 checkpoint 的形式/间距与 L1+ 持久化性价比(Mamba state 
 
 ## KV Pool 架构(详见 05)
 
-KV Pool 的远端物理载体由一组 KV Node 组成:每个贡献 DRAM + NVMe(L1/L2 池的远端载体),通过 RDMA 暴露 block 读写,元数据由存储池控制面维护。L0–L2 的物理载体分布在计算节点(本机 HBM/DRAM/NVMe)与 KV Node(远端 DRAM/NVMe)上,具体哪个节点由池放置决定,但元数据全归存储池;四层共用一套元数据与 API。
+KV Pool 的远端物理载体由一组 KV Node 组成:每个贡献 DRAM + NVMe(L1/L2 池的远端载体),通过 RDMA 暴露 block 读写,元数据由存储池控制面维护。L0–L2 的物理载体分布在计算节点(本机 HBM/DRAM/NVMe)与 KV Node(远端 DRAM/NVMe)上,具体哪个节点由池放置决定,但元数据全归存储池;四层共用一套元数据与 API。KV Node 上跑的 agent(与计算节点 agent 共用传输引擎,详见 [`kv-cache-pool.md`](kv-cache-pool.md)「KV Node 上的 agent」)是池伸到该机的本地手,管 DRAM 注册 + NVMe serve,不持镜像、无 FFI。
 
 ## 一致性模型
 
