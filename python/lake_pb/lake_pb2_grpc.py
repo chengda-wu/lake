@@ -31,10 +31,10 @@ class ControlPlaneServiceStub:
     原则:KV 字节走 RDMA 旁路(边7/8),proto 只定义控制 msg(查询/命令/元数据/完成回执)。
     worker ↔ in-process agent 同进程走 FFI(边6,PyO3),不进 proto。
 
-    4 个 service 按通信边划分:
-    ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面
-    AgentService        — 边10:Router/控制面 → agent
-    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路)
+    3 个 service 按通信边划分:
+    ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
+    AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
+    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
 
     参考:
     - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -91,10 +91,10 @@ class ControlPlaneServiceServicer:
     原则:KV 字节走 RDMA 旁路(边7/8),proto 只定义控制 msg(查询/命令/元数据/完成回执)。
     worker ↔ in-process agent 同进程走 FFI(边6,PyO3),不进 proto。
 
-    4 个 service 按通信边划分:
-    ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面
-    AgentService        — 边10:Router/控制面 → agent
-    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路)
+    3 个 service 按通信边划分:
+    ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
+    AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
+    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
 
     参考:
     - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -118,8 +118,9 @@ class ControlPlaneServiceServicer:
 
     def LookupPrefix(self, request, context):
         """Router 选路查询:输入 (model_id, 前缀 block hashes),输出可复用 block 列表 + 位置 + 本地命中。
-        读镜像(最终一致,零 RPC 常态;镜像不可信时回退查权威)。仿 SGLang match_prefix 的集群版。
-        对应 plan「Router↔池一次查询 RPC」。
+        **非热路径常态**——热路径 Router 在本地位置视图镜像上 match(零 RPC,见 B3)。
+        本 RPC 是**权威回退**:冷启动 / 镜像 gap / 调试时查控制面权威树(与 Locate 同档,线性一致)。
+        仿 SGLang match_prefix 的集群版。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -134,8 +135,10 @@ class ControlPlaneServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def RegisterBlocks(self, request, context):
-        """满块注册:两阶段写(仿 Mooncake PutStart/PutEnd),写完 durable 才注册,防半块被读。
+        """满块注册:**耐久性由 agent 本地完成**(写 L2 durable)后,只调一次本 RPC = PutEnd。
+        PutStart 不进控制面(agent 本地记账即可),防半块被读。仿 Mooncake PutEnd 的控制面侧。
         release 一致,写控制面内存,不进 etcd。
+        与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -202,10 +205,10 @@ class ControlPlaneService:
     原则:KV 字节走 RDMA 旁路(边7/8),proto 只定义控制 msg(查询/命令/元数据/完成回执)。
     worker ↔ in-process agent 同进程走 FFI(边6,PyO3),不进 proto。
 
-    4 个 service 按通信边划分:
-    ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面
-    AgentService        — 边10:Router/控制面 → agent
-    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路)
+    3 个 service 按通信边划分:
+    ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
+    AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
+    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
 
     参考:
     - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -398,7 +401,7 @@ class AgentServiceStub:
                 request_serializer=lake__pb2.DispatchRequest.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
                 _registered_method=True)
-        self.ReportLoad = channel.stream_unary(
+        self.ReportLoad = channel.stream_stream(
                 '/lake.AgentService/ReportLoad',
                 request_serializer=lake__pb2.LoadReport.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
@@ -419,6 +422,7 @@ class AgentServiceServicer:
     def Dispatch(self, request, context):
         """边10:Router 选好模式+节点后,下发调度指令给目标 agent(组 batch)。
         携带 hints(agent_hints/kv_hints),与 #13 Bifrost 透传对齐(仿 SGLang #21846 agent_hints)。
+        本稿只定调度骨架;request_id / 输入 token / 采样参数等请求体字段后续 PR 补。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -426,6 +430,7 @@ class AgentServiceServicer:
 
     def ReportLoad(self, request_iterator, context):
         """边10:agent 上报负载(队列长度/in-flight/剩余容量),供过载信号 P7 对接 Bifrost。
+        流式上报、流式 ack(避免客户端关流才 ack 的运维别扭)。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -446,7 +451,7 @@ def add_AgentServiceServicer_to_server(servicer, server):
                     request_deserializer=lake__pb2.DispatchRequest.FromString,
                     response_serializer=lake__pb2.Ack.SerializeToString,
             ),
-            'ReportLoad': grpc.stream_unary_rpc_method_handler(
+            'ReportLoad': grpc.stream_stream_rpc_method_handler(
                     servicer.ReportLoad,
                     request_deserializer=lake__pb2.LoadReport.FromString,
                     response_serializer=lake__pb2.Ack.SerializeToString,
@@ -508,7 +513,7 @@ class AgentService:
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.stream_unary(
+        return grpc.experimental.stream_stream(
             request_iterator,
             target,
             '/lake.AgentService/ReportLoad',

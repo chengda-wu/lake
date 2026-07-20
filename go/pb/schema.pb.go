@@ -178,16 +178,20 @@ func (BlockKind) EnumDescriptor() ([]byte, []int) {
 }
 
 // KVBlockID — block 身份(内容寻址 + 前缀链式哈希)
+// block = page:128 token × 全部层,page-first 连续(见 kv-cache-pool.md「分块流水线」)。
+//
+//	身份按 token 段(page)而非按层——block_hash 本就 layer-agnostic(链式哈希只吃 token),
+//	layer_idx 不进身份,只在 LayerSlice(子块传输切片)里出现。对齐 SGLang radix(每页一 hash 当 L3 key)、
+//	vLLM prefix caching(token-based hash 跨层共享)。
 type KVBlockID struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	ModelId   string                 `protobuf:"bytes,1,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`       // 模型命名空间
-	LayerIdx  uint32                 `protobuf:"varint,2,opt,name=layer_idx,json=layerIdx,proto3" json:"layer_idx,omitempty"`   // 层号
-	BlockHash []byte                 `protobuf:"bytes,3,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"` // 链式哈希 = hash(parent_block_hash || 本块 token_ids);
+	BlockHash []byte                 `protobuf:"bytes,2,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"` // 链式哈希 = hash(parent_block_hash || 本块 token_ids);
 	// 序列起点块 parent = ⊥(空)。相同前缀 → 相同链式 hash → 命中同一 KV
 	// 算法可插拔(BLAKE3-128 / SHA-256-128 / SHA-256-256),由模型注册元数据声明,
 	// proto 只规定 ≥128-bit + 链式。不同 model_id 可用不同算法。
-	PoolKind      PoolKind `protobuf:"varint,4,opt,name=pool_kind,json=poolKind,proto3,enum=lake.PoolKind" json:"pool_kind,omitempty"` // TARGET | DRAFT 命名空间(draft KV 同款 schema,靠字段区分,不物理分池)
-	Scope         string   `protobuf:"bytes,5,opt,name=scope,proto3" json:"scope,omitempty"`                                           // 多租户预留,默认 "public",当前不入寻址(F8 远期启用时改寻址语义不改结构)
+	PoolKind      PoolKind `protobuf:"varint,3,opt,name=pool_kind,json=poolKind,proto3,enum=lake.PoolKind" json:"pool_kind,omitempty"` // TARGET | DRAFT 命名空间(draft KV 同款 schema,靠字段区分,不物理分池)
+	Scope         string   `protobuf:"bytes,4,opt,name=scope,proto3" json:"scope,omitempty"`                                           // 多租户预留,默认 "public",当前不入寻址(F8 远期启用时改寻址语义不改结构)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -229,13 +233,6 @@ func (x *KVBlockID) GetModelId() string {
 	return ""
 }
 
-func (x *KVBlockID) GetLayerIdx() uint32 {
-	if x != nil {
-		return x.LayerIdx
-	}
-	return 0
-}
-
 func (x *KVBlockID) GetBlockHash() []byte {
 	if x != nil {
 		return x.BlockHash
@@ -259,11 +256,12 @@ func (x *KVBlockID) GetScope() string {
 
 // Location — 单层一个物理位置(仅 L0/L1/L2 段式位置;L3 不进此处)
 type Location struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Tier          Tier                   `protobuf:"varint,1,opt,name=tier,proto3,enum=lake.Tier" json:"tier,omitempty"`             // L0 | L1 | L2
-	NodeId        string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`           // 载体节点(compute-X / kvnode-Y)
-	SegmentId     uint64                 `protobuf:"varint,3,opt,name=segment_id,json=segmentId,proto3" json:"segment_id,omitempty"` // 传输引擎注册段 ID(仿 Mooncake SegmentID;uint64 走传输热路径)
-	Offset        uint64                 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`                        // 段内偏移
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Tier  Tier                   `protobuf:"varint,1,opt,name=tier,proto3,enum=lake.Tier" json:"tier,omitempty"` // **硬约束:∈ {L0, L1, L2}**;L3 永不进 Location,只由 l3_present 表达。
+	// Tier 枚举含 L3 仅为四层模型概念完整;生成代码/校验须拒绝 tier=L3。
+	NodeId        string `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`           // 载体节点(compute-X / kvnode-Y)
+	SegmentId     uint64 `protobuf:"varint,3,opt,name=segment_id,json=segmentId,proto3" json:"segment_id,omitempty"` // 传输引擎注册段 ID(仿 Mooncake SegmentID;uint64 走传输热路径)
+	Offset        uint64 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`                        // 段内偏移
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -332,7 +330,7 @@ type BlockMeta struct {
 	Id            *KVBlockID             `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	BlockKind     BlockKind              `protobuf:"varint,2,opt,name=block_kind,json=blockKind,proto3,enum=lake.BlockKind" json:"block_kind,omitempty"` // T_TYPE | R_TYPE_STATE | R_TYPE_TRAILING
 	Locations     []*Location            `protobuf:"bytes,3,rep,name=locations,proto3" json:"locations,omitempty"`                                       // L0?/L1?/L2? —— 缓存副本(L0/L1 易失) + L2 durable(F4 恢复点)
-	L3Present     bool                   `protobuf:"varint,4,opt,name=l3_present,json=l3Present,proto3" json:"l3_present,omitempty"`                     // L3(SSOT) 是否有副本;object key = s3://lake/kv/{model_id}/{layer_idx}/{block_hash} 现场拼,不存储
+	L3Present     bool                   `protobuf:"varint,4,opt,name=l3_present,json=l3Present,proto3" json:"l3_present,omitempty"`                     // L3(SSOT) 是否有副本;object key = s3://lake/kv/{model_id}/{block_hash} 现场拼,不存储
 	RefCount      uint32                 `protobuf:"varint,5,opt,name=ref_count,json=refCount,proto3" json:"ref_count,omitempty"`                        // 全局引用汇总
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -407,14 +405,13 @@ var File_schema_proto protoreflect.FileDescriptor
 
 const file_schema_proto_rawDesc = "" +
 	"\n" +
-	"\fschema.proto\x12\x04lake\"\xa5\x01\n" +
+	"\fschema.proto\x12\x04lake\"\x88\x01\n" +
 	"\tKVBlockID\x12\x19\n" +
-	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12\x1b\n" +
-	"\tlayer_idx\x18\x02 \x01(\rR\blayerIdx\x12\x1d\n" +
+	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12\x1d\n" +
 	"\n" +
-	"block_hash\x18\x03 \x01(\fR\tblockHash\x12+\n" +
-	"\tpool_kind\x18\x04 \x01(\x0e2\x0e.lake.PoolKindR\bpoolKind\x12\x14\n" +
-	"\x05scope\x18\x05 \x01(\tR\x05scope\"z\n" +
+	"block_hash\x18\x02 \x01(\fR\tblockHash\x12+\n" +
+	"\tpool_kind\x18\x03 \x01(\x0e2\x0e.lake.PoolKindR\bpoolKind\x12\x14\n" +
+	"\x05scope\x18\x04 \x01(\tR\x05scope\"z\n" +
 	"\bLocation\x12\x1e\n" +
 	"\x04tier\x18\x01 \x01(\x0e2\n" +
 	".lake.TierR\x04tier\x12\x17\n" +

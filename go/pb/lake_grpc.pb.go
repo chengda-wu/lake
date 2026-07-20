@@ -42,16 +42,19 @@ type ControlPlaneServiceClient interface {
 	SubscribeView(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ViewUpdate], error)
 	// Router 选路查询:输入 (model_id, 前缀 block hashes),输出可复用 block 列表 + 位置 + 本地命中。
 	//
-	//	读镜像(最终一致,零 RPC 常态;镜像不可信时回退查权威)。仿 SGLang match_prefix 的集群版。
-	//	对应 plan「Router↔池一次查询 RPC」。
+	//	**非热路径常态**——热路径 Router 在本地位置视图镜像上 match(零 RPC,见 B3)。
+	//	本 RPC 是**权威回退**:冷启动 / 镜像 gap / 调试时查控制面权威树(与 Locate 同档,线性一致)。
+	//	仿 SGLang match_prefix 的集群版。
 	LookupPrefix(ctx context.Context, in *LookupPrefixRequest, opts ...grpc.CallOption) (*LookupPrefixResponse, error)
 	// agent 搬 KV:同步查权威树(线性一致)。常态走镜像/本地 slot 不查,仅镜像不可信时查
 	//
 	//	(见 kv-cache-pool.md「搬 KV 查权威分层」)。
 	Locate(ctx context.Context, in *LocateRequest, opts ...grpc.CallOption) (*LocateResponse, error)
-	// 满块注册:两阶段写(仿 Mooncake PutStart/PutEnd),写完 durable 才注册,防半块被读。
+	// 满块注册:**耐久性由 agent 本地完成**(写 L2 durable)后,只调一次本 RPC = PutEnd。
 	//
+	//	PutStart 不进控制面(agent 本地记账即可),防半块被读。仿 Mooncake PutEnd 的控制面侧。
 	//	release 一致,写控制面内存,不进 etcd。
+	//	与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
 	RegisterBlocks(ctx context.Context, in *RegisterBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
 	// 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
 	RequestBarrier(ctx context.Context, in *RequestBarrierRequest, opts ...grpc.CallOption) (*Ack, error)
@@ -154,16 +157,19 @@ type ControlPlaneServiceServer interface {
 	SubscribeView(*SubscribeRequest, grpc.ServerStreamingServer[ViewUpdate]) error
 	// Router 选路查询:输入 (model_id, 前缀 block hashes),输出可复用 block 列表 + 位置 + 本地命中。
 	//
-	//	读镜像(最终一致,零 RPC 常态;镜像不可信时回退查权威)。仿 SGLang match_prefix 的集群版。
-	//	对应 plan「Router↔池一次查询 RPC」。
+	//	**非热路径常态**——热路径 Router 在本地位置视图镜像上 match(零 RPC,见 B3)。
+	//	本 RPC 是**权威回退**:冷启动 / 镜像 gap / 调试时查控制面权威树(与 Locate 同档,线性一致)。
+	//	仿 SGLang match_prefix 的集群版。
 	LookupPrefix(context.Context, *LookupPrefixRequest) (*LookupPrefixResponse, error)
 	// agent 搬 KV:同步查权威树(线性一致)。常态走镜像/本地 slot 不查,仅镜像不可信时查
 	//
 	//	(见 kv-cache-pool.md「搬 KV 查权威分层」)。
 	Locate(context.Context, *LocateRequest) (*LocateResponse, error)
-	// 满块注册:两阶段写(仿 Mooncake PutStart/PutEnd),写完 durable 才注册,防半块被读。
+	// 满块注册:**耐久性由 agent 本地完成**(写 L2 durable)后,只调一次本 RPC = PutEnd。
 	//
+	//	PutStart 不进控制面(agent 本地记账即可),防半块被读。仿 Mooncake PutEnd 的控制面侧。
 	//	release 一致,写控制面内存,不进 etcd。
+	//	与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
 	RegisterBlocks(context.Context, *RegisterBlocksRequest) (*Ack, error)
 	// 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
 	RequestBarrier(context.Context, *RequestBarrierRequest) (*Ack, error)
@@ -365,9 +371,12 @@ type AgentServiceClient interface {
 	// 边10:Router 选好模式+节点后,下发调度指令给目标 agent(组 batch)。
 	//
 	//	携带 hints(agent_hints/kv_hints),与 #13 Bifrost 透传对齐(仿 SGLang #21846 agent_hints)。
+	//	本稿只定调度骨架;request_id / 输入 token / 采样参数等请求体字段后续 PR 补。
 	Dispatch(ctx context.Context, in *DispatchRequest, opts ...grpc.CallOption) (*Ack, error)
 	// 边10:agent 上报负载(队列长度/in-flight/剩余容量),供过载信号 P7 对接 Bifrost。
-	ReportLoad(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[LoadReport, Ack], error)
+	//
+	//	流式上报、流式 ack(避免客户端关流才 ack 的运维别扭)。
+	ReportLoad(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[LoadReport, Ack], error)
 	// 控制面 → agent:补拉放置(缺失 KV 放到指定节点 HBM,方案 Z 单向耦合)。
 	PlaceBlocks(ctx context.Context, in *PlaceBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
 }
@@ -390,7 +399,7 @@ func (c *agentServiceClient) Dispatch(ctx context.Context, in *DispatchRequest, 
 	return out, nil
 }
 
-func (c *agentServiceClient) ReportLoad(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[LoadReport, Ack], error) {
+func (c *agentServiceClient) ReportLoad(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[LoadReport, Ack], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &AgentService_ServiceDesc.Streams[0], AgentService_ReportLoad_FullMethodName, cOpts...)
 	if err != nil {
@@ -401,7 +410,7 @@ func (c *agentServiceClient) ReportLoad(ctx context.Context, opts ...grpc.CallOp
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AgentService_ReportLoadClient = grpc.ClientStreamingClient[LoadReport, Ack]
+type AgentService_ReportLoadClient = grpc.BidiStreamingClient[LoadReport, Ack]
 
 func (c *agentServiceClient) PlaceBlocks(ctx context.Context, in *PlaceBlocksRequest, opts ...grpc.CallOption) (*Ack, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -424,9 +433,12 @@ type AgentServiceServer interface {
 	// 边10:Router 选好模式+节点后,下发调度指令给目标 agent(组 batch)。
 	//
 	//	携带 hints(agent_hints/kv_hints),与 #13 Bifrost 透传对齐(仿 SGLang #21846 agent_hints)。
+	//	本稿只定调度骨架;request_id / 输入 token / 采样参数等请求体字段后续 PR 补。
 	Dispatch(context.Context, *DispatchRequest) (*Ack, error)
 	// 边10:agent 上报负载(队列长度/in-flight/剩余容量),供过载信号 P7 对接 Bifrost。
-	ReportLoad(grpc.ClientStreamingServer[LoadReport, Ack]) error
+	//
+	//	流式上报、流式 ack(避免客户端关流才 ack 的运维别扭)。
+	ReportLoad(grpc.BidiStreamingServer[LoadReport, Ack]) error
 	// 控制面 → agent:补拉放置(缺失 KV 放到指定节点 HBM,方案 Z 单向耦合)。
 	PlaceBlocks(context.Context, *PlaceBlocksRequest) (*Ack, error)
 	mustEmbedUnimplementedAgentServiceServer()
@@ -442,7 +454,7 @@ type UnimplementedAgentServiceServer struct{}
 func (UnimplementedAgentServiceServer) Dispatch(context.Context, *DispatchRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method Dispatch not implemented")
 }
-func (UnimplementedAgentServiceServer) ReportLoad(grpc.ClientStreamingServer[LoadReport, Ack]) error {
+func (UnimplementedAgentServiceServer) ReportLoad(grpc.BidiStreamingServer[LoadReport, Ack]) error {
 	return status.Error(codes.Unimplemented, "method ReportLoad not implemented")
 }
 func (UnimplementedAgentServiceServer) PlaceBlocks(context.Context, *PlaceBlocksRequest) (*Ack, error) {
@@ -492,7 +504,7 @@ func _AgentService_ReportLoad_Handler(srv interface{}, stream grpc.ServerStream)
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AgentService_ReportLoadServer = grpc.ClientStreamingServer[LoadReport, Ack]
+type AgentService_ReportLoadServer = grpc.BidiStreamingServer[LoadReport, Ack]
 
 func _AgentService_PlaceBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PlaceBlocksRequest)
@@ -532,6 +544,7 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "ReportLoad",
 			Handler:       _AgentService_ReportLoad_Handler,
+			ServerStreams: true,
 			ClientStreams: true,
 		},
 	},
