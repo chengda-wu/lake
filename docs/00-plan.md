@@ -132,33 +132,40 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 ### 模块与目录划分
 
+> 与 [#3](https://github.com/chengda-wu/lake/issues/3) / [`control-plane.md`](architecture/control-plane.md) 对齐：**位置视图权威在 Rust 存储控制面**；**集群级调度归 Go Router 内**（不拆独立 Scheduler 进程）；节点级 scheduler 在计算节点（Python，后续）；入口 Gateway 用外部 Bifrost。空壳落地见 [PR #17](https://github.com/chengda-wu/lake/pull/17)。
+
 ```
 lake/
 ├── docs/                       # 设计文档（语言无关）
-├── rust/                       # 存储层
+├── rust/                       # 存储层（含存储控制面）
+│   ├── proto/                  # tonic-build 在线生成（不入仓）
+│   ├── controlplane/           # 位置视图权威进程（内存强一致 + etcd 降频 checkpoint）
 │   ├── kv-pool/                # KV cache 分布式池（内容寻址、分片、驱逐）
 │   ├── weight-cache/           # 权重分层缓存
 │   ├── tiered-store/           # L0-L3 分层缓存引擎
-│   └── transfer/               # KV 传输（RDMA + TCP 退化）
-├── go/                         # 控制面
-│   ├── router/                 # 请求路由（无状态）
-│   ├── scheduler/              # 池间/节点级调度 + 弹性
-│   ├── controlplane/           # 位置视图权威(进程内存) + etcd(降频 checkpoint/lease)、节点拓扑
-│   └── (无 gateway/——入口用外部 Bifrost，见 control-plane.md「Gateway 对接约定」)
+│   ├── transfer/               # KV 传输（RDMA + TCP 退化）
+│   └── storage-agent/          # 计算侧 / KV Node 双角色 agent（feature 分能力）
+├── go/                         # 请求控制面（Router）
+│   ├── pb/                     # protoc 生成入仓
+│   ├── router/                 # 无状态路由 + 模式选择；集群级调度逻辑同进程
+│   └── (无 gateway/ · 无独立 scheduler/——见 control-plane.md)
 ├── python/                     # 计算层
+│   ├── lake_pb/                # grpcio-tools 生成入仓
 │   ├── prefill/                # Prefill worker（Triton kernels）
 │   ├── decode/                 # Decode worker（continuous batching）
 │   ├── draft/                  # 投机解码 draft worker
 │   ├── kernels/                # Triton kernel 集（attention/prefill/decode）
-│   └── runtime/                # 与 KV Pool/Weight Cache 的 client（gRPC + RDMA）
+│   └── runtime/                # 与 KV Pool/Weight Cache 的 client（gRPC + RDMA；节点级 scheduler 后续落此或旁路）
 ├── proto/                      # 共享 protobuf IDL
+├── scripts/                    # gen_stubs.sh 等（Go/Python 重新生成）
 └── deploy/                     # 部署（compose/k8s/镜像）
 ```
 
 ### 接口边界（P2 定稿）
 - [x] `proto/schema.proto`：KVBlockID / Location / BlockMeta schema（#2，见 [PR #16](https://github.com/chengda-wu/lake/pull/16)）
-- [x] `proto/lake.proto`：RPC 边界草稿——ControlPlaneService（边3/4/5）/ AgentService（边10）/ TransferService（边7/8），KV 字节走 RDMA 旁路、worker↔agent 走 FFI 不进 proto（边界草稿;三语言生成验证留 [PR #17](https://github.com/chengda-wu/lake/pull/17) 空壳阶段）
-- [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格（`TransferRequest` 控制信令已定，字节布局待 #2/传输引擎落地）
+- [x] `proto/lake.proto`：RPC 边界草稿——ControlPlaneService（边3/4/5）/ AgentService（边10）/ TransferService（边7/8），KV 字节走 RDMA 旁路、worker↔agent 走 FFI 不进 proto（边界草稿;三语言生成验证见 [PR #17](https://github.com/chengda-wu/lake/pull/17)）
+- [x] 三语言空壳目录 + stub 编译（[PR #17](https://github.com/chengda-wu/lake/pull/17)：Rust workspace / Go router+pb / Python lake_pb+worker 包；`scripts/gen_stubs.sh`）
+- [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格（`TransferRequest` 控制信令已定，字节布局待传输引擎落地）
 
 ### 转 P2 切入建议
 

@@ -1,0 +1,12 @@
+[package]
+name = "lake-controlplane"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lake-proto = { path = "../proto" }
+tonic = "0.12"
+
+# 空壳:存储控制面(位置视图权威进程)。P2 仅验证 proto 生成 + 编译。
+# 实现 ControlPlaneService(边3/4/5);权威在进程内存,etcd 降频 checkpoint。
