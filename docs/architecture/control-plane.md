@@ -108,8 +108,17 @@ Dynamo 部署拓扑（`components/src/dynamo/router/CLAUDE.md` "Frontend/Router 
 **对 lake 的输入**：
 
 - **集群级调度逻辑归 Router，不拆独立进程**：Dynamo 的请求级选路（`LocalScheduler`）内嵌 router 进程，lake 可同——集群级调度（池间 / 弹性）作 Router 内逻辑，同进程同机直接调用，省 gRPC。拆独立进程只在调度变重 / 要独立扩缩时才有必要（先不拆）。注：这里"调度"= 集群级 = Router，**不含**节点级 scheduler（那个在计算节点上，per-engine，跟 Router 无关）。
-- **Gateway 不自研，用 Bifrost（外部 AI gateway）**：dynamo 默认 frontend + router 同进程省一跳，但 lake 把入口网关交给外部 Bifrost（鉴权/限流/过载 shedding/可观测归外部控制面，CLAUDE.md 第3条）。**Router 直接吃 OpenAI/Anthropic 格式**——Bifrost 把 lake Router 当一个 OpenAI 兼容 provider 转发，lake 不自研入口 adapter、不定义私有入口 gRPC。对外 OpenAI 兼容，对内（Router↔worker↔pool）gRPC。
+- **Gateway 不自研，用 Bifrost（外部 AI gateway）**：dynamo 默认 frontend + router 同进程省一跳，但 lake 把入口网关交给外部 Bifrost（鉴权/限流/过载 shedding/可观测归外部控制面，CLAUDE.md 第3条）。**Router 只实现 OpenAI 兼容**——Anthropic 客户端由 Bifrost 转 OpenAI 再进 Router，lake 不自研入口 adapter、不定义私有入口 gRPC。对外 OpenAI 兼容（边1/边2 HTTP），对内（Router↔worker↔pool）gRPC。对接约束见下「Gateway（Bifrost）对接约定」。
 - **存储控制面是独立进程**：dynamo 没有这个（lake 独有），因为 lake 把存储权威从 worker 剥离了。这是 lake 比 dynamo 多出来的一个进程。
+
+## Gateway（Bifrost）对接约定（对应 #3 ③，PR #13）
+
+> Bifrost（[maximhq/bifrost](https://github.com/maximhq/bifrost)，外部 AI gateway）担鉴权 / 限流 / 过载 shedding / 可观测——外部控制面职责（CLAUDE.md 第3条）。lake 不自研入口、不定义私有入口 gRPC。下列是 Bifrost **配置面**约束，非 lake 代码。
+
+1. **协议面（选 A）**：Router **只实现 OpenAI 兼容**。Anthropic 客户端 → Bifrost 转 OpenAI → Router；Router 不双协议。对外 OpenAI 兼容（边1 客户端↔Bifrost、边2 Bifrost↔Router，均 HTTP），对内 gRPC（边3 及以下）。Bifrost 可替换（任何 OpenAI 兼容 gateway 即可），非硬绑定。
+2. **不二次选路**：Bifrost **单一 upstream = lake Router**；关跨 provider failover、关 semantic cache。过载只决定「进 / 不进」，**「去哪」仍归 Router**——Router 持位置视图镜像做模式 + 节点选路（见上文「Router 持位置视图镜像」）。
+3. **过载信号**：P2 先 Bifrost **本地限流**（按配置阈值进/不进）；lake 容量信号（队列长度 / in-flight / 剩余容量，见 [`../features/nonfunctional.md`](../features/nonfunctional.md)）对接 Bifrost 自适应留 **P7**——届时把 Worker/Router 上报的容量喂 Bifrost。请求级 shedding 始终归 Bifrost，lake 不自 shedding（CLAUDE.md 第3条）。
+4. **透传**：lake 私有字段（`agent_hints` / `kv_hints` 等自定义 header、streaming SSE）须端到端透传，**Bifrost 不剥**；SSE 增量原样回传客户端。
 
 ## 待讨论项的 dynamo 输入汇总
 
@@ -119,7 +128,7 @@ Dynamo 部署拓扑（`components/src/dynamo/router/CLAUDE.md` "Frontend/Router 
 | 2 | Scheduler 独立进程？ | `LocalScheduler`（请求级）在 kv-router 内，无独立进程 | 集群级调度不拆（归 Router 内逻辑）；**节点级 scheduler（每计算节点一个，vLLM 式）另论，跟 Router 无关** |
 | 3 | KV Node 有 agent？ | dynamo 无 KV Node 概念（远端 = 对象存储 + NIXL）；`TransferManager` + `export/import_metadata` 是 RDMA 注册参考 | KV Node 跑 agent（复用计算节点 agent 代码），做 RDMA 注册 / 读写服务 |
 | 4 | 存储控制面单 leader / 多副本？ | per-instance `InstanceLeader` P2P，非单 leader / 非 Raft | lake 拒绝 P2P（不满足强一致）；单 leader + etcd（Raft 在 etcd），多副本待 P7 |
-| 5 | Gateway 自研 / 外部？ | dynamo frontend 自研（OpenAI HTTP）或 k8s Gateway API + EPP | **已定：不自研，用 Bifrost**（外部 AI gateway）；Router 直吃 OpenAI/Anthropic 格式，无私有入口 gRPC |
+| 5 | Gateway 自研 / 外部？ | dynamo frontend 自研（OpenAI HTTP）或 k8s Gateway API + EPP | **已定：不自研，用 Bifrost**（外部 AI gateway）；Router 只 OpenAI 兼容（Anthropic 由 Bifrost 转），无私有入口 gRPC（见下「Gateway 对接约定」） |
 | 6 | 边4 = 边5？ | router 与 worker 同事件流不同订阅者 | 同协议、不同订阅者（是） |
 
 > #4 的结论（Router 镜像走 gRPC stream 主方案 + 同机共享内存优化、1/2 否决、粒度与协议）见上文 "Router 持位置视图镜像" 节；#4 剩余两项（控制面与 Router 是否同机、控制面 HA）归 #3 待讨论 #1 / #4。
