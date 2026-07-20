@@ -156,18 +156,18 @@ lake/
 ```
 
 ### 接口边界（P2 定稿）
-- [ ] `proto/lake.proto`：Router↔Worker、Worker↔KVPool、Router↔ControlPlane 的 RPC 定义
-- [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格
-- [ ] KVBlockID / 元数据 schema 定稿（与 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) 对齐）
+- [x] `proto/schema.proto`：KVBlockID / Location / BlockMeta schema（#2，见 [PR #16](https://github.com/chengda-wu/lake/pull/16)）
+- [x] `proto/lake.proto`：RPC 边界草稿——ControlPlaneService（边3/4/5）/ AgentService（边10）/ TransferService（边7/8），KV 字节走 RDMA 旁路、worker↔agent 走 FFI 不进 proto（边界草稿;三语言生成验证留 [PR #17](https://github.com/chengda-wu/lake/pull/17) 空壳阶段）
+- [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格（`TransferRequest` 控制信令已定，字节布局待 #2/传输引擎落地）
 
 ### 转 P2 切入建议
 
 P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。建议从 **`proto/lake.proto` 的 RPC 边界草稿**切入，把这几轮定的存储池接口固化：
 
-- **Router ↔ 存储池**：一次查询 RPC，输入 `(model_id, prompt 前缀)`，输出 `可复用 block 列表 + 各自位置（含本地命中判定）`。对应 radix + 位置视图一跳返回。
+- **Router ↔ 存储池**：热路径 Router 在本地位置视图镜像上 match（零 RPC，见 B3）；`LookupPrefix` RPC 作冷启动 / 镜像 gap / 调试时的权威回退（非热路径常态），输入 `(model_id, prompt 前缀)`，输出 `可复用 block 列表 + 各自位置（含本地命中判定）`。
 - **调度器 ↔ 存储池**：读位置视图（组 batch 用）；补拉放置请求（缺失 KV 放到指定节点 HBM）。
 - **Worker ↔ 存储池**：prefill 产出写回（含反向回传的延伸 KV）；decode 读 KV；增量写回（容错 + 前缀生长）。
-- **元数据 schema**：KVBlockID = `(model_id, layer_idx, block_hash)`；block 的 `locations` 为多层位置集合（L0/L1 缓存副本 + L2/L3 二选一），L3 缺失才视为不存在。
+- **元数据 schema**：KVBlockID = `(model_id, block_hash, pool_kind)`（block = page,128 token × 全部层,不含 layer_idx；寻址忽略 scope,F8 前默认 public）；block 的 `locations` 为多层位置集合（L0/L1 缓存副本 + L2/L3 稳态二选一），L3 缺失才视为不存在。详见 `proto/schema.proto`。
 
 **完成判据**：三个语言仓各自能编译出空壳服务；proto 可双向生成；目录结构落地。
 
