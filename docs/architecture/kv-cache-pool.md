@@ -90,9 +90,30 @@ node_id = hash(KVBlockID) % N
 
 ### KV Node 上的 agent
 
-**KV Node = 存储池的远端物理载体节点**:贡献 DRAM(L1)+ NVMe(L2),无 HBM、无计算、无 worker。计算节点本机的 HBM/DRAM/NVMe 也是池的载体,但**远端**那部分就是 KV Node。
+**KV Node = 存储池的远端物理载体节点**:贡献 DRAM(L1)+ NVMe(L2),无 HBM、无计算、无 worker。计算节点本机的 HBM/DRAM/NVMe 也是池的载体,但**远端**那部分就是 KV Node。每个有介质的节点上都跑一个 agent（池伸到该机的本地手）。
 
-每个有存储介质的节点上都跑一个 agent（池伸到该机的本地手）,KV Node 也不例外。两类 agent 共用一个 Rust crate `lake-storage-agent`,feature flag 出两个 target,**共用传输引擎**（RDMA MR 注册 / segment / submit,两边一字不差）:
+```mermaid
+flowchart TB
+    subgraph CN["计算节点 (Python worker + Rust agent, 同进程)"]
+        HBM["HBM (L0)"]
+        DRAM_CN["DRAM (L1, 本机载体)"]
+        NVMe_CN["NVMe (L2, 本机载体)"]
+        AGENT_CN["agent (Rust .so, FFI 接 worker)<br/>+ view mirror + block table 组装"]
+    end
+    subgraph KVN["KV Node (远端, 无 HBM/无计算)"]
+        DRAM_KV["DRAM (L1, 远端载体)"]
+        NVMe_KV["NVMe (L2, 远端载体)"]
+        AGENT_KV["agent (Rust, 无 FFI/无镜像)<br/>+ NVMe serve"]
+    end
+    subgraph CP["存储控制面 (Rust, 独立进程)"]
+        AUTH["位置视图权威 (进程内存)<br/>radix + 位置 + ref + 配额 + GC"]
+    end
+    AGENT_CN -->|"gRPC 上报/回查 + stream 订阅"| AUTH
+    AGENT_KV -->|"gRPC lease + stream"| AUTH
+    AGENT_CN -->|"RDMA 传/读写 (L0-L0 / L0-远端L1L2)"| AGENT_KV
+```
+
+两类 agent 共用一个 Rust crate `lake-storage-agent`,feature flag 出两个 target,**共用传输引擎**（RDMA MR 注册 / segment / submit,两边一字不差）:
 
 | 职责 | 计算节点 agent | KV Node agent |
 |------|---------------|---------------|

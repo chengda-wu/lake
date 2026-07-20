@@ -50,6 +50,35 @@ r-type 状态 checkpoint 的形式/间距与 L1+ 持久化性价比(Mamba state 
 > 4. **本地命中省 RPC 不靠 owner 切分**。横切唯一吸引力是"agent 管 L0、引擎不问全局"。但 lake 已用 **agent 只读镜像**满足这点——agent 持全局推送的 radix 副本，查本地命中零 RPC（见 [`kv-cache-pool.md`](kv-cache-pool.md)「前缀树索引」）。镜像吃掉了横切想省的那一跳，又不引入 owner 交接。
 > 5. **与已定原则一致**：CLAUDE.md 第4条"计算节点不拥有任何内存——HBM/DRAM/NVMe 是池的物理载体，不是 worker 私有状态"直接否定横切（横切即"agent 拥有 L0"）。
 
+横切按层分主（L0 归 agent、L1+ 归全局，demotion 时 owner 换手）；纵切按职责（元数据归全局、操作归 agent，切线竖着穿过全部四层，owner 恒为全局）：
+
+```mermaid
+flowchart LR
+    subgraph HZ["横切: 按层分主 (否定)"]
+        direction TB
+        H_L0["L0 HBM ── agent 拥有"]
+        H_CUT["──── 切在这里 ────<br/>demotion 时 owner 换手"]
+        H_L1["L1 DRAM ── 全局拥有"]
+        H_L2["L2 NVMe ── 全局拥有"]
+        H_L3["L3 对象  ── 全局拥有"]
+        H_L0 --- H_CUT --- H_L1
+        H_L1 --- H_L2 --- H_L3
+    end
+    subgraph VT["纵切: 按职责 (采用)"]
+        direction TB
+        V_GLOBAL["全局控制面 ── 所有层元数据<br/>block 在哪 / ref / 放置 / GC"]
+        V_AGENT["每节点 agent ── 所有层本地操作<br/>注册 MR / 分 slot / serve / 搬字节"]
+        V_GLOBAL -->|"指令/视图推送"| V_AGENT
+        V_AGENT -->|"上报 (产出/ref/done)"| V_GLOBAL
+        V_L0["L0 HBM ── agent 注册+分slot, 全局记位置"]
+        V_L1["L1 DRAM ── agent 注册/serve, 全局记位置"]
+        V_L2["L2 NVMe ── agent serve, 全局记位置"]
+        V_L3["L3 对象 ── 全局直接管"]
+        V_AGENT -.- V_L0
+        V_L0 --- V_L1 --- V_L2 --- V_L3
+    end
+```
+
 | 层级 | 介质 | 容量 | 延迟 | 角色 | 管理主体 |
 |------|------|------|------|------|----------|
 | L0 | GPU/NPU HBM | 极小 | ~ns | 池放置的计算载体(易失,缓存) | 存储池(元数据强一致,物理载体在计算节点) |
