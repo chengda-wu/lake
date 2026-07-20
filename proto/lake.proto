@@ -136,7 +136,7 @@ message LocateResponse {
 // --- 满块注册 ---
 message RegisterBlocksRequest {
   string node_id                 = 1;
-  repeated lake.BlockMeta blocks = 2;  // 写完 durable 后调(两阶段)
+  repeated lake.BlockMeta blocks = 2;  // agent 写完 L2 durable 后上报(单次=PutEnd,见上方 RPC 注释)
 }
 
 // --- 请求屏障 ---
