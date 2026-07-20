@@ -156,9 +156,9 @@ lake/
 ```
 
 ### 接口边界（P2 定稿）
-- [ ] `proto/lake.proto`：Router↔Worker、Worker↔KVPool、Router↔ControlPlane 的 RPC 定义
-- [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格
-- [ ] KVBlockID / 元数据 schema 定稿（与 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) 对齐）
+- [x] `proto/schema.proto`：KVBlockID / Location / BlockMeta schema（#2，见 [PR #16](https://github.com/chengda-wu/lake/pull/16)）
+- [x] `proto/lake.proto`：RPC 边界草稿——ControlPlaneService（边3/4/5）/ AgentService（边10）/ TransferService（边7/8），KV 字节走 RDMA 旁路、worker↔agent 走 FFI 不进 proto
+- [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格（`TransferRequest` 控制信令已定，字节布局待 #2/传输引擎落地）
 
 ### 转 P2 切入建议
 

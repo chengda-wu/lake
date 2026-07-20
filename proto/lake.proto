@@ -1,0 +1,226 @@
+syntax = "proto3";
+
+package lake;
+
+import "schema.proto";
+
+// RPC 边界草稿（#3 通信边 + 00-plan.md:167 三组接口）。
+//
+// 原则:KV 字节走 RDMA 旁路(边7/8),proto 只定义控制 msg(查询/命令/元数据/完成回执)。
+// worker ↔ in-process agent 同进程走 FFI(边6,PyO3),不进 proto。
+//
+// 4 个 service 按通信边划分:
+//   ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面
+//   AgentService        — 边10:Router/控制面 → agent
+//   TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路)
+//
+// 参考:
+//   - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
+//   - vLLM KVConnectorBase_V1(worker↔池接入点、异步作业 submit_load/store/get_finished、layer-wise)
+//   - Mooncake transfer-engine(allocateBatchID/submitTransfer/getTransferStatus)+ store(PutStart/PutEnd 两阶段、MountSegment/lease)
+//   - SGLang match_prefix(LookupPrefix 蓝本)+ prefetch 三策略(Pull 预算/可中断)+ on_publish layer-wise + agent_hints(Dispatch)
+
+// =============================================================================
+// ControlPlaneService — 边3/4/5:Router + agent ↔ 存储控制面
+// =============================================================================
+service ControlPlaneService {
+  // 边3/4:订阅位置视图 live 镜像(Router 与 agent 同协议、不同订阅者,#3 已定)。
+  //   事件形态参考 vLLM BlockStored/BlockRemoved、Mooncake Conductor 订阅事件。
+  //   单权威 → 单流 sequence + gap replay(见 control-plane.md「粒度与协议」)。
+  rpc SubscribeView(SubscribeRequest) returns (stream ViewUpdate);
+
+  // Router 选路查询:输入 (model_id, 前缀 block hashes),输出可复用 block 列表 + 位置 + 本地命中。
+  //   读镜像(最终一致,零 RPC 常态;镜像不可信时回退查权威)。仿 SGLang match_prefix 的集群版。
+  //   对应 plan「Router↔池一次查询 RPC」。
+  rpc LookupPrefix(LookupPrefixRequest) returns (LookupPrefixResponse);
+
+  // agent 搬 KV:同步查权威树(线性一致)。常态走镜像/本地 slot 不查,仅镜像不可信时查
+  //   (见 kv-cache-pool.md「搬 KV 查权威分层」)。
+  rpc Locate(LocateRequest) returns (LocateResponse);
+
+  // 满块注册:两阶段写(仿 Mooncake PutStart/PutEnd),写完 durable 才注册,防半块被读。
+  //   release 一致,写控制面内存,不进 etcd。
+  rpc RegisterBlocks(RegisterBlocksRequest) returns (Ack);
+
+  // 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
+  rpc RequestBarrier(RequestBarrierRequest) returns (Ack);
+
+  // lease:节点 mount/unmount segment + 续命(仿 Mooncake MountSegment/UnmountSegment + client_live_ttl_sec)。
+  rpc Lease(stream LeaseHeartbeat) returns (stream LeaseAck);
+}
+
+// =============================================================================
+// AgentService — 边10:Router/控制面 → agent
+// =============================================================================
+service AgentService {
+  // 边10:Router 选好模式+节点后,下发调度指令给目标 agent(组 batch)。
+  //   携带 hints(agent_hints/kv_hints),与 #13 Bifrost 透传对齐(仿 SGLang #21846 agent_hints)。
+  rpc Dispatch(DispatchRequest) returns (Ack);
+
+  // 边10:agent 上报负载(队列长度/in-flight/剩余容量),供过载信号 P7 对接 Bifrost。
+  rpc ReportLoad(stream LoadReport) returns (Ack);
+
+  // 控制面 → agent:补拉放置(缺失 KV 放到指定节点 HBM,方案 Z 单向耦合)。
+  rpc PlaceBlocks(PlaceBlocksRequest) returns (Ack);
+}
+
+// =============================================================================
+// TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+// =============================================================================
+service TransferService {
+  // 仿 Mooncake:allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus。
+  rpc SubmitTransfer(TransferBatchRequest) returns (TransferBatchAck);
+  rpc GetTransferStatus(TransferStatusRequest) returns (TransferStatusResponse);
+
+  // 引擎契约:pull(block_ids) 返回 handle,publish(逐层增量)上报产出。
+  //   跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
+  //   Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
+  rpc Pull(PullRequest) returns (PullResponse);
+  rpc Publish(PublishRequest) returns (Ack);
+}
+
+// =============================================================================
+// Messages
+// ==================================================================
+
+// --- 订阅视图(边3/4) ---
+message SubscribeRequest {
+  string subscriber_id  = 1;   // Router 实例 / agent 实例
+  uint64 resume_from_seq = 2;  // 断线重连:"resume from seq N"(见 control-plane.md「粒度与协议」)
+}
+message ViewUpdate {
+  uint64 seq = 1;                       // 单流序号(单权威退化为单 publisher)
+  repeated ViewEvent events = 2;        // 增量事件(block 注册/失效/迁移)
+}
+message ViewEvent {
+  enum Kind { REGISTERED = 0; INVALIDATED = 1; MOVED = 2; }
+  Kind kind       = 1;
+  lake.BlockMeta block = 2;             // 复用 schema.proto
+}
+
+// --- LookupPrefix(Router 选路) ---
+message LookupPrefixRequest {
+  string model_id             = 1;
+  repeated bytes prefix_hashes = 2;   // 前缀 block hash 链(沿 radix 匹配)
+  string requester_node_id    = 3;   // 判定 local_hit 用
+}
+message LookupPrefixResponse {
+  repeated ReusableBlock blocks = 1;  // 沿前缀匹配的连续 block 列表
+  uint32 hit_length              = 2;  // 命中到第几个 block(仿 SGLang host_hit_length)
+  bool all_local_hit             = 3;  // 全在 requester HBM → D-direct
+}
+message ReusableBlock {
+  lake.KVBlockID id       = 1;
+  lake.BlockMeta meta     = 2;
+  bool local_hit          = 3;   // 该 block 已在 requester HBM
+}
+
+// --- Locate(agent 搬 KV 查权威) ---
+message LocateRequest {
+  repeated lake.KVBlockID ids = 1;
+}
+message LocateResponse {
+  repeated lake.BlockMeta blocks = 1;
+}
+
+// --- 满块注册 ---
+message RegisterBlocksRequest {
+  string node_id                 = 1;
+  repeated lake.BlockMeta blocks = 2;  // 写完 durable 后调(两阶段)
+}
+
+// --- 请求屏障 ---
+message RequestBarrierRequest {
+  string request_id = 1;
+  string node_id    = 2;
+}
+
+// --- lease ---
+message LeaseHeartbeat {
+  enum Op { MOUNT = 0; UNMOUNT = 1; KEEPALIVE = 2; }
+  Op op               = 1;
+  string node_id      = 2;
+  uint64 segment_id   = 3;   // 挂摘的段
+  uint64 segment_len  = 4;
+}
+message LeaseAck {
+  bool granted     = 1;
+  uint64 ttl_ms    = 2;
+}
+
+// --- Dispatch(边10 调度指令) ---
+message DispatchRequest {
+  string mode                       = 1;   // PD_SEPARATED | COLOCATED | D_DIRECT
+  string target_node_id             = 2;
+  repeated lake.KVBlockID reuse_blocks = 3;
+  map<string, string> hints         = 4;   // agent_hints/kv_hints(与 #13 透传对齐)
+}
+message LoadReport {
+  string node_id       = 1;
+  uint32 queue_len     = 2;
+  uint32 in_flight     = 3;
+  uint32 remaining_cap = 4;
+}
+
+// --- PlaceBlocks(补拉放置) ---
+message PlaceBlocksRequest {
+  repeated lake.KVBlockID ids = 1;
+  string target_node_id       = 2;   // 放到哪个节点 HBM
+}
+
+// --- 传输(边7/8 控制信令) ---
+message TransferBatchRequest {
+  repeated TransferRequest reqs = 1;
+}
+message TransferRequest {
+  lake.Location source            = 1;   // 源位置(L0/L1/L2 段式)
+  uint64 target_segment_id        = 2;   // 目标段
+  uint64 target_offset            = 3;
+  uint64 length                   = 4;
+}
+message TransferBatchAck {
+  uint64 batch_id = 1;
+}
+message TransferStatusRequest {
+  uint64 batch_id = 1;
+  uint64 task_id  = 2;
+}
+message TransferStatusResponse {
+  enum State { PENDING = 0; IN_FLIGHT = 1; DONE = 2; FAILED = 3; }
+  State state      = 1;
+  uint64 bytes_done = 2;
+}
+
+// --- Pull / Publish(引擎契约) ---
+message PullRequest {
+  repeated lake.KVBlockID ids = 1;
+  PullPolicy policy           = 2;   // 仿 SGLang can_terminate_prefetch 三策略
+  uint32 budget_ms            = 3;   // 超时预算(仿 SGLang base + per_ki_token)
+  string requester_node_id    = 4;
+}
+enum PullPolicy {
+  PULL_BEST_EFFORT  = 0;   // 传多少算多少,可中断
+  PULL_WAIT_COMPLETE = 1;  // 传完才返回
+  PULL_TIMEOUT       = 2;  // 超预算即停,返回已传
+}
+message PullResponse {
+  uint64 handle        = 1;   // agent wait ready 用
+  uint32 pulled_length = 2;   // 实际拉到的 block 数
+  bool completed       = 3;
+}
+message PublishRequest {
+  repeated LayerSlice slices = 1;   // 逐层增量(page_first_direct),非整块
+  uint32 seq                  = 2;  // 仿 SGLang on_publish(seq) overlap fence
+}
+message LayerSlice {
+  lake.KVBlockID id = 1;
+  uint32 layer_idx  = 2;
+  uint64 offset     = 3;
+  uint64 length     = 4;
+}
+
+// --- 通用 ---
+message Ack {
+  bool ok    = 1;
+  string err = 2;
+}
