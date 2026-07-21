@@ -27,17 +27,23 @@ python3 -m grpc_tools.protoc \
 # grpcio-tools 默认按 proto 文件名生成顶层 import;改成包内引用。
 # schema_pb2 被 lake_pb2 import —— 改成 from lake_pb import schema_pb2
 # 注意:patch 段用相对路径,须在仓库根执行(否则静默不 patch → 生成坏 import)。
+# 幂等性:锚定行首 \nimport(只匹配生成器产出的裸 import 行),且替换串不含被匹配子串,
+#   重跑不会叠加成 "from lake_pb from lake_pb ..."。
 cd "$ROOT"
 python3 - <<'PY'
 from pathlib import Path
 pb_dir = Path("python/lake_pb")
 for path in pb_dir.glob("*_pb2*.py"):
     text = path.read_text()
-    # lake_pb2.py: import schema_pb2 as schema__pb2  → from lake_pb import schema_pb2 as schema__pb2
-    text2 = text.replace("import schema_pb2 as schema__pb2", "from lake_pb import schema_pb2 as schema__pb2")
-    # *_pb2_grpc.py: import lake_pb2 as lake__pb2 → from lake_pb import lake_pb2 as lake__pb2
-    text2 = text2.replace("import lake_pb2 as lake__pb2", "from lake_pb import lake_pb2 as lake__pb2")
-    text2 = text2.replace("import schema_pb2 as schema__pb2", "from lake_pb import schema_pb2 as schema__pb2")
+    # 行首裸 import → 包内引用(每个模式只 replace 一次,勿重复)。
+    text2 = text.replace(
+        "\nimport schema_pb2 as schema__pb2",
+        "\nfrom lake_pb import schema_pb2 as schema__pb2",
+    )
+    text2 = text2.replace(
+        "\nimport lake_pb2 as lake__pb2",
+        "\nfrom lake_pb import lake_pb2 as lake__pb2",
+    )
     if text2 != text:
         path.write_text(text2)
         print(f"  patched imports: {path}")

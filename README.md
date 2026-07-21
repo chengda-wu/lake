@@ -59,7 +59,7 @@
 ```
 
 - **存储池四层**（层 = 介质，不是位置）：HBM → DRAM → NVMe → 对象存储，逐 tier 池化、热冷 promotion/demotion。DRAM/NVMe 各是一层、一个池，block 放本机还是远端 KV Node 由池放置决定（同 L0 放哪个节点 HBM），不按位置拆层。L2（NVMe）= F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关），L3 = SSOT；物理载体分布不同，但元数据全归存储池统一管理，计算节点不拥有任何一层。
-- **in-process agent**：存储池在每个计算节点的本地端点（Rust `.so`，in-process）——组装 block table、发起/接收跨实例传输、注册本地内存、持本地视图镜像（零 RPC 决策）。全局权威（位置视图 / radix / ref 汇总）在控制面 etcd，本地镜像是其推送副本。
+- **in-process agent**：存储池在每个计算节点的本地端点（Rust `.so`，in-process）——组装 block table、发起/接收跨实例传输、注册本地内存、持本地视图镜像（零 RPC 决策）。全局权威（位置视图 / radix / ref 汇总）在 Rust 存储控制面进程内存（etcd 只存降频 checkpoint + lease），本地镜像是其推送副本。
 - **KV 流转三方向**（以 KV 为中心，存储池不区分 P/D）：
   - **P→D** 服务本次（PD 分离正向：产出 → 消费）
   - **D→池** 服务未来（decode 延伸前缀反向回传，radix 生长）
@@ -73,12 +73,12 @@
 | 模块 | 语言 | 职责 |
 |------|------|------|
 | **Gateway** | 外部(Bifrost) | 鉴权 / 限流 / 入口准入 / 过载 shedding（进/不进；去哪归 Router）；不自研，见 [`docs/architecture/control-plane.md`](docs/architecture/control-plane.md)「Gateway 对接约定」 |
-| **Router** | Go | 无状态路由 + 模式选择纯函数 `f(请求,集群状态)→(模式,节点)`，零 RPC 读本地命中视图镜像 |
 | **计算层**（Prefill/Decode/Draft） | Python+Triton | 前向计算（graph replay），引擎零分层逻辑，只消费 ready→算→发 done |
 | **in-process agent** | Rust | 存储池在计算节点的本地端点：组装 block table / 发起传输 / 注册本地内存 / 持本地视图镜像（零 RPC） |
-| **存储池** | Rust | 统一管理 L0–L3：放置 / 冷热 / 生命周期 / radix 前缀索引 / 位置视图 / 配额 / GC / 碎片整理 |
+| **存储池** | Rust | 统一管理 L0–L3：放置 / 冷热 / 生命周期 / radix 前缀索引 / 配额 / GC / 碎片整理 |
+| **存储控制面** | Rust + etcd | 位置视图权威（进程内存强一致）/ radix / 引用汇总 / 节点拓扑 / 负载视图；etcd 只存降频 checkpoint + lease |
 | **传输引擎** | Rust | 跨实例 KV 传输（RDMA 零拷贝），池 agent 发起；多 NIC 聚合 + TCP 退化 |
-| **控制面** | Go + etcd | 强一致位置视图 / radix / 引用汇总 / 节点拓扑 / 负载视图 |
+| **请求控制面** | Go | Router 无状态路由 + 模式选择（含集群级调度，无独立 Scheduler 进程），零 RPC 读本地命中视图镜像 |
 
 ### 关键特性
 
@@ -102,7 +102,7 @@
 
 ## 路线图
 
-先看 [`docs/00-plan.md`](docs/00-plan.md) —— 依次要做的事情与技术选型（存储 Rust / 控制 Go / 计算 Python+Triton）。
+先看 [`docs/00-plan.md`](docs/00-plan.md) —— 依次要做的事情与技术选型（存储+存储控制面 Rust / 请求控制面 Go / 计算 Python+Triton）。
 
 **当前阶段**：P0 特性设计 ✅ → P1 架构设计 ✅ → P2 模块划分与技术选型（进行中）。
 

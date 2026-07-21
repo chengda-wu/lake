@@ -58,7 +58,8 @@ docs/
    | 层 | 语言 |
    |----|------|
    | 存储层（KV Pool / Weight Cache / Tiered Store） | Rust |
-   | 控制面（Router / Scheduler / 元数据） | Go |
+   | 存储控制面（位置视图权威 / radix / 配额·GC / etcd checkpoint） | Rust |
+   | 请求控制面（Router，含集群级调度，无独立 Scheduler） | Go |
    | 计算层（Prefill / Decode / Draft） | Python + Triton |
    | 元数据 | etcd · SSOT 用 S3/MinIO · 跨语言 RPC 用 gRPC+Protobuf（大块 KV 走 RDMA 旁路） |
 
