@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+      # tonic-build(build.rs)调 protoc 在线生成 stub,CI 需装 protoc。
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
