@@ -166,15 +166,44 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 | 放置/调度边界 | (我们的方案 Z,原创) | 存储池主动放置 + 调度器单向消费 |
 | **编排层/控制面** | **Dynamo**(KVBM logical/physical/engine + KV-aware router) | 位置视图进 etcd 强一致(Dynamo 走 NATS 事件流);HBM 归池而非 engine offload;Rust 存储控制面 + Go 调度控制面分工(Dynamo 单一 Rust 编排) |
 
+## 代码级复用策略（按模块，互不替代）
+
+`3rdparty/` 默认是**设计/算法参考**。进入实现后，**优先真复用**的只有两条，且落在**不同 lake 模块**——不能互相顶替，也不等于整仓依赖 submodule：
+
+| # | 复用来源 | 落点（lake 模块） | 复用什么 | 不复用 / 自建 |
+|---|----------|-------------------|----------|---------------|
+| A | **Mooncake transfer-engine**（[+ 可选 mooncake-store 作介质后端]） | `rust/transfer`（Transfer Bus）；字节后端可挂 `rust/kv-pool` / `tiered-store` | RDMA/多 NIC 零拷贝传输骨架；store 仅作 L2/L3 **不透明字节**载体 | 内容寻址、radix、L0 归属、位置视图权威 |
+| B | **Dynamo KVBM logical**（`BlockRegistry` / `PositionalRadixTree` / `BlockManager` 等；宜 fork 抽 crate） | `rust/kv-pool` + `rust/controlplane`（池内索引、分层块管理、presence） | 前缀 radix、每层 block 池、presence markers、可插拔驱逐索引 | G1「引擎外拥 HBM」、demote-only offload、NATS 弱一致事件；lake 补 **L0 归池** + **promote** + **etcd 强一致视图** |
+
+关系（正交）：
+
+```
+请求路径上的 KV 字节搬迁  ──(A)──►  Mooncake TE     →  rust/transfer
+前缀命中 / 层内块生命周期 ──(B)──►  Dynamo kvbm-*   →  rust/kv-pool · controlplane
+```
+
+- **A 不管「这块 KV 算不算前缀命中」**；**B 不管「跨节点怎么 RDMA 搬字节」**。
+- Dynamo `kvbm-physical::TransferManager` 是**抽象**，生产数据面仍优先接 A（Mooncake TE），避免两套传输栈。
+- 其余（SGLang HiCache 策略、LMCache 后端思路、vLLM `KVConnectorBase_V1`、Dynamo kv-router 选路公式）继续以**借鉴/对照**为主，默认不链进依赖树；计算层（P5）再评估 vLLM/SGLang 引擎经 connector 接入。
+
+**现状（P3）**：零代码级复用——ControlPlane / SkeletonKv / Agent / Router / Worker 均为自研联通骨架；上表从 **P4** 起落地。约定仍适用：`3rdparty/` 只读，改造先 fork 换 URL（见下「submodule 使用约定」）。
+
+锚点（复用时回溯）：
+
+- A：`3rdparty/mooncake/mooncake-transfer-engine/`（见 [`mooncake/transfer-engine.md`](mooncake/transfer-engine.md)）
+- B：`PositionalRadixTree` / `BlockManager` — `3rdparty/dynamo/lib/kvbm-logical/`（符号表见下节）
+
 ## 实现参考顺序建议
 
-P4(KV Pool 原型,Rust)时按此顺序参考源码:
-1. **Mooncake transfer-engine**:先抄 RDMA 零拷贝传输骨架 → 我们的 Transfer Bus。
-2. **Mooncake store + LMCache storage_backends**:KV store 分片/后端 → 我们 L3 + L2/NVMe。
-3. **SGLang HiCache HiRadixTree + page_first_direct**:radix 节点记位置 + 布局 → 我们 `locations` 元数据 + 分块流水线。
-4. **SGLang HiCache prefetch/write-back 策略**:迁移触发与写回频率 → 我们冷热迁移 + decode 写回 N。
-5. **LMCache rust/ + 跨实例复用**:Rust 存储层工程模式 + 复用场景验证。
-6. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**:计算层 worker 接入存储池的接口形态 + layer-wise save/load 流水线 + block table 维护 → 我们 Python worker 的 runtime client 与执行循环。
+P4(KV Pool 原型,Rust)时按此顺序；**1 与「Dynamo KVBM」分属上表 A/B，并行不替代**：
+
+1. **Mooncake transfer-engine**（代码复用 A）：RDMA 零拷贝 → `rust/transfer` Transfer Bus。
+2. **Dynamo kvbm-logical**（代码复用 B，fork 抽 crate）：radix + `BlockManager`/`presence_markers` → `kv-pool` / controlplane；补 L0 + promote。
+3. **Mooncake store + LMCache storage_backends**：KV store 分片/后端 → L3 + L2/NVMe（字节层；寻址仍归 B）。
+4. **SGLang HiCache HiRadixTree + page_first_direct**：节点记位置 + 布局策略 → `locations` 元数据 + 分块流水线（对照 B，非第二套树）。
+5. **SGLang HiCache prefetch/write-back 策略**：迁移触发与写回频率 → 冷热迁移 + decode 写回 N。
+6. **LMCache rust/ + 跨实例复用**：Rust 存储层工程模式 + 复用场景验证。
+7. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**（偏 P5）：worker ↔ 存储池 client 形态 + layer-wise 流水线。
 
 ### Dynamo 参考补充(编排层/控制面,跨阶段)
 
