@@ -4,9 +4,16 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "lake-controlplane"
+path = "src/main.rs"
+
 [dependencies]
 lake-proto.workspace = true
 tonic.workspace = true
+tokio.workspace = true
+tokio-stream = { workspace = true }
+prost.workspace = true
 
-# 空壳:存储控制面(位置视图权威进程)。P2 仅验证 proto 生成 + 编译。
-# 实现 ControlPlaneService(边3/4/5);权威在进程内存,etcd 降频 checkpoint。
+# P3:ControlPlaneService 内存权威(RegisterBlocks / LookupPrefix / Locate / RequestBarrier)。
+# SubscribeView / Lease 返回未实现;P4+ 补。
