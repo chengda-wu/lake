@@ -1,6 +1,6 @@
 """P3 mock worker:LookupPrefix → SkeletonKv Get/Put → RegisterBlocks → mock decode.
 
-生产路径:Router Dispatch → agent → FFI 引擎。P3 用 WorkerService.Generate 直连。
+生产路径:Router Dispatch → agent → FFI 引擎。P3 由 Router 先 Dispatch(agent ack)再调 WorkerService.Generate。
 参考:vLLM KVConnectorBase_V1(worker↔池 Get/Put 必须校验);早期 src/ 前缀复用冒烟。
 """
 
