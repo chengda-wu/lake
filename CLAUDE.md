@@ -116,7 +116,7 @@ docs/
 
 > 参考实现：SGLang HiCache `hiradix_cache.py::prefetch_from_storage` + `can_terminate_prefetch`。
 > 值得参考：timeout 预算公式 `base + per_ki_token * num_tokens/1024` 可直接用于我们 prefetch 预算模型；三策略（best_effort/wait_complete/timeout）对应我们"被动兜底读 miss 回填"的终止语义。
-> 关键差异：SGLang 实时查后端 `batch_exists`（弱一致），我们由控制面 etcd 维护强一致位置视图，一跳命中，省掉每次访问的 RPC。
+> 关键差异：SGLang 实时查后端 `batch_exists`（弱一致），我们由 Rust 存储控制面进程内存维护强一致位置视图（etcd 只存降频 checkpoint），一跳命中，省掉每次访问的 RPC。
 
 不涉及任何参考实现时（纯本项目内部讨论、无对应参考）也要**显式说明**「本项无直接参考实现」，而不是省略——省略会被当成漏查。
 
