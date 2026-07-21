@@ -1,0 +1,87 @@
+# 三语言空壳编译/生成验证(见 PR #17 review follow-up:加 CI 防 drift)。
+# Rust workspace 编译(tonic 在线生成 stub);Go module 编译;Python stub + worker 包 import。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      # tonic-build(build.rs)调 protoc 在线生成 stub,CI 需装 protoc。
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo build --workspace
+      # storage-agent 双角色 feature 各自可单独编译(默认全开;部署期只开其一)。
+      - run: cargo build -p lake-storage-agent --no-default-features --features compute
+      - run: cargo build -p lake-storage-agent --no-default-features --features kvnode
+      # 格式 + lint 防回归(P3 代码阶段前的质量门)。
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - run: go build ./...
+      # 格式 + vet 防回归。
+      - run: gofmt -l . | tee /dev/stderr | (! read)  # 有输出即失败
+      - run: go vet ./...
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 setup.py)。
+      # 装运行时依赖即可,空壳阶段不 pip install -e .(PEP 668 机器会炸;
+      # worker 包就在 python/ 下,PYTHONPATH 直接 import,与本地验证一致)。
+      - run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0"
+      - run: PYTHONPATH=. python -c "from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2; import prefill, decode, draft, kernels, runtime; print('py OK')"
+
+  # stub drift:重生成 Go/Python stub 后 git diff --exit-code。
+  # 拦「proto 改了没重生成 stub」与「工具版本漂移致生成物变」(见 PR #17 review #4)。
+  # 插件版本钉到 gen_stubs.sh 头注释一致;protoc 用 apt,靠 git diff 检测输出一致性。
+  stub-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - run: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install grpcio-tools==1.82.1
+      - run: bash scripts/gen_stubs.sh
+      - run: git diff --exit-code

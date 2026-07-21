@@ -1,12 +1,35 @@
 #!/usr/bin/env bash
 # 从 proto/ 重新生成 Go / Python gRPC stub(入仓)。
 # Rust 走 tonic-build 在线生成,不入仓——改 proto 后 `cd rust && cargo build` 即可。
+#
+# 工具链版本(钉到生成当前入仓 stub 的版本,防他机重生成 drift,见 PR #17 review follow-up):
+#   protoc              3.21.12
+#   protoc-gen-go       1.36.11
+#   protoc-gen-go-grpc  1.6.2
+#   grpcio-tools        1.82.1   (生成 *_pb2.py;runtime 需 grpcio>=1.82.1 / protobuf>=7.35.0,见 python/setup.py)
+# 建议用这些版本重生成;版本不符时生成物可能 diff,提交前 `git diff` 核对。
+# 设 LAKE_GEN_STUBS_STRICT=1 时版本不符直接退出(CI/发版用);默认仅告警。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROTO_DIR="$ROOT/proto"
 GO_OUT="$ROOT/go"
 PY_OUT="$ROOT/python"
+
+_check_ver() {
+  local name="$1" got="$2" expect="$3"
+  if [[ "$got" != *"$expect"* ]]; then
+    echo "WARN: $name version='$got' (expect contain $expect)" >&2
+    if [[ "${LAKE_GEN_STUBS_STRICT:-0}" == "1" ]]; then
+      echo "ERROR: LAKE_GEN_STUBS_STRICT=1, abort" >&2
+      exit 1
+    fi
+  fi
+}
+_check_ver "protoc" "$(protoc --version 2>/dev/null || true)" "3.21"
+_check_ver "protoc-gen-go" "$(protoc-gen-go --version 2>/dev/null || true)" "1.36"
+_check_ver "protoc-gen-go-grpc" "$(protoc-gen-go-grpc --version 2>/dev/null || true)" "1.6"
+_check_ver "grpcio-tools" "$(python3 -c 'import grpc_tools; import importlib.metadata as m; print(m.version("grpcio-tools"))' 2>/dev/null || true)" "1.82"
 
 echo "==> Go: protoc → go/pb/"
 mkdir -p "$GO_OUT/pb"

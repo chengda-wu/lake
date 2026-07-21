@@ -1,2 +1,2 @@
 /target
-Cargo.lock
+# Cargo.lock 入仓:应用型 workspace 提交 lockfile 保可复现(见 PR #17 review follow-up)。

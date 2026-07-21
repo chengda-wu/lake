@@ -1,10 +1,24 @@
 // 存储池 agent 空壳(单 crate 双角色 feature:计算侧 / KV Node,见 kv-cache-pool.md)。
 // 实现 AgentService(边10) + TransferService(边7/8) 控制信令。
-// P2:仅验证能引用 lake-proto 生成的类型编译通过。
+// P2:仅验证能引用 lake-proto 生成的类型编译通过;feature 门控角色占位模块。
 pub use lake_proto::lake::*;
 
 pub const AGENT_SERVICE: &str = "lake.AgentService";
 pub const TRANSFER_SERVICE: &str = "lake.TransferService";
+
+/// 计算节点侧能力占位(FFI / mirror / block table / fence / slot)。
+/// 实现期在此模块挂计算侧独有逻辑;部署只开 `compute` feature。
+#[cfg(feature = "compute")]
+pub mod compute {
+    pub const ROLE: &str = "compute";
+}
+
+/// KV Node 侧能力占位(NVMe serve / bounce)。
+/// 实现期在此模块挂 KV Node 独有逻辑;部署只开 `kvnode` feature。
+#[cfg(feature = "kvnode")]
+pub mod kvnode {
+    pub const ROLE: &str = "kvnode";
+}
 
 // 编译期锚定:引用具体生成符号,防 proto 改名/删字段后 Rust 仍编译通过(Go/Python 已锚定)。
 // 消息类型取 default();server struct 用类型别名引用(不构造实例,别名即编译期依赖)。
