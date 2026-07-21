@@ -23,14 +23,16 @@ import (
 type Config struct {
 	HTTPAddr   string // 默认 :8080
 	WorkerAddr string // WorkerService,默认 127.0.0.1:50053
+	AgentAddr  string // AgentService(边10 Dispatch),默认 127.0.0.1:50054
 }
 
-// Server OpenAI 兼容 HTTP → gRPC Worker.Generate。
+// Server OpenAI 兼容 HTTP → Dispatch(agent) → Generate(worker)。
 // P3 入口即本服务(边2);不经 Bifrost。
-// LookupPrefix 在 worker 侧完成(直连 ControlPlane),Router 不持 CP client。
+// LookupPrefix 在 worker 侧完成(直连 ControlPlane)。
 type Server struct {
 	cfg    Config
 	worker lakepb.WorkerServiceClient
+	agent  lakepb.AgentServiceClient
 }
 
 func New(cfg Config) (*Server, error) {
@@ -40,13 +42,21 @@ func New(cfg Config) (*Server, error) {
 	if cfg.WorkerAddr == "" {
 		cfg.WorkerAddr = "127.0.0.1:50053"
 	}
+	if cfg.AgentAddr == "" {
+		cfg.AgentAddr = "127.0.0.1:50054"
+	}
 	wconn, err := grpc.NewClient(cfg.WorkerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("dial worker: %w", err)
 	}
+	aconn, err := grpc.NewClient(cfg.AgentAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("dial agent: %w", err)
+	}
 	return &Server{
 		cfg:    cfg,
 		worker: lakepb.NewWorkerServiceClient(wconn),
+		agent:  lakepb.NewAgentServiceClient(aconn),
 	}, nil
 }
 
@@ -61,7 +71,8 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) ListenAndServe() error {
-	log.Printf("lake-router OpenAI HTTP on %s → worker %s", s.cfg.HTTPAddr, s.cfg.WorkerAddr)
+	log.Printf("lake-router OpenAI HTTP on %s → agent %s → worker %s",
+		s.cfg.HTTPAddr, s.cfg.AgentAddr, s.cfg.WorkerAddr)
 	return http.ListenAndServe(s.cfg.HTTPAddr, s.Handler())
 }
 
@@ -87,7 +98,6 @@ type chatResponse struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	// lake 扩展:前缀复用统计(冒烟用)
 	Lake struct {
 		ReusedBlocks  uint32 `json:"reused_blocks"`
 		PrefillBlocks uint32 `json:"prefill_blocks"`
@@ -132,15 +142,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rid := uuid.NewString()
+	nodeID := "worker-0"
+
+	// 边10:先 Dispatch 到 agent(P3 仅 ack;执行仍在 Worker.Generate)。
+	ack, err := s.agent.Dispatch(ctx, &lakepb.DispatchRequest{
+		Mode:         "COLOCATED",
+		TargetNodeId: nodeID,
+		Hints:        map[string]string{"request_id": rid, "model_id": model},
+	})
+	if err != nil {
+		code, msg := mapGRPCError("Dispatch", err)
+		http.Error(w, msg, code)
+		return
+	}
+	if !ack.GetOk() {
+		http.Error(w, "Dispatch rejected: "+ack.GetErr(), http.StatusBadGateway)
+		return
+	}
+
 	gen, err := s.worker.Generate(ctx, &lakepb.GenerateRequest{
 		RequestId:       rid,
 		ModelId:         model,
 		PromptTokens:    tokens,
 		MaxNewTokens:    uint32(maxNew),
-		RequesterNodeId: "worker-0",
+		RequesterNodeId: nodeID,
 	})
 	if err != nil {
-		code, msg := mapGRPCError(err)
+		code, msg := mapGRPCError("Generate", err)
 		http.Error(w, msg, code)
 		return
 	}
@@ -172,12 +200,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func mapGRPCError(err error) (httpStatus int, msg string) {
+func mapGRPCError(op string, err error) (httpStatus int, msg string) {
 	st, ok := status.FromError(err)
 	if !ok {
-		return http.StatusBadGateway, "Generate: " + err.Error()
+		return http.StatusBadGateway, op + ": " + err.Error()
 	}
-	msg = fmt.Sprintf("Generate: %s", st.Message())
+	msg = fmt.Sprintf("%s: %s", op, st.Message())
 	switch st.Code() {
 	case codes.InvalidArgument:
 		return http.StatusBadRequest, msg

@@ -1,0 +1,74 @@
+name: p3
+
+on:
+  push:
+    branches: [main, feat/p3-min-skeleton]
+  pull_request:
+    paths:
+      - "proto/**"
+      - "rust/**"
+      - "go/**"
+      - "python/**"
+      - "deploy/**"
+      - "scripts/verify-p3.sh"
+      - ".github/workflows/p3.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python grpc deps
+        run: pip install "grpcio>=1.60" "protobuf>=5.26"
+      - name: verify-p3
+        run: ./scripts/verify-p3.sh
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python grpc deps
+        run: pip install "grpcio>=1.60" "protobuf>=5.26"
+      - name: start stack
+        run: |
+          ./deploy/run-local.sh &
+          echo $! > /tmp/lake-stack.pid
+          for i in $(seq 1 120); do
+            if curl -sf http://127.0.0.1:8080/healthz >/dev/null; then
+              echo "router ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "stack failed to become ready"
+          exit 1
+      - name: smoke
+        run: ./deploy/smoke.sh
+      - name: stop stack
+        if: always()
+        run: |
+          if [[ -f /tmp/lake-stack.pid ]]; then
+            kill "$(cat /tmp/lake-stack.pid)" 2>/dev/null || true
+          fi
+          # 子进程可能仍占端口
+          pkill -f lake-controlplane 2>/dev/null || true
+          pkill -f lake-kv-pool 2>/dev/null || true
+          pkill -f lake-storage-agent 2>/dev/null || true
+          pkill -f 'python3 -m runtime' 2>/dev/null || true
+          pkill -f lake-router 2>/dev/null || true
+          true

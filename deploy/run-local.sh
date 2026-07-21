@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P3 本地起全栈(无 Docker):controlplane + kv-pool + worker + router。
+# P3 本地起全栈(无 Docker):controlplane + kv-pool + storage-agent + worker + router。
 # 用法(仓库根):
 #   ./deploy/run-local.sh          # 前台,Ctrl-C 全停
 #   ./deploy/smoke.sh              # 另开终端打冒烟
@@ -11,6 +11,7 @@ export LAKE_CP_ADDR="${LAKE_CP_ADDR:-127.0.0.1:50051}"
 export LAKE_KV_ADDR="${LAKE_KV_ADDR:-127.0.0.1:50052}"
 export LAKE_WORKER_BIND="${LAKE_WORKER_BIND:-[::]:50053}"
 export LAKE_WORKER_ADDR="${LAKE_WORKER_ADDR:-127.0.0.1:50053}"
+export LAKE_AGENT_ADDR="${LAKE_AGENT_ADDR:-127.0.0.1:50054}"
 export LAKE_HTTP_ADDR="${LAKE_HTTP_ADDR:-:8080}"
 
 # 兼容 CARGO_TARGET_DIR 覆盖(如 CI/sandbox);不要写死 rust/target/debug。
@@ -56,7 +57,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # 端口必须空闲,避免连到上一次残留进程导致「假复用」。
-for port in 50051 50052 50053 8080; do
+for port in 50051 50052 50053 50054 8080; do
   if (echo >/dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1; then
     echo "ERROR: port $port already in use; stop the old stack first" >&2
     exit 1
@@ -64,9 +65,13 @@ for port in 50051 50052 50053 8080; do
 done
 
 echo "==> build rust bins → $RUST_DEBUG"
-(cd rust && cargo build -q -p lake-controlplane --bin lake-controlplane -p lake-kv-pool --bin lake-kv-pool)
+(cd rust && cargo build -q \
+  -p lake-controlplane --bin lake-controlplane \
+  -p lake-kv-pool --bin lake-kv-pool \
+  -p lake-storage-agent --bin lake-storage-agent)
 test -x "$RUST_DEBUG/lake-controlplane"
 test -x "$RUST_DEBUG/lake-kv-pool"
+test -x "$RUST_DEBUG/lake-storage-agent"
 
 echo "==> build go router → $GO_BIN"
 (cd go && go build -o "$GO_BIN" ./router/cmd/router)
@@ -81,6 +86,11 @@ LAKE_KV_ADDR=0.0.0.0:50052 "$RUST_DEBUG/lake-kv-pool" &
 PIDS+=($!)
 wait_tcp 127.0.0.1:50052 kv-pool
 
+echo "==> start storage-agent (Dispatch)"
+LAKE_AGENT_ADDR=0.0.0.0:50054 "$RUST_DEBUG/lake-storage-agent" &
+PIDS+=($!)
+wait_tcp 127.0.0.1:50054 storage-agent
+
 echo "==> start python worker"
 (
   cd python
@@ -90,7 +100,10 @@ PIDS+=($!)
 wait_tcp 127.0.0.1:50053 worker
 
 echo "==> start go router"
-LAKE_HTTP_ADDR="$LAKE_HTTP_ADDR" LAKE_WORKER_ADDR="$LAKE_WORKER_ADDR" "$GO_BIN" &
+LAKE_HTTP_ADDR="$LAKE_HTTP_ADDR" \
+LAKE_WORKER_ADDR="$LAKE_WORKER_ADDR" \
+LAKE_AGENT_ADDR="$LAKE_AGENT_ADDR" \
+"$GO_BIN" &
 PIDS+=($!)
 
 # HTTP 口可能是 :8080

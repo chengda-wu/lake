@@ -166,3 +166,48 @@ impl ControlPlaneService for ControlPlane {
         Ok(Response::new(stream))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(model: &str, hash: &[u8]) -> BlockMeta {
+        BlockMeta {
+            id: Some(KvBlockId {
+                model_id: model.into(),
+                block_hash: hash.to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            block_kind: BlockKind::TType as i32,
+            locations: vec![],
+            l3_present: false,
+            ref_count: 1,
+        }
+    }
+
+    #[test]
+    fn lookup_prefix_contiguous_then_gap() {
+        let mut auth = Authority::default();
+        auth.register(
+            "n0",
+            vec![meta("m", b"h0"), meta("m", b"h1"), meta("m", b"h2")],
+        );
+        // 中间缺 h1 → 只命中 h0
+        let (blocks, hit, local) =
+            auth.lookup_prefix("m", &[b"h0".to_vec(), b"gap".to_vec(), b"h2".to_vec()], "n0");
+        assert_eq!(hit, 1);
+        assert_eq!(blocks.len(), 1);
+        assert!(!local); // 仅 L2,无 L0
+    }
+
+    #[test]
+    fn lookup_prefix_full_hit_not_local_without_l0() {
+        let mut auth = Authority::default();
+        auth.register("n0", vec![meta("m", b"a"), meta("m", b"b")]);
+        let (_, hit, local) =
+            auth.lookup_prefix("m", &[b"a".to_vec(), b"b".to_vec()], "n0");
+        assert_eq!(hit, 2);
+        assert!(!local);
+    }
+}

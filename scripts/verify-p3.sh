@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> rust: controlplane + kv-pool bins"
-(cd rust && cargo build -q -p lake-controlplane --bin lake-controlplane -p lake-kv-pool --bin lake-kv-pool)
+echo "==> rust: bins + controlplane unit tests"
+(cd rust && cargo build -q \
+  -p lake-controlplane --bin lake-controlplane \
+  -p lake-kv-pool --bin lake-kv-pool \
+  -p lake-storage-agent --bin lake-storage-agent)
+(cd rust && cargo test -q -p lake-controlplane)
 
 echo "==> go: module"
 (cd go && go build ./...)
@@ -17,6 +21,7 @@ import runtime, prefill, decode
 from runtime.worker import chain_block_hashes, mock_kv_bytes
 assert hasattr(lake_pb2_grpc, 'WorkerServiceStub')
 assert hasattr(lake_pb2_grpc, 'SkeletonKvServiceStub')
+assert hasattr(lake_pb2_grpc, 'AgentServiceStub')
 h = chain_block_hashes(list(range(24)))
 assert len(h) == 3, h
 assert mock_kv_bytes(h[0]).startswith(b'KV:')
