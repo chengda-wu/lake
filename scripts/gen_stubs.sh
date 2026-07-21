@@ -6,7 +6,7 @@
 #   protoc              3.21.12
 #   protoc-gen-go       1.36.11
 #   protoc-gen-go-grpc  1.6.2
-#   grpcio-tools        1.82.1   (生成 *_pb2.py;runtime 需 grpcio>=1.82.1 / protobuf>=7.35.0,见 python/setup.py)
+#   grpcio-tools        1.82.1   (生成 *_pb2.py;runtime 需 grpcio>=1.82.1 / protobuf>=7.35.0,见 python/pyproject.toml)
 # 建议用这些版本重生成;版本不符时生成物可能 diff,提交前 `git diff` 核对。
 # 设 LAKE_GEN_STUBS_STRICT=1 时版本不符直接退出(CI/发版用);默认仅告警。
 set -euo pipefail

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lake"
+version = "0.0.0"
+# 版本下限对齐生成 stub:lake_pb2.py 校验 protobuf runtime ≥ 7.35.0(major 7),
+# lake_pb2_grpc.py 校验 grpcio ≥ 1.82.1。低于此 import 即炸,故钉到生成版本。
+dependencies = [
+    "grpcio>=1.82.1",
+    "protobuf>=7.35.0",
+]
+
+[tool.setuptools.packages.find]
+# 等价 setup.py 的 find_packages():python/ 下顶层包(prefill/decode/draft/
+# kernels/runtime/lake_pb)。包布局(归并为 lake 单包)留 P5 Python worker 大改时统一。
+include = ["prefill*", "decode*", "draft*", "kernels*", "runtime*", "lake_pb*"]

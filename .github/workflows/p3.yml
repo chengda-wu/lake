@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # 对齐 python/setup.py 与生成 stub 校验(grpcio≥1.82.1 / protobuf≥7.35.0)。
+      # 对齐 python/pyproject.toml 与生成 stub 校验(grpcio≥1.82.1 / protobuf≥7.35.0)。
       - name: Python grpc deps
         run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0"
       - name: verify-p3

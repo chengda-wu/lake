@@ -60,7 +60,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 setup.py)。
+      # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 python/pyproject.toml)。
       # 装运行时依赖即可,空壳阶段不 pip install -e .(PEP 668 机器会炸;
       # worker 包就在 python/ 下,PYTHONPATH 直接 import,与本地验证一致)。
       - run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0"
