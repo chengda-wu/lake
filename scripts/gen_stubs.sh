@@ -26,6 +26,8 @@ python3 -m grpc_tools.protoc \
 
 # grpcio-tools 默认按 proto 文件名生成顶层 import;改成包内引用。
 # schema_pb2 被 lake_pb2 import —— 改成 from lake_pb import schema_pb2
+# 注意:patch 段用相对路径,须在仓库根执行(否则静默不 patch → 生成坏 import)。
+cd "$ROOT"
 python3 - <<'PY'
 from pathlib import Path
 pb_dir = Path("python/lake_pb")

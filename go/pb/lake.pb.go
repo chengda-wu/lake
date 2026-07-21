@@ -675,7 +675,7 @@ func (x *LocateResponse) GetBlocks() []*BlockMeta {
 type RegisterBlocksRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Blocks        []*BlockMeta           `protobuf:"bytes,2,rep,name=blocks,proto3" json:"blocks,omitempty"` // 写完 durable 后调(两阶段)
+	Blocks        []*BlockMeta           `protobuf:"bytes,2,rep,name=blocks,proto3" json:"blocks,omitempty"` // agent 写完 L2 durable 后上报(单次=PutEnd,见上方 RPC 注释)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

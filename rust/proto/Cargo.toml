@@ -12,8 +12,8 @@ build = "build.rs"
 path = "src/lib.rs"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build.workspace = true
 
 [dependencies]
-tonic = "0.12"
-prost = "0.13"
+tonic.workspace = true
+prost.workspace = true

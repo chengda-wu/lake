@@ -14,3 +14,10 @@ members = [
 # - proto: tonic-build 从 proto/ 在线生成 gRPC stub（不入仓），作为共享 lib
 # - controlplane: 位置视图权威进程空壳（权威在 Rust，见 control-plane.md）
 # - kv-pool / weight-cache / tiered-store / transfer / storage-agent: 空壳 crate，仅能编译，无业务逻辑
+
+# 统一依赖版本,防成员 crate 各自升级导致 workspace 内多份共存 / 编译冲突。
+[workspace.dependencies]
+tonic = "0.12"
+prost = "0.13"
+tonic-build = "0.12"
+lake-proto = { path = "proto" }

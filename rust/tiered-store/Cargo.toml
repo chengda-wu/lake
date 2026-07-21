@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-lake-proto = { path = "../proto" }
-tonic = "0.12"
+lake-proto.workspace = true
+tonic.workspace = true
 
 # 空壳:L0–L3 分层缓存引擎。P2 仅验证 proto 生成 + 编译。
