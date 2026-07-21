@@ -54,9 +54,10 @@ impl Authority {
         for h in prefix_hashes {
             match self.blocks.get(h) {
                 Some(meta) if meta.id.as_ref().map(|i| i.model_id.as_str()) == Some(model_id) => {
-                    let local = meta.locations.iter().any(|l| {
-                        l.tier == Tier::L0 as i32 && l.node_id == requester
-                    });
+                    let local = meta
+                        .locations
+                        .iter()
+                        .any(|l| l.tier == Tier::L0 as i32 && l.node_id == requester);
                     if !local {
                         all_local = false;
                     }
@@ -167,6 +168,15 @@ impl ControlPlaneService for ControlPlane {
     }
 }
 
+// 编译期锚定:引用具体生成符号,防 proto 改名/删字段后 Rust 仍编译通过(Go/Python 已锚定)。
+#[allow(dead_code)]
+type _CpServer = lake_proto::lake::control_plane_service_server::ControlPlaneServiceServer<()>;
+#[allow(dead_code)]
+const _ANCHOR: fn() = || {
+    let _ = RegisterBlocksRequest::default();
+    let _ = LookupPrefixRequest::default();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,8 +204,11 @@ mod tests {
             vec![meta("m", b"h0"), meta("m", b"h1"), meta("m", b"h2")],
         );
         // 中间缺 h1 → 只命中 h0
-        let (blocks, hit, local) =
-            auth.lookup_prefix("m", &[b"h0".to_vec(), b"gap".to_vec(), b"h2".to_vec()], "n0");
+        let (blocks, hit, local) = auth.lookup_prefix(
+            "m",
+            &[b"h0".to_vec(), b"gap".to_vec(), b"h2".to_vec()],
+            "n0",
+        );
         assert_eq!(hit, 1);
         assert_eq!(blocks.len(), 1);
         assert!(!local); // 仅 L2,无 L0
@@ -205,17 +218,8 @@ mod tests {
     fn lookup_prefix_full_hit_not_local_without_l0() {
         let mut auth = Authority::default();
         auth.register("n0", vec![meta("m", b"a"), meta("m", b"b")]);
-        let (_, hit, local) =
-            auth.lookup_prefix("m", &[b"a".to_vec(), b"b".to_vec()], "n0");
+        let (_, hit, local) = auth.lookup_prefix("m", &[b"a".to_vec(), b"b".to_vec()], "n0");
         assert_eq!(hit, 2);
         assert!(!local);
     }
 }
-// 编译期锚定:引用具体生成符号,防 proto 改名/删字段后 Rust 仍编译通过(Go/Python 已锚定)。
-#[allow(dead_code)]
-type _CpServer = lake_proto::lake::control_plane_service_server::ControlPlaneServiceServer<()>;
-#[allow(dead_code)]
-const _ANCHOR: fn() = || {
-    let _ = RegisterBlocksRequest::default();
-    let _ = LookupPrefixRequest::default();
-};

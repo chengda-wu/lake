@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     println!("lake-storage-agent (AgentService) listening on {addr}");
     Server::builder()
-        .add_service(AgentServiceServer::new(Agent::default()))
+        .add_service(AgentServiceServer::new(Agent))
         .serve(addr)
         .await?;
     Ok(())

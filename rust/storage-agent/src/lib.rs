@@ -27,10 +27,7 @@ pub struct Agent;
 
 #[tonic::async_trait]
 impl AgentService for Agent {
-    async fn dispatch(
-        &self,
-        request: Request<DispatchRequest>,
-    ) -> Result<Response<Ack>, Status> {
+    async fn dispatch(&self, request: Request<DispatchRequest>) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
         if req.target_node_id.is_empty() {
             return Err(Status::invalid_argument("target_node_id required"));
