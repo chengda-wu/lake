@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # 从 proto/ 重新生成 Go / Python gRPC stub(入仓)。
 # Rust 走 tonic-build 在线生成,不入仓——改 proto 后 `cd rust && cargo build` 即可。
+#
+# 工具链版本(钉到生成当前入仓 stub 的版本,防他机重生成 drift,见 PR #17 review follow-up):
+#   protoc              3.21.12
+#   protoc-gen-go       1.36.11
+#   protoc-gen-go-grpc  1.6.2
+#   grpcio-tools        1.82.1   (生成 *_pb2.py;runtime 需 grpcio>=1.82.1 / protobuf>=7.35.0,见 python/setup.py)
+# 建议用这些版本重生成;版本不符时生成物可能 diff,提交前 `git diff` 核对。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
