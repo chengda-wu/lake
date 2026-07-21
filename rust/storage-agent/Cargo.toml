@@ -15,5 +15,14 @@ tokio.workspace = true
 tokio-stream = { workspace = true }
 prost.workspace = true
 
+# 双角色用 feature 区分(非两个 crate,见 PR #17 review #6):
+#   compute — 计算节点侧 agent(组装 block table / 发起传输 / 持本地视图镜像)
+#   kvnode  — KV Node 侧 agent(serve 远端 DRAM/NVMe 段)
+# 默认全开(空壳期);实现期按部署只开其一,共用传输 core。
+[features]
+default = ["compute", "kvnode"]
+compute = []
+kvnode  = []
+
 # P3:AgentService.Dispatch 占位(边10);PlaceBlocks ack;ReportLoad 空流。
-# 生产再叠 FFI / TransferService / feature 分角色。
+# 生产再叠 FFI / TransferService / feature 分角色落地。

@@ -211,3 +211,11 @@ mod tests {
         assert!(!local);
     }
 }
+// 编译期锚定:引用具体生成符号,防 proto 改名/删字段后 Rust 仍编译通过(Go/Python 已锚定)。
+#[allow(dead_code)]
+type _CpServer = lake_proto::lake::control_plane_service_server::ControlPlaneServiceServer<()>;
+#[allow(dead_code)]
+const _ANCHOR: fn() = || {
+    let _ = RegisterBlocksRequest::default();
+    let _ = LookupPrefixRequest::default();
+};

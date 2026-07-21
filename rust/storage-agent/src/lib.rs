@@ -1,6 +1,7 @@
 //! 存储池 agent(P3:边10 Dispatch 占位服务)。
 //!
 //! 生产:Dispatch → 组 batch → FFI 引擎;本进程只 ack,真实执行仍在 Python WorkerService。
+//! 单 crate 双角色 feature:计算侧 / KV Node(见 kv-cache-pool.md)。
 //! 参考:SGLang agent_hints / Dispatch 骨架;边6 FFI 留 P4+。
 
 use std::pin::Pin;
@@ -64,3 +65,27 @@ impl AgentService for Agent {
         }))
     }
 }
+
+/// 计算节点侧能力占位(FFI / mirror / block table / fence / slot)。
+#[cfg(feature = "compute")]
+pub mod compute {
+    pub const ROLE: &str = "compute";
+}
+
+/// KV Node 侧能力占位(NVMe serve / bounce)。
+#[cfg(feature = "kvnode")]
+pub mod kvnode {
+    pub const ROLE: &str = "kvnode";
+}
+
+// 编译期锚定:引用具体生成符号(与 PR #18 一致)。
+#[allow(dead_code)]
+type _AgentServer = lake_proto::lake::agent_service_server::AgentServiceServer<()>;
+#[allow(dead_code)]
+type _TransferServer = lake_proto::lake::transfer_service_server::TransferServiceServer<()>;
+#[allow(dead_code)]
+const _ANCHOR: fn() = || {
+    let _ = DispatchRequest::default();
+    let _ = PullRequest::default();
+    let _ = PublishRequest::default();
+};
