@@ -1,12 +1,13 @@
 # Vendored from ai-dynamo/dynamo (lib/kvbm-logical) for lake P4 KV Pool.
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# 许可全文见本目录 LICENSE；上游 pin 见 ../UPSTREAM.md。
 #
-# fork 改造(PR1 地基):
-#   - workspace = true 填实版本(lake 不嵌套 dynamo workspace)。
-#   - dynamo-tokens 改 path 依赖指向同 vendor 目录。
-#   - EventsManager 拆除见 src/registry/mod.rs(NATS 弱一致事件 → lake in-process 权威 + checkpoint)。
-#   - LogicalLayoutHandle{G1-G4} → lake L0-L3、InactiveIndex pub(crate)→pub 见对应源文件。
+# P4.1 仅构建接入(业务源码未改):
+#   - workspace = true 填实版本(lake 不嵌套 dynamo workspace)
+#   - dynamo-tokens 改 path 依赖指向同 vendor 目录
+#   - edition = "2024"(上游 let chains)
+# 源码改造(InactiveIndex pub / 拆 EventsManager / G1-G4→L0-L3 等)见 #20 后续切片。
 
 [package]
 name = "kvbm-logical"

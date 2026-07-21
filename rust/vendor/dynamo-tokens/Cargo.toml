@@ -1,9 +1,11 @@
 # Vendored from ai-dynamo/dynamo (lib/tokens) for lake P4 KV Pool.
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# 许可全文见本目录 LICENSE；上游 pin 见 ../UPSTREAM.md。
 #
-# fork 改造:原 crate 用 dynamo workspace 继承(workspace = true),lake 不嵌套该 workspace,
-# 故填实版本。源码未改(仅 PositionalRadixTree / PositionalLineageHash 供 kvbm-logical 复用)。
+# P4.1 仅构建接入:原 crate 用 dynamo workspace 继承(workspace = true),lake 不嵌套该
+# workspace,故填实版本。业务源码未改(PositionalRadixTree / PositionalLineageHash
+# 供 kvbm-logical 复用)。
 
 [package]
 name = "dynamo-tokens"

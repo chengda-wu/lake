@@ -30,6 +30,8 @@ jobs:
       # storage-agent 双角色 feature 各自可单独编译(默认全开;部署期只开其一)。
       - run: cargo build -p lake-storage-agent --no-default-features --features compute
       - run: cargo build -p lake-storage-agent --no-default-features --features kvnode
+      # P4 vendor(Dynamo kvbm-logical / tokens)单测门禁,见 rust/vendor/UPSTREAM.md。
+      - run: cargo test -p dynamo-tokens -p kvbm-logical
       # 格式 + lint 防回归(P3 代码阶段前的质量门)。
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
