@@ -38,6 +38,8 @@ CPU:           accept(N-1) + fill_bitmask(N) ─┘
 
 ## SGLang：overlap schedule × grammar
 
+> Overlap 主循环、FutureMap、关 overlap 条件的**完整机制**见 [`sglang/model-runner.md`](sglang/model-runner.md)「Overlap schedule」；本节只谈与 grammar 的交叉。
+
 后端选择：`--grammar-backend` ∈ `{xgrammar, outlines, llguidance, none}`（默认 xgrammar）。
 
 ### 非 spec：可重叠

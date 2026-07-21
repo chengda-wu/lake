@@ -21,6 +21,8 @@
   - SGLang × vLLM:xgrammar/llguidance 仅 GPU apply、FSM 仍在 CPU;overlap/async 近零 vs spec+grammar / pending token 的同步气泡;与 lake 重叠契约及抢占时 FSM 游标交接。
 - **Sampling 参数** → [`sampling-params.md`](sampling-params.md)
   - SGLang × vLLM 字段对照;`n`≠beam;spec 兼容矩阵;penalty 空泡与 V2;采样状态归属(不进 KV 池)与 `n` 前缀共享。
+- **Scheduler→Worker 接口** → [`scheduler-worker-interface.md`](scheduler-worker-interface.md)
+  - vLLM `SchedulerOutput` 与 SGLang `ScheduleBatch`/`ForwardBatch` 字段全集、差异与架构根因;供 lake `SchedulerOutput` D1 对照。
 
 五者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
 

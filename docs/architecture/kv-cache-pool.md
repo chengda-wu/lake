@@ -280,10 +280,13 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 引擎产出(在 L0 slot)
   → [满了] 池算哈希 → 注册 radix → 写回 L2(NVMe,F4 恢复点,抗 worker 失败)
   → [注册后 L2 durable 前,block 持 writeback ref 不可驱逐]
-  → 请求结束 = 写回屏障(flush+ack 所有已注册 block 的 L2 写回,再释放 ref)
-  → [尾块,未满] 池写回(纯容错,不进 radix)
+  → 请求结束(node_scheduler 判定) → agent.on_request_finished
+       = 写回屏障(flush+ack 所有已注册 block 的 L2 写回,再释放本地 ref)
+       + 尾块写回(未满,纯容错,不进 radix)
   → KV 续存(供复用/续推) 或 按 TTL/冷热淘汰
 ```
+
+**请求结束入口(已定)**:Host `Req` 权威在 [`compute-layer.md`](compute-layer.md) 的 `node_scheduler`;判定 `finished` 后**只**调用池本地 agent 的 `on_request_finished`——引擎 / ModelRunner **不**持请求表、**不** free block。默认 overlap 下,该调用落在「上批 CPU 收尾」,可与本批 GPU forward 重叠;agent 须守 in-flight 冻结(类 SGLang free_group)。对照 research:[`../research/sglang/block-lifecycle.md`](../research/sglang/block-lifecycle.md) / [`../research/vllm/block-lifecycle.md`](../research/vllm/block-lifecycle.md)。
 
 两条写回路分开(满块结构性,尾块容错性):
 
