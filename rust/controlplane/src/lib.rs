@@ -10,8 +10,7 @@ pub const SERVICE: &str = "lake.ControlPlaneService";
 // 消息类型(glob re-export 到顶层)取 default();server struct 在子模块下,用类型别名引用
 // (不构造实例,规避泛型构造约束;别名本身就是对生成符号的编译期依赖)。
 #[allow(dead_code)]
-type _CpServer =
-    lake_proto::lake::control_plane_service_server::ControlPlaneServiceServer<()>;
+type _CpServer = lake_proto::lake::control_plane_service_server::ControlPlaneServiceServer<()>;
 #[allow(dead_code)]
 const _ANCHOR: fn() = || {
     let _ = RegisterBlocksRequest::default();

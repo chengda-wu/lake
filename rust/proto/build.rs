@@ -3,8 +3,14 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // proto crate 在 rust/proto,仓库根 proto/ 在上两级。
     let proto_dir = std::path::Path::new("../../proto");
-    println!("cargo:rerun-if-changed={}", proto_dir.join("schema.proto").display());
-    println!("cargo:rerun-if-changed={}", proto_dir.join("lake.proto").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        proto_dir.join("schema.proto").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        proto_dir.join("lake.proto").display()
+    );
 
     tonic_build::configure()
         .build_client(true)

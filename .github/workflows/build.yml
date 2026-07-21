@@ -21,6 +21,8 @@ jobs:
       # tonic-build(build.rs)调 protoc 在线生成 stub,CI 需装 protoc。
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
@@ -28,6 +30,9 @@ jobs:
       # storage-agent 双角色 feature 各自可单独编译(默认全开;部署期只开其一)。
       - run: cargo build -p lake-storage-agent --no-default-features --features compute
       - run: cargo build -p lake-storage-agent --no-default-features --features kvnode
+      # 格式 + lint 防回归(P3 代码阶段前的质量门)。
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   go:
     runs-on: ubuntu-latest
@@ -41,6 +46,9 @@ jobs:
           go-version-file: go/go.mod
           cache-dependency-path: go/go.sum
       - run: go build ./...
+      # 格式 + vet 防回归。
+      - run: gofmt -l . | tee /dev/stderr | (! read)  # 有输出即失败
+      - run: go vet ./...
 
   python:
     runs-on: ubuntu-latest
