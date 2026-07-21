@@ -25,6 +25,9 @@ jobs:
         with:
           workspaces: rust
       - run: cargo build --workspace
+      # storage-agent 双角色 feature 各自可单独编译(默认全开;部署期只开其一)。
+      - run: cargo build -p lake-storage-agent --no-default-features --features compute
+      - run: cargo build -p lake-storage-agent --no-default-features --features kvnode
 
   go:
     runs-on: ubuntu-latest
