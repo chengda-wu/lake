@@ -28,6 +28,7 @@ _check_ver() {
 }
 _check_ver "protoc" "$(protoc --version 2>/dev/null || true)" "3.21"
 _check_ver "protoc-gen-go" "$(protoc-gen-go --version 2>/dev/null || true)" "1.36"
+_check_ver "protoc-gen-go-grpc" "$(protoc-gen-go-grpc --version 2>/dev/null || true)" "1.6"
 _check_ver "grpcio-tools" "$(python3 -c 'import grpc_tools; import importlib.metadata as m; print(m.version("grpcio-tools"))' 2>/dev/null || true)" "1.82"
 
 echo "==> Go: protoc → go/pb/"

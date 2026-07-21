@@ -55,3 +55,23 @@ jobs:
       # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 setup.py)。
       - run: pip install -e .
       - run: python -c "from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2; import prefill, decode, draft, kernels, runtime; print('py OK')"
+
+  # stub drift:重生成 Go/Python stub 后 git diff --exit-code。
+  # 拦「proto 改了没重生成 stub」与「工具版本漂移致生成物变」(见 PR #17 review #4)。
+  # 插件版本钉到 gen_stubs.sh 头注释一致;protoc 用 apt,靠 git diff 检测输出一致性。
+  stub-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - run: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install grpcio-tools==1.82.1
+      - run: bash scripts/gen_stubs.sh
+      - run: git diff --exit-code
