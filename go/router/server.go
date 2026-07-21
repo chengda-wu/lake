@@ -25,7 +25,7 @@ type Config struct {
 }
 
 // Server OpenAI 兼容 HTTP → gRPC Worker.Generate。
-// Bifrost 可选;冒烟直打本服务(边2)。
+// P3 入口即本服务(边2);不经 Bifrost。
 type Server struct {
 	cfg    Config
 	worker lakepb.WorkerServiceClient
@@ -94,7 +94,7 @@ type chatResponse struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	// lake 扩展:前缀复用统计(冒烟用;Bifrost 应透传)
+	// lake 扩展:前缀复用统计(冒烟用)
 	Lake struct {
 		ReusedBlocks  uint32 `json:"reused_blocks"`
 		PrefillBlocks uint32 `json:"prefill_blocks"`
