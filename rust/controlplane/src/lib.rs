@@ -20,11 +20,8 @@ use control_plane_service_server::ControlPlaneService;
 /// 进程内权威状态。
 #[derive(Default)]
 pub struct Authority {
-    /// block_hash(hex) → BlockMeta
+    /// block_hash → BlockMeta(LookupPrefix 沿 prefix_hashes 链探测)。
     blocks: HashMap<Vec<u8>, BlockMeta>,
-    /// model_id → 已注册前缀 hash 链集合(每条链为连续 block_hash 列表的起点索引用全链存储)
-    /// 简化:存所有已注册的 (model_id, block_hash) 供 LookupPrefix 沿链探测。
-    by_model: HashMap<String, Vec<Vec<u8>>>,
 }
 
 impl Authority {
@@ -32,7 +29,6 @@ impl Authority {
         for mut meta in metas {
             let Some(id) = meta.id.clone() else { continue };
             let hash = id.block_hash.clone();
-            let model = id.model_id.clone();
             // 保证至少有一个 L2 占位 location(P3 mock durable)。
             if meta.locations.is_empty() {
                 meta.locations.push(Location {
@@ -41,9 +37,6 @@ impl Authority {
                     segment_id: 1,
                     offset: 0,
                 });
-            }
-            if !self.blocks.contains_key(&hash) {
-                self.by_model.entry(model).or_default().push(hash.clone());
             }
             self.blocks.insert(hash, meta);
         }

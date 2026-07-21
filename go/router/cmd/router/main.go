@@ -2,7 +2,7 @@
 //
 //	go run ./router/cmd/router
 //
-// 环境变量:LAKE_HTTP_ADDR / LAKE_WORKER_ADDR / LAKE_CP_ADDR
+// 环境变量:LAKE_HTTP_ADDR / LAKE_WORKER_ADDR
 package main
 
 import (
@@ -16,7 +16,6 @@ func main() {
 	cfg := router.Config{
 		HTTPAddr:   env("LAKE_HTTP_ADDR", ":8080"),
 		WorkerAddr: env("LAKE_WORKER_ADDR", "127.0.0.1:50053"),
-		CPAddr:     env("LAKE_CP_ADDR", "127.0.0.1:50051"),
 	}
 	s, err := router.New(cfg)
 	if err != nil {

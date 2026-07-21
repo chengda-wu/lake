@@ -12,7 +12,9 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	lakepb "github.com/chengda-wu/lake/go/pb"
 )
@@ -21,15 +23,14 @@ import (
 type Config struct {
 	HTTPAddr   string // 默认 :8080
 	WorkerAddr string // WorkerService,默认 127.0.0.1:50053
-	CPAddr     string // ControlPlane(冷路径 LookupPrefix),默认 127.0.0.1:50051
 }
 
 // Server OpenAI 兼容 HTTP → gRPC Worker.Generate。
 // P3 入口即本服务(边2);不经 Bifrost。
+// LookupPrefix 在 worker 侧完成(直连 ControlPlane),Router 不持 CP client。
 type Server struct {
 	cfg    Config
 	worker lakepb.WorkerServiceClient
-	cp     lakepb.ControlPlaneServiceClient
 }
 
 func New(cfg Config) (*Server, error) {
@@ -39,21 +40,13 @@ func New(cfg Config) (*Server, error) {
 	if cfg.WorkerAddr == "" {
 		cfg.WorkerAddr = "127.0.0.1:50053"
 	}
-	if cfg.CPAddr == "" {
-		cfg.CPAddr = "127.0.0.1:50051"
-	}
 	wconn, err := grpc.NewClient(cfg.WorkerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("dial worker: %w", err)
 	}
-	cconn, err := grpc.NewClient(cfg.CPAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, fmt.Errorf("dial controlplane: %w", err)
-	}
 	return &Server{
 		cfg:    cfg,
 		worker: lakepb.NewWorkerServiceClient(wconn),
-		cp:     lakepb.NewControlPlaneServiceClient(cconn),
 	}, nil
 }
 
@@ -140,14 +133,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	rid := uuid.NewString()
 	gen, err := s.worker.Generate(ctx, &lakepb.GenerateRequest{
-		RequestId:        rid,
-		ModelId:          model,
-		PromptTokens:     tokens,
-		MaxNewTokens:     uint32(maxNew),
-		RequesterNodeId:  "worker-0",
+		RequestId:       rid,
+		ModelId:         model,
+		PromptTokens:    tokens,
+		MaxNewTokens:    uint32(maxNew),
+		RequesterNodeId: "worker-0",
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Generate: %v", err), http.StatusBadGateway)
+		code, msg := mapGRPCError(err)
+		http.Error(w, msg, code)
 		return
 	}
 
@@ -176,6 +170,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func mapGRPCError(err error) (httpStatus int, msg string) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return http.StatusBadGateway, "Generate: " + err.Error()
+	}
+	msg = fmt.Sprintf("Generate: %s", st.Message())
+	switch st.Code() {
+	case codes.InvalidArgument:
+		return http.StatusBadRequest, msg
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return http.StatusServiceUnavailable, msg
+	default:
+		return http.StatusBadGateway, msg
+	}
 }
 
 // tokenizeMock:P3 跳过真实 tokenizer,按 rune 映射到稳定 uint32。

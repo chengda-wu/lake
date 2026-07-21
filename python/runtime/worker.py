@@ -1,7 +1,7 @@
 """P3 mock worker:LookupPrefix → SkeletonKv Get/Put → RegisterBlocks → mock decode.
 
 生产路径:Router Dispatch → agent → FFI 引擎。P3 用 WorkerService.Generate 直连。
-参考:vLLM KVConnectorBase_V1(worker↔池);早期 src/ 前缀复用冒烟。
+参考:vLLM KVConnectorBase_V1(worker↔池 Get/Put 必须校验);早期 src/ 前缀复用冒烟。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from concurrent import futures
-from typing import List, Sequence, Tuple
+from typing import List, Sequence
 
 import grpc
 
@@ -49,6 +49,14 @@ def mock_decode_tokens(prompt: Sequence[int], max_new: int) -> List[int]:
     return [((seed + i + 1) % 1000) + 1000 for i in range(max_new)]
 
 
+def _abort_rpc(context: grpc.ServicerContext, exc: grpc.RpcError) -> None:
+    code = exc.code() if hasattr(exc, "code") else grpc.StatusCode.INTERNAL
+    details = exc.details() if hasattr(exc, "details") else str(exc)
+    if code == grpc.StatusCode.UNAVAILABLE:
+        context.abort(grpc.StatusCode.UNAVAILABLE, f"downstream: {details}")
+    context.abort(grpc.StatusCode.INTERNAL, f"downstream: {details}")
+
+
 class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
     def __init__(self, cp: lake_pb2_grpc.ControlPlaneServiceStub, kv: lake_pb2_grpc.SkeletonKvServiceStub):
         self._cp = cp
@@ -71,26 +79,45 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             for h in hashes
         ]
 
-        lookup = self._cp.LookupPrefix(
-            lake_pb2.LookupPrefixRequest(
-                model_id=model_id,
-                prefix_hashes=hashes,
-                requester_node_id=node,
+        try:
+            lookup = self._cp.LookupPrefix(
+                lake_pb2.LookupPrefixRequest(
+                    model_id=model_id,
+                    prefix_hashes=hashes,
+                    requester_node_id=node,
+                )
             )
-        )
+        except grpc.RpcError as e:
+            _abort_rpc(context, e)
+
         reused = int(lookup.hit_length)
         miss_ids = ids[reused:]
 
+        # 校验 SkeletonKv 字节路径:Lookup 命中必须真能 Get 到 bytes。
         if reused:
-            got = self._kv.GetBlocks(lake_pb2.GetBlocksRequest(ids=ids[:reused]))
-            LOG.info("GetBlocks hit=%d returned=%d", reused, len(got.blocks))
+            try:
+                got = self._kv.GetBlocks(lake_pb2.GetBlocksRequest(ids=ids[:reused]))
+            except grpc.RpcError as e:
+                _abort_rpc(context, e)
+            if len(got.blocks) != reused:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"GetBlocks mismatch: lookup hit={reused} got={len(got.blocks)}",
+                )
+            for blk in got.blocks:
+                if not blk.data.startswith(b"KV:"):
+                    context.abort(grpc.StatusCode.INTERNAL, "GetBlocks: bad mock KV payload")
+            LOG.info("GetBlocks hit=%d ok", reused)
 
         # mock prefill:为 miss block 写不透明 KV + 注册元数据
         if miss_ids:
             opaques = [
                 lake_pb2.OpaqueBlock(id=bid, data=mock_kv_bytes(bid.block_hash)) for bid in miss_ids
             ]
-            put = self._kv.PutBlocks(lake_pb2.PutBlocksRequest(node_id=node, blocks=opaques))
+            try:
+                put = self._kv.PutBlocks(lake_pb2.PutBlocksRequest(node_id=node, blocks=opaques))
+            except grpc.RpcError as e:
+                _abort_rpc(context, e)
             if not put.ok:
                 context.abort(grpc.StatusCode.INTERNAL, put.err or "PutBlocks failed")
 
@@ -112,24 +139,30 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
                         ref_count=1,
                     )
                 )
-            reg = self._cp.RegisterBlocks(
-                lake_pb2.RegisterBlocksRequest(node_id=node, blocks=metas)
-            )
+            try:
+                reg = self._cp.RegisterBlocks(
+                    lake_pb2.RegisterBlocksRequest(node_id=node, blocks=metas)
+                )
+            except grpc.RpcError as e:
+                _abort_rpc(context, e)
             if not reg.ok:
                 context.abort(grpc.StatusCode.INTERNAL, reg.err or "RegisterBlocks failed")
 
-        self._cp.RequestBarrier(
-            lake_pb2.RequestBarrierRequest(request_id=request.request_id, node_id=node)
-        )
+        try:
+            self._cp.RequestBarrier(
+                lake_pb2.RequestBarrierRequest(request_id=request.request_id, node_id=node)
+            )
+        except grpc.RpcError as e:
+            _abort_rpc(context, e)
 
         out = mock_decode_tokens(prompt, max_new)
-        mode = "D_DIRECT" if reused == len(ids) and reused > 0 else "COLOCATED"
+        # P3 只注册 L2,无 L0 本地命中 → 固定混部,不报 D_DIRECT。
         return lake_pb2.GenerateResponse(
             request_id=request.request_id,
             output_tokens=out,
             reused_blocks=reused,
             prefill_blocks=len(miss_ids),
-            mode=mode,
+            mode="COLOCATED",
         )
 
 
