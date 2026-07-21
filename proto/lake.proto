@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package lake;
 
+option go_package = "github.com/chengda-wu/lake/go/pb;lakepb";
+
 import "schema.proto";
 
 // RPC 边界草稿（#3 通信边 + 00-plan.md:167 三组接口）。

@@ -1,0 +1,11 @@
+[package]
+name = "lake-transfer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lake-proto.workspace = true
+tonic.workspace = true
+
+# 空壳:KV 传输(RDMA + TCP 退化)。P2 仅验证 proto 生成 + 编译。

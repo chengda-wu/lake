@@ -1,0 +1,11 @@
+[package]
+name = "lake-storage-agent"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lake-proto.workspace = true
+tonic.workspace = true
+
+# 空壳:存储池 agent(计算节点 / KV Node 双 target 共用传输 core)。P2 仅验证编译。

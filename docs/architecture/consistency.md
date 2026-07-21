@@ -106,7 +106,7 @@ block 在 L0 产出 ── 每 N 步写回 L2(NVMe) ──> 落 L3(冷下沉,非
 ### 池级失败 / SSOT 恢复
 
 - **L3 = SSOT**：池重启 / 控制面 etcd 重建后，从对象存储恢复持久副本，不丢数据（[`features/features.md`](../features/features.md) F11）。
-- **元数据重建**：位置视图在 etcd（强一致），池重启从 etcd 恢复位置视图 + 从 L3 回填字节。
+- **元数据重建**：位置视图权威在存储控制面进程内存,池重启从 etcd 降频 checkpoint 重建位置视图 + 从 L3 回填字节(etcd 只存 checkpoint,非强一致位置表,见 §1)。
 - **L3 缺失才视为 block 不存在**：逐级下查到 L3 仍无 → 该 block 不存在（功能退化，非数据损坏）。
 
 ## 6. GC 与孤儿块 reconcile

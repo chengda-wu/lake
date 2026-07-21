@@ -1,0 +1,11 @@
+[package]
+name = "lake-weight-cache"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lake-proto.workspace = true
+tonic.workspace = true
+
+# 空壳:权重分层缓存。P2 仅验证 proto 生成 + 编译。
