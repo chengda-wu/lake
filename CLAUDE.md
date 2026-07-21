@@ -154,3 +154,17 @@ python3 -m src
 ```
 
 三语言子项目就位后此原型将被取代，勿在此基础上扩展。
+
+## 三语言构建（P2 空壳已就位）
+
+```bash
+# Rust 存储层(workspace,tonic-build 在线生成 stub)
+cd rust && cargo build
+# Go 请求控制面(pb.go 入仓)
+cd go && go build ./...
+# Python 计算层(stub 入仓,worker 包可 import)
+PYTHONPATH=python python3 -c "from lake_pb import lake_pb2; import prefill, runtime"
+```
+
+改 `proto/` 后重生成 Go/Python stub(入仓):`bash scripts/gen_stubs.sh`(工具链版本见脚本头注释)。CI(`.github/workflows/build.yml`)跑三语言 build + stub-drift 检查。
+

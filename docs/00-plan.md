@@ -165,7 +165,7 @@ lake/
 ### 接口边界（P2 定稿）
 - [x] `proto/schema.proto`：KVBlockID / Location / BlockMeta schema（#2，见 [PR #16](https://github.com/chengda-wu/lake/pull/16)）
 - [x] `proto/lake.proto`：RPC 边界草稿——ControlPlaneService（边3/4/5）/ AgentService（边10）/ TransferService（边7/8），KV 字节走 RDMA 旁路、worker↔agent 走 FFI 不进 proto（边界草稿;三语言生成验证见 [PR #17](https://github.com/chengda-wu/lake/pull/17)）
-- [x] 三语言空壳目录 + stub 编译（[PR #17](https://github.com/chengda-wu/lake/pull/17)：Rust workspace / Go router+pb / Python lake_pb+worker 包；`scripts/gen_stubs.sh`）
+- [x] 三语言空壳目录 + stub 编译（[PR #17](https://github.com/chengda-wu/lake/pull/17)：Rust workspace / Go router+pb / Python lake_pb+worker 包；`scripts/gen_stubs.sh`；工程基建 [PR #18](https://github.com/chengda-wu/lake/pull/18)：Cargo.lock 入仓 + 工具链钉版本 + CI 三语言 build/stub-drift/fmt/lint + storage-agent feature 门控）
 - [ ] KV block 传输：gRPC 控制平面 + RDMA/共享内存数据平面，二进制布局规格（`TransferRequest` 控制信令已定，字节布局待传输引擎落地）
 
 ### 转 P2 切入建议
