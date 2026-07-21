@@ -104,7 +104,15 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
                     grpc.StatusCode.INTERNAL,
                     f"GetBlocks mismatch: lookup hit={reused} got={len(got.blocks)}",
                 )
-            for blk in got.blocks:
+            # 按请求 id 顺序对账 block_hash(同长度错块集合也要拒)。
+            for i, blk in enumerate(got.blocks):
+                want = bytes(ids[i].block_hash)
+                if not blk.id or bytes(blk.id.block_hash) != want:
+                    got_h = bytes(blk.id.block_hash) if blk.id else b""
+                    context.abort(
+                        grpc.StatusCode.INTERNAL,
+                        f"GetBlocks hash mismatch at {i}: want={want.hex()} got={got_h.hex()}",
+                    )
                 if not blk.data.startswith(b"KV:"):
                     context.abort(grpc.StatusCode.INTERNAL, "GetBlocks: bad mock KV payload")
             LOG.info("GetBlocks hit=%d ok", reused)

@@ -1925,7 +1925,7 @@ type GenerateResponse struct {
 	OutputTokens  []uint32               `protobuf:"varint,2,rep,packed,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
 	ReusedBlocks  uint32                 `protobuf:"varint,3,opt,name=reused_blocks,json=reusedBlocks,proto3" json:"reused_blocks,omitempty"`    // 前缀命中 block 数(对齐 src/ 冒烟语义)
 	PrefillBlocks uint32                 `protobuf:"varint,4,opt,name=prefill_blocks,json=prefillBlocks,proto3" json:"prefill_blocks,omitempty"` // 本次新算 block 数
-	Mode          string                 `protobuf:"bytes,5,opt,name=mode,proto3" json:"mode,omitempty"`                                         // PD_SEPARATED | COLOCATED | D_DIRECT(P3 固定 COLOCATED)
+	Mode          string                 `protobuf:"bytes,5,opt,name=mode,proto3" json:"mode,omitempty"`                                         // P3 固定 "COLOCATED";生产才报 PD_SEPARATED / D_DIRECT
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

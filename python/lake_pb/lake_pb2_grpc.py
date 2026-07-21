@@ -911,10 +911,10 @@ class SkeletonKvService:
 
 
 class WorkerServiceStub:
-    """WorkerService — 计算层 Generate(Router → worker)。
+    """WorkerService — 计算层 Generate。
     生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-    P3:无 PyO3/agent 编排时,Router 直调本 service;worker 内部再调 ControlPlane + SkeletonKv。
-    prefill/decode 同进程 mock(混部),返回固定/可复现 token。
+    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
     """
 
     def __init__(self, channel):
@@ -931,10 +931,10 @@ class WorkerServiceStub:
 
 
 class WorkerServiceServicer:
-    """WorkerService — 计算层 Generate(Router → worker)。
+    """WorkerService — 计算层 Generate。
     生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-    P3:无 PyO3/agent 编排时,Router 直调本 service;worker 内部再调 ControlPlane + SkeletonKv。
-    prefill/decode 同进程 mock(混部),返回固定/可复现 token。
+    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
     """
 
     def Generate(self, request, context):
@@ -960,10 +960,10 @@ def add_WorkerServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class WorkerService:
-    """WorkerService — 计算层 Generate(Router → worker)。
+    """WorkerService — 计算层 Generate。
     生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-    P3:无 PyO3/agent 编排时,Router 直调本 service;worker 内部再调 ControlPlane + SkeletonKv。
-    prefill/decode 同进程 mock(混部),返回固定/可复现 token。
+    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
     """
 
     @staticmethod

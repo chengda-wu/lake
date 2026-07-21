@@ -953,11 +953,11 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// WorkerService — 计算层 Generate(Router → worker)。
+// WorkerService — 计算层 Generate。
 //
 //	生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-//	P3:无 PyO3/agent 编排时,Router 直调本 service;worker 内部再调 ControlPlane + SkeletonKv。
-//	prefill/decode 同进程 mock(混部),返回固定/可复现 token。
+//	P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//	    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
 type WorkerServiceClient interface {
 	Generate(ctx context.Context, in *GenerateRequest, opts ...grpc.CallOption) (*GenerateResponse, error)
 }
@@ -984,11 +984,11 @@ func (c *workerServiceClient) Generate(ctx context.Context, in *GenerateRequest,
 // All implementations must embed UnimplementedWorkerServiceServer
 // for forward compatibility.
 //
-// WorkerService — 计算层 Generate(Router → worker)。
+// WorkerService — 计算层 Generate。
 //
 //	生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-//	P3:无 PyO3/agent 编排时,Router 直调本 service;worker 内部再调 ControlPlane + SkeletonKv。
-//	prefill/decode 同进程 mock(混部),返回固定/可复现 token。
+//	P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//	    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
 type WorkerServiceServer interface {
 	Generate(context.Context, *GenerateRequest) (*GenerateResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
