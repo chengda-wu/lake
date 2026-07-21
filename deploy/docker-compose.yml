@@ -1,0 +1,20 @@
+# P3 全栈(需要本机已装 rustc/go/python;镜像化留后续)。
+# 更常用本地脚本:./deploy/run-local.sh
+services:
+  controlplane:
+    image: rust:1.85-bookworm
+    working_dir: /src/rust
+    volumes: ["../:/src"]
+    command: bash -lc "cargo run -p lake-controlplane"
+    environment:
+      LAKE_CP_ADDR: "0.0.0.0:50051"
+    ports: ["50051:50051"]
+  kv-pool:
+    image: rust:1.85-bookworm
+    working_dir: /src/rust
+    volumes: ["../:/src"]
+    command: bash -lc "cargo run -p lake-kv-pool"
+    environment:
+      LAKE_KV_ADDR: "0.0.0.0:50052"
+    ports: ["50052:50052"]
+  # worker / router 建议用 run-local.sh(依赖本机 grpcio / go module)。

@@ -769,3 +769,226 @@ class TransferService:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class SkeletonKvServiceStub:
+    """=============================================================================
+    P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+    =============================================================================
+
+    SkeletonKvService — mock KV **字节**走 gRPC。
+    生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
+    P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
+    P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.PutBlocks = channel.unary_unary(
+                '/lake.SkeletonKvService/PutBlocks',
+                request_serializer=lake__pb2.PutBlocksRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
+        self.GetBlocks = channel.unary_unary(
+                '/lake.SkeletonKvService/GetBlocks',
+                request_serializer=lake__pb2.GetBlocksRequest.SerializeToString,
+                response_deserializer=lake__pb2.GetBlocksResponse.FromString,
+                _registered_method=True)
+
+
+class SkeletonKvServiceServicer:
+    """=============================================================================
+    P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+    =============================================================================
+
+    SkeletonKvService — mock KV **字节**走 gRPC。
+    生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
+    P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
+    P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+    """
+
+    def PutBlocks(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetBlocks(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_SkeletonKvServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'PutBlocks': grpc.unary_unary_rpc_method_handler(
+                    servicer.PutBlocks,
+                    request_deserializer=lake__pb2.PutBlocksRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'GetBlocks': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBlocks,
+                    request_deserializer=lake__pb2.GetBlocksRequest.FromString,
+                    response_serializer=lake__pb2.GetBlocksResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'lake.SkeletonKvService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('lake.SkeletonKvService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class SkeletonKvService:
+    """=============================================================================
+    P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+    =============================================================================
+
+    SkeletonKvService — mock KV **字节**走 gRPC。
+    生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
+    P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
+    P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+    """
+
+    @staticmethod
+    def PutBlocks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.SkeletonKvService/PutBlocks',
+            lake__pb2.PutBlocksRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBlocks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.SkeletonKvService/GetBlocks',
+            lake__pb2.GetBlocksRequest.SerializeToString,
+            lake__pb2.GetBlocksResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class WorkerServiceStub:
+    """WorkerService — 计算层 Generate。
+    生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
+    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Generate = channel.unary_unary(
+                '/lake.WorkerService/Generate',
+                request_serializer=lake__pb2.GenerateRequest.SerializeToString,
+                response_deserializer=lake__pb2.GenerateResponse.FromString,
+                _registered_method=True)
+
+
+class WorkerServiceServicer:
+    """WorkerService — 计算层 Generate。
+    生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
+    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
+    """
+
+    def Generate(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_WorkerServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Generate': grpc.unary_unary_rpc_method_handler(
+                    servicer.Generate,
+                    request_deserializer=lake__pb2.GenerateRequest.FromString,
+                    response_serializer=lake__pb2.GenerateResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'lake.WorkerService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('lake.WorkerService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class WorkerService:
+    """WorkerService — 计算层 Generate。
+    生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
+    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
+    """
+
+    @staticmethod
+    def Generate(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.WorkerService/Generate',
+            lake__pb2.GenerateRequest.SerializeToString,
+            lake__pb2.GenerateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

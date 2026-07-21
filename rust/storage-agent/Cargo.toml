@@ -4,9 +4,16 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "lake-storage-agent"
+path = "src/main.rs"
+
 [dependencies]
 lake-proto.workspace = true
 tonic.workspace = true
+tokio.workspace = true
+tokio-stream = { workspace = true }
+prost.workspace = true
 
 # 双角色用 feature 区分(非两个 crate,见 PR #17 review #6):
 #   compute — 计算节点侧 agent(组装 block table / 发起传输 / 持本地视图镜像)
@@ -17,4 +24,5 @@ default = ["compute", "kvnode"]
 compute = []
 kvnode  = []
 
-# 空壳:存储池 agent(计算节点 / KV Node 双角色共用传输 core)。P2 仅验证编译。
+# P3:AgentService.Dispatch 占位(边10);PlaceBlocks ack;ReportLoad 空流。
+# 生产再叠 FFI / TransferService / feature 分角色落地。

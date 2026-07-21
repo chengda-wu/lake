@@ -784,3 +784,277 @@ var TransferService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "lake.proto",
 }
+
+const (
+	SkeletonKvService_PutBlocks_FullMethodName = "/lake.SkeletonKvService/PutBlocks"
+	SkeletonKvService_GetBlocks_FullMethodName = "/lake.SkeletonKvService/GetBlocks"
+)
+
+// SkeletonKvServiceClient is the client API for SkeletonKvService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// =============================================================================
+// P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+// =============================================================================
+//
+// SkeletonKvService — mock KV **字节**走 gRPC。
+//
+//	生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
+//	P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
+//	P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+type SkeletonKvServiceClient interface {
+	PutBlocks(ctx context.Context, in *PutBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
+	GetBlocks(ctx context.Context, in *GetBlocksRequest, opts ...grpc.CallOption) (*GetBlocksResponse, error)
+}
+
+type skeletonKvServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSkeletonKvServiceClient(cc grpc.ClientConnInterface) SkeletonKvServiceClient {
+	return &skeletonKvServiceClient{cc}
+}
+
+func (c *skeletonKvServiceClient) PutBlocks(ctx context.Context, in *PutBlocksRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, SkeletonKvService_PutBlocks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *skeletonKvServiceClient) GetBlocks(ctx context.Context, in *GetBlocksRequest, opts ...grpc.CallOption) (*GetBlocksResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBlocksResponse)
+	err := c.cc.Invoke(ctx, SkeletonKvService_GetBlocks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SkeletonKvServiceServer is the server API for SkeletonKvService service.
+// All implementations must embed UnimplementedSkeletonKvServiceServer
+// for forward compatibility.
+//
+// =============================================================================
+// P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+// =============================================================================
+//
+// SkeletonKvService — mock KV **字节**走 gRPC。
+//
+//	生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
+//	P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
+//	P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+type SkeletonKvServiceServer interface {
+	PutBlocks(context.Context, *PutBlocksRequest) (*Ack, error)
+	GetBlocks(context.Context, *GetBlocksRequest) (*GetBlocksResponse, error)
+	mustEmbedUnimplementedSkeletonKvServiceServer()
+}
+
+// UnimplementedSkeletonKvServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedSkeletonKvServiceServer struct{}
+
+func (UnimplementedSkeletonKvServiceServer) PutBlocks(context.Context, *PutBlocksRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method PutBlocks not implemented")
+}
+func (UnimplementedSkeletonKvServiceServer) GetBlocks(context.Context, *GetBlocksRequest) (*GetBlocksResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBlocks not implemented")
+}
+func (UnimplementedSkeletonKvServiceServer) mustEmbedUnimplementedSkeletonKvServiceServer() {}
+func (UnimplementedSkeletonKvServiceServer) testEmbeddedByValue()                           {}
+
+// UnsafeSkeletonKvServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SkeletonKvServiceServer will
+// result in compilation errors.
+type UnsafeSkeletonKvServiceServer interface {
+	mustEmbedUnimplementedSkeletonKvServiceServer()
+}
+
+func RegisterSkeletonKvServiceServer(s grpc.ServiceRegistrar, srv SkeletonKvServiceServer) {
+	// If the following call panics, it indicates UnimplementedSkeletonKvServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&SkeletonKvService_ServiceDesc, srv)
+}
+
+func _SkeletonKvService_PutBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PutBlocksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SkeletonKvServiceServer).PutBlocks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SkeletonKvService_PutBlocks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SkeletonKvServiceServer).PutBlocks(ctx, req.(*PutBlocksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SkeletonKvService_GetBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBlocksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SkeletonKvServiceServer).GetBlocks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SkeletonKvService_GetBlocks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SkeletonKvServiceServer).GetBlocks(ctx, req.(*GetBlocksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// SkeletonKvService_ServiceDesc is the grpc.ServiceDesc for SkeletonKvService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SkeletonKvService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "lake.SkeletonKvService",
+	HandlerType: (*SkeletonKvServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "PutBlocks",
+			Handler:    _SkeletonKvService_PutBlocks_Handler,
+		},
+		{
+			MethodName: "GetBlocks",
+			Handler:    _SkeletonKvService_GetBlocks_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "lake.proto",
+}
+
+const (
+	WorkerService_Generate_FullMethodName = "/lake.WorkerService/Generate"
+)
+
+// WorkerServiceClient is the client API for WorkerService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// WorkerService — 计算层 Generate。
+//
+//	生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
+//	P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//	    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
+type WorkerServiceClient interface {
+	Generate(ctx context.Context, in *GenerateRequest, opts ...grpc.CallOption) (*GenerateResponse, error)
+}
+
+type workerServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewWorkerServiceClient(cc grpc.ClientConnInterface) WorkerServiceClient {
+	return &workerServiceClient{cc}
+}
+
+func (c *workerServiceClient) Generate(ctx context.Context, in *GenerateRequest, opts ...grpc.CallOption) (*GenerateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GenerateResponse)
+	err := c.cc.Invoke(ctx, WorkerService_Generate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// WorkerServiceServer is the server API for WorkerService service.
+// All implementations must embed UnimplementedWorkerServiceServer
+// for forward compatibility.
+//
+// WorkerService — 计算层 Generate。
+//
+//	生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
+//	P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//	    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
+type WorkerServiceServer interface {
+	Generate(context.Context, *GenerateRequest) (*GenerateResponse, error)
+	mustEmbedUnimplementedWorkerServiceServer()
+}
+
+// UnimplementedWorkerServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedWorkerServiceServer struct{}
+
+func (UnimplementedWorkerServiceServer) Generate(context.Context, *GenerateRequest) (*GenerateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Generate not implemented")
+}
+func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
+func (UnimplementedWorkerServiceServer) testEmbeddedByValue()                       {}
+
+// UnsafeWorkerServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to WorkerServiceServer will
+// result in compilation errors.
+type UnsafeWorkerServiceServer interface {
+	mustEmbedUnimplementedWorkerServiceServer()
+}
+
+func RegisterWorkerServiceServer(s grpc.ServiceRegistrar, srv WorkerServiceServer) {
+	// If the following call panics, it indicates UnimplementedWorkerServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&WorkerService_ServiceDesc, srv)
+}
+
+func _WorkerService_Generate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GenerateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).Generate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_Generate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).Generate(ctx, req.(*GenerateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// WorkerService_ServiceDesc is the grpc.ServiceDesc for WorkerService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var WorkerService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "lake.WorkerService",
+	HandlerType: (*WorkerServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Generate",
+			Handler:    _WorkerService_Generate_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "lake.proto",
+}

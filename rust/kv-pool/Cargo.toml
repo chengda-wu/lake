@@ -4,8 +4,14 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "lake-kv-pool"
+path = "src/main.rs"
+
 [dependencies]
 lake-proto.workspace = true
 tonic.workspace = true
+tokio.workspace = true
+prost.workspace = true
 
-# 空壳:KV cache 分布式池(内容寻址/分片/驱逐)。P2 仅验证 proto 生成 + 编译。
+# P3:SkeletonKvService 内存字节池(生产 RDMA 旁路前的 mock 数据面)。
