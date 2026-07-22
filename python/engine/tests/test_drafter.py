@@ -99,7 +99,7 @@ def test_scheduler_records_verify_mode() -> None:
         sched._run_batch(out)  # noqa: SLF001
         sched._pop_and_process()  # noqa: SLF001
 
-    assert ForwardMode.EXTEND in modes
+    assert ForwardMode.EXTEND in modes  # prompt 残差派生标签
     assert ForwardMode.TARGET_VERIFY in modes
 
 

@@ -56,6 +56,8 @@ class GrpcSkeletonAgent:
         self._kv = kv
         self._ready_step: Optional[int] = None
         self._host_reqs: Mapping[str, Req] = {}
+        # 已对本机 ensure 过 prompt KV 的 req（避免每步 decode Lookup 污染/重复 Get）
+        self._ensured_prefix: set[str] = set()
 
     def bind_host_reqs(self, reqs: Mapping[str, Req]) -> None:
         """PoolIface 在 prepare 前注入 Host Req（协议层不持权威）。"""
@@ -87,25 +89,34 @@ class GrpcSkeletonAgent:
 
     def prepare_step(self, plan: PreparePlan) -> ReadyHandle:
         if self._ready_step is not None:
-            raise PoolError(PoolErrorCode.NOT_READY, f"prepare while ready={self._ready_step}")
+            raise PoolError(PoolErrorCode.PROTOCOL_ERROR, f"prepare while ready={self._ready_step}")
 
         stats: Dict[str, StepStats] = {}
         try:
-            # 只回 StepStats；Host Req 字段由 node_scheduler process 统一写入。
-            # 前缀 ensure 仅在写 prompt 区间时做：DECODE 写槽也会进 write_set，
-            # 若对整段 prompt 再 Lookup，会把刚 Register 的块算成「复用」污染 reused_blocks。
+            # vLLM 几何：本步触及 prompt 区间则 ensure（写残差，或读前缀且尚未 ensure）。
+            # 已 ensure 的 decode 步不再 Lookup，避免刚 Register 块被计成 reused。
+            touched: Dict[str, bool] = {}
             for io in plan.write_set:
                 req = self._host_reqs[io.req_id]
                 prompt_len = len(req.prompt_token_ids)
                 if io.token_start < prompt_len:
-                    stats[io.req_id] = self._ensure_prefix_kv(req)
-                else:
-                    stats.setdefault(io.req_id, StepStats())
+                    touched[io.req_id] = True
             for io in plan.read_set:
-                if io.req_id in stats:
-                    continue
                 req = self._host_reqs[io.req_id]
-                stats[io.req_id] = StepStats(reused_blocks=req.reused_blocks, prefill_blocks=0)
+                prompt_len = len(req.prompt_token_ids)
+                if io.token_end > 0 and io.token_start < prompt_len:
+                    if io.req_id not in self._ensured_prefix:
+                        touched[io.req_id] = True
+
+            for rid in {io.req_id for io in list(plan.read_set) + list(plan.write_set)}:
+                req = self._host_reqs[rid]
+                if touched.get(rid):
+                    stats[rid] = self._ensure_prefix_kv(req)
+                    self._ensured_prefix.add(rid)
+                else:
+                    stats.setdefault(
+                        rid, StepStats(reused_blocks=req.reused_blocks, prefill_blocks=0)
+                    )
         except grpc.RpcError as e:
             raise PoolError(PoolErrorCode.DOWNSTREAM, e.details() or str(e)) from e
         except RuntimeError as e:
@@ -121,10 +132,11 @@ class GrpcSkeletonAgent:
 
     def done(self, step_id: int) -> None:
         if self._ready_step is None or self._ready_step != step_id:
-            raise PoolError(PoolErrorCode.NOT_READY, f"done step={step_id} ready={self._ready_step}")
+            raise PoolError(PoolErrorCode.PROTOCOL_ERROR, f"done step={step_id} ready={self._ready_step}")
         self._ready_step = None
 
     def on_request_finished(self, finish: FinishRequest) -> None:
+        self._ensured_prefix.discard(finish.req_id)
         try:
             self._cp.RequestBarrier(
                 lake_pb2.RequestBarrierRequest(request_id=finish.req_id, node_id=finish.node_id)

@@ -27,7 +27,7 @@ def test_ready_done_mismatch() -> None:
         ag.done(1)
         raise AssertionError("expected PoolError")
     except PoolError as e:
-        assert e.code == PoolErrorCode.NOT_READY
+        assert e.code == PoolErrorCode.PROTOCOL_ERROR
 
 
 def test_prepare_done_roundtrip() -> None:

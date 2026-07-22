@@ -25,7 +25,6 @@ class Req:
     finished: bool = False
     finish_reason: Optional[str] = None
     exec_mode: ExecMode = ExecMode.COLOCATED
-    prebuilt_done: bool = False  # 已做过 PREBUILT 元数据步
 
     @property
     def num_output_tokens(self) -> int:

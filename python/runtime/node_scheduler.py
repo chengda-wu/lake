@@ -17,7 +17,7 @@ from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from runtime.exec_mode import ExecMode
 from runtime.future_map import FutureMap
-from runtime.mode_select import select_exec_mode, should_prebuilt
+from runtime.mode_select import full_local_hit, select_exec_mode
 from runtime.prefix_hint import PrefixHint
 from runtime.req import Req
 from runtime.role import RoleConfig
@@ -85,7 +85,8 @@ class NodeScheduler:
             req.exec_mode = select_exec_mode(
                 hint, prompt_len=len(req.prompt_token_ids), role=self._role.role
             )
-            if should_prebuilt(hint, len(req.prompt_token_ids)):
+            if full_local_hit(hint, len(req.prompt_token_ids)):
+                # vLLM 几何：整段已在 L0 → computed=prompt_len，下一步直接生成
                 req.num_computed_tokens = len(req.prompt_token_ids)
         self._reqs[req.req_id] = req
         self._waiting.append(req.req_id)
@@ -148,9 +149,87 @@ class NodeScheduler:
 
     def _run_batch(self, output: SchedulerOutput) -> None:
         ready = self._pool.prepare_step(output, self._reqs)
+        # D2：allow_partial_hit 缩批后须按 effective_* 执行（默认与 plan 相同）
+        output = self._respect_effective_sets(output, ready)
         self.timeline.append(("execute", output.step_id))
         runner_out = self._runner.execute_model(output, ready, self._reqs)
         self._result_queue.append(_BatchResult(output=output, runner_out=runner_out, ready=ready))
+
+    def _respect_effective_sets(self, output: SchedulerOutput, ready: ReadyHandle) -> SchedulerOutput:
+        """按 ReadyHandle.effective_*_set 过滤本步；丢弃的 req 回滚 inflight，下步重试。
+
+        effective_* 皆空 ⇒ 视为未缩批（兼容未填该字段的 FakePool/旧 agent）。
+        """
+        if not ready.effective_read_set and not ready.effective_write_set:
+            return output
+        keep = {io.req_id for io in ready.effective_read_set} | {
+            io.req_id for io in ready.effective_write_set
+        }
+        planned = set(output.num_scheduled_tokens)
+        dropped = planned - keep
+        if not dropped:
+            return output
+
+        for rid in dropped:
+            n = output.num_scheduled_tokens.get(rid, 0)
+            if n:
+                self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - n)
+            LOG.info("respect effective_* drop req=%s step=%s", rid, output.step_id)
+
+        num_tokens = {rid: n for rid, n in output.num_scheduled_tokens.items() if rid in keep}
+        if not num_tokens:
+            return SchedulerOutput(
+                step_id=output.step_id,
+                forward_mode=ForwardMode.IDLE,
+                total_num_scheduled_tokens=0,
+            )
+
+        new_reqs = [r for r in output.scheduled_new_reqs if r.req_id in keep]
+        cached = CachedRequestData()
+        old_c = output.scheduled_cached_reqs
+        for i, rid in enumerate(old_c.req_ids):
+            if rid not in keep:
+                continue
+            cached.req_ids.append(rid)
+            if i < len(old_c.num_computed_tokens):
+                cached.num_computed_tokens.append(old_c.num_computed_tokens[i])
+            if i < len(old_c.num_output_tokens):
+                cached.num_output_tokens.append(old_c.num_output_tokens[i])
+
+        req_modes = {rid: m for rid, m in output.req_forward_modes.items() if rid in keep}
+        modes = list(req_modes.values())
+        if all(m == ForwardMode.EXTEND for m in modes):
+            mode = ForwardMode.EXTEND
+        elif all(m == ForwardMode.DECODE for m in modes):
+            mode = ForwardMode.DECODE
+        elif all(m == ForwardMode.TARGET_VERIFY for m in modes):
+            mode = ForwardMode.TARGET_VERIFY
+        else:
+            mode = ForwardMode.MIXED
+
+        spec = None
+        if output.scheduled_spec_decode_tokens:
+            spec = {rid: t for rid, t in output.scheduled_spec_decode_tokens.items() if rid in keep}
+        computed_at = {
+            rid: c for rid, c in output.req_num_computed_at_schedule.items() if rid in keep
+        }
+
+        return SchedulerOutput(
+            step_id=output.step_id,
+            forward_mode=mode,
+            scheduled_new_reqs=new_reqs,
+            scheduled_cached_reqs=cached,
+            num_scheduled_tokens=num_tokens,
+            total_num_scheduled_tokens=sum(num_tokens.values()),
+            read_set=[io for io in ready.effective_read_set if io.req_id in keep],
+            write_set=[io for io in ready.effective_write_set if io.req_id in keep],
+            global_num_tokens=output.global_num_tokens,
+            can_run_graph=output.can_run_graph,
+            req_forward_modes=req_modes,
+            scheduled_spec_decode_tokens=spec or None,
+            has_structured_output=output.has_structured_output,
+            req_num_computed_at_schedule=computed_at,
+        )
 
     def _pop_and_process(self) -> None:
         if not self._result_queue:
@@ -200,76 +279,43 @@ class NodeScheduler:
         read_set: List[ReqIoSet] = []
         write_set: List[ReqIoSet] = []
         req_modes: Dict[str, ForwardMode] = {}
+        computed_at: Dict[str, int] = {}
         spec_tokens: Dict[str, List[int]] = {}
 
         for rid in list(self._running):
             req = self._reqs[rid]
             if req.finished:
                 continue
-
             prompt_len = len(req.prompt_token_ids)
+            computed = req.num_computed_tokens
+            computed_at[rid] = computed
 
-            # D-direct 全命中：PREBUILT 元数据步（跳过 extend forward）
-            if (
-                not req.prebuilt_done
-                and req.num_output_tokens == 0
-                and req.num_computed_tokens >= prompt_len > 0
-                and req.exec_mode == ExecMode.D_DIRECT
-            ):
-                if self._has_unprocessed_phase(rid, ForwardMode.PREBUILT):
+            if computed < prompt_len:
+                # prompt 残差不可重叠重入（Host computed 未推进会双写）
+                if self._has_unprocessed_prompt(rid, prompt_len):
                     continue
-                num_tokens[rid] = 1  # 虚拟工作量：组表 / fence
-                read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=prompt_len))
-                if req.num_computed_tokens == prompt_len and not req.output_token_ids:
-                    new_reqs.append(
-                        NewRequestData(
-                            req_id=rid,
-                            prompt_token_ids=list(req.prompt_token_ids),
-                            sampling_params=req.sampling_params,
-                            num_computed_tokens=req.num_computed_tokens,
-                        )
-                    )
-                else:
-                    cached.req_ids.append(rid)
-                    cached.num_computed_tokens.append(req.num_computed_tokens)
-                    cached.num_output_tokens.append(req.num_output_tokens)
-                req_modes[rid] = ForwardMode.PREBUILT
-                continue
-
-            if req.num_computed_tokens < prompt_len:
-                # EXTEND 不可重叠重入（Host computed 未推进前再 schedule 会双写）
-                if self._has_unprocessed_phase(rid, ForwardMode.EXTEND):
-                    continue
-                n = prompt_len - req.num_computed_tokens
+                n = prompt_len - computed
                 num_tokens[rid] = n
-                # D1：read_set 覆盖已命中段；write_set 为残差
-                if req.num_computed_tokens > 0:
-                    read_set.append(
-                        ReqIoSet(req_id=rid, token_start=0, token_end=req.num_computed_tokens)
-                    )
-                write_set.append(
-                    ReqIoSet(
-                        req_id=rid,
-                        token_start=req.num_computed_tokens,
-                        token_end=prompt_len,
-                    )
-                )
-                if req.num_computed_tokens == 0 and req.num_output_tokens == 0:
+                if computed > 0:
+                    read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=computed))
+                write_set.append(ReqIoSet(req_id=rid, token_start=computed, token_end=prompt_len))
+                if computed == 0 and req.num_output_tokens == 0:
                     new_reqs.append(
                         NewRequestData(
                             req_id=rid,
                             prompt_token_ids=list(req.prompt_token_ids),
                             sampling_params=req.sampling_params,
-                            num_computed_tokens=req.num_computed_tokens,
+                            num_computed_tokens=computed,
                         )
                     )
                 else:
                     cached.req_ids.append(rid)
-                    cached.num_computed_tokens.append(req.num_computed_tokens)
+                    cached.num_computed_tokens.append(computed)
                     cached.num_output_tokens.append(req.num_output_tokens)
-                req_modes[rid] = ForwardMode.EXTEND
+                req_modes[rid] = ForwardMode.EXTEND  # 派生标签：prompt 相
                 continue
 
+            # 生成相：允许 overlap；用 _inflight_decode 预留，不因 result_queue 挡 schedule
             inflight = self._inflight_decode.get(rid, 0)
             if self._use_runner_tokens:
                 left = req.sampling_params.max_new_tokens - req.num_output_tokens - inflight
@@ -281,17 +327,17 @@ class NodeScheduler:
                     continue
 
             pending = self._pending_drafts.get(rid) or []
-            # overlap：decode 输入可经 FutureMap.resolve（上步 token）
             _ = self._future_map.resolve(rid)
             end = len(req.all_token_ids) + inflight
             read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
             cached.req_ids.append(rid)
-            cached.num_computed_tokens.append(req.num_computed_tokens + inflight)
+            cached.num_computed_tokens.append(computed + inflight)
             cached.num_output_tokens.append(req.num_output_tokens + inflight)
 
-            if self._spec_enabled and pending and not self._has_unprocessed_phase(rid, ForwardMode.TARGET_VERIFY):
-                # 一步验证 draft + bonus；写槽按最多 len(draft)+1
-                max_accept = min(len(pending) + 1, left if self._use_runner_tokens else len(pending) + 1)
+            if self._spec_enabled and pending:
+                max_accept = min(
+                    len(pending) + 1, left if self._use_runner_tokens else len(pending) + 1
+                )
                 num_tokens[rid] = max_accept
                 write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + max_accept))
                 req_modes[rid] = ForwardMode.TARGET_VERIFY
@@ -309,14 +355,17 @@ class NodeScheduler:
         modes = list(req_modes.values())
         if all(m == ForwardMode.EXTEND for m in modes):
             mode = ForwardMode.EXTEND
-        elif all(m == ForwardMode.PREBUILT for m in modes):
-            mode = ForwardMode.PREBUILT
         elif all(m == ForwardMode.DECODE for m in modes):
             mode = ForwardMode.DECODE
         elif all(m == ForwardMode.TARGET_VERIFY for m in modes):
             mode = ForwardMode.TARGET_VERIFY
         else:
             mode = ForwardMode.MIXED
+
+        # 全 1-token 生成步可图（骨架占位）
+        can_graph = mode in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY) and all(
+            n == 1 or req_modes[r] == ForwardMode.TARGET_VERIFY for r, n in num_tokens.items()
+        )
 
         return SchedulerOutput(
             step_id=step,
@@ -328,64 +377,64 @@ class NodeScheduler:
             read_set=read_set,
             write_set=write_set,
             global_num_tokens=None,
-            can_run_graph=None,
+            can_run_graph=can_graph,
             req_forward_modes=req_modes,
             scheduled_spec_decode_tokens=spec_tokens or None,
+            req_num_computed_at_schedule={r: computed_at[r] for r in num_tokens},
         )
 
-    def _has_unprocessed_phase(self, rid: str, phase: ForwardMode) -> bool:
-        return any(br.output.req_forward_modes.get(rid) == phase for br in self._result_queue)
+    def _has_unprocessed_prompt(self, rid: str, prompt_len: int) -> bool:
+        for br in self._result_queue:
+            if rid not in br.output.num_scheduled_tokens:
+                continue
+            c = br.output.req_num_computed_at_schedule.get(rid, 0)
+            if c < prompt_len:
+                return True
+        return False
 
     def _process_batch_result(self, output: SchedulerOutput, runner_out: ModelRunnerOutput) -> None:
-        for rid in output.num_scheduled_tokens:
+        for rid, scheduled_n in output.num_scheduled_tokens.items():
             req = self._reqs[rid]
-            phase = output.req_forward_modes.get(rid, output.forward_mode)
+            prompt_len = len(req.prompt_token_ids)
+            computed_before = output.req_num_computed_at_schedule.get(rid, req.num_computed_tokens)
+            spec = (output.scheduled_spec_decode_tokens or {}).get(rid)
 
-            if phase == ForwardMode.EXTEND:
-                req.num_computed_tokens = len(req.prompt_token_ids)
+            if computed_before < prompt_len:
+                # prompt 残差步：推进 computed；不产出 user-facing token
+                req.num_computed_tokens = prompt_len
                 drafts = runner_out.next_draft_tokens.get(rid) or []
                 if drafts:
                     self._pending_drafts[rid] = drafts
                 continue
 
-            if phase == ForwardMode.PREBUILT:
-                req.prebuilt_done = True
-                req.num_computed_tokens = len(req.prompt_token_ids)
-                drafts = runner_out.next_draft_tokens.get(rid) or []
-                if drafts:
-                    self._pending_drafts[rid] = drafts
-                continue
+            # 生成步
+            self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - scheduled_n)
+            if spec is not None:
+                self._pending_drafts.pop(rid, None)
 
-            if phase in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY):
-                scheduled_n = output.num_scheduled_tokens.get(rid, 1)
-                self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - scheduled_n)
-                if phase == ForwardMode.TARGET_VERIFY:
-                    self._pending_drafts.pop(rid, None)
-
-                if self._use_runner_tokens:
-                    produced = list(runner_out.next_token_ids.get(rid) or [])
-                    left = req.sampling_params.max_new_tokens - req.num_output_tokens
-                    if left < len(produced):
-                        produced = produced[:left]
-                    for tok in produced:
-                        req.output_token_ids.append(int(tok))
-                        req.num_computed_tokens += 1
-                    if produced:
-                        self._future_map.stash(rid, int(produced[-1]))
-                    # 回收 TARGET_VERIFY 预留但未接受的写槽
-                    self._pool.commit_write_extent(rid, len(req.all_token_ids))
-                    next_d = runner_out.next_draft_tokens.get(rid) or []
-                    if next_d and not req.finished:
-                        self._pending_drafts[rid] = next_d
-                else:
-                    remain = self._mock_remaining.get(rid) or []
-                    if remain:
-                        tok = remain.pop(0)
-                        req.output_token_ids.append(tok)
-                        req.num_computed_tokens += 1
-                        self._mock_remaining[rid] = remain
-                        self._future_map.stash(rid, tok)
-                    self._pool.commit_write_extent(rid, len(req.all_token_ids))
+            if self._use_runner_tokens:
+                produced = list(runner_out.next_token_ids.get(rid) or [])
+                left = req.sampling_params.max_new_tokens - req.num_output_tokens
+                if left < len(produced):
+                    produced = produced[:left]
+                for tok in produced:
+                    req.output_token_ids.append(int(tok))
+                    req.num_computed_tokens += 1
+                if produced:
+                    self._future_map.stash(rid, int(produced[-1]))
+                self._pool.commit_write_extent(rid, len(req.all_token_ids))
+                next_d = runner_out.next_draft_tokens.get(rid) or []
+                if next_d and not req.finished:
+                    self._pending_drafts[rid] = next_d
+            else:
+                remain = self._mock_remaining.get(rid) or []
+                if remain:
+                    tok = remain.pop(0)
+                    req.output_token_ids.append(tok)
+                    req.num_computed_tokens += 1
+                    self._mock_remaining[rid] = remain
+                    self._future_map.stash(rid, tok)
+                self._pool.commit_write_extent(rid, len(req.all_token_ids))
 
             if req.num_output_tokens >= req.sampling_params.max_new_tokens:
                 req.finished = True

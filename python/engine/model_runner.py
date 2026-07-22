@@ -1,7 +1,9 @@
 """薄 ModelRunner：consume ready → forward → done →（sample / 投机同路径）。
 
-对齐 vLLM `GPUModelRunner.execute_model`；投机编排仿 SGLang 共置串行
-（target → post_forward → 下轮 pre_forward → target_verify）。
+对齐 vLLM `GPUModelRunner.execute_model`：统一入口，按本步 token 几何执行
+（`num_scheduled_tokens` / `req_num_computed_at_schedule`），不按 SGLang 分相状态机。
+connector/agent fence 用 try/finally 收尾（V1 `kv_connector_model_runner_mixin`）。
+投机：共置 draft → target verify（chain reject）。
 """
 
 from __future__ import annotations
@@ -17,14 +19,13 @@ from engine.pool_types import ReadyHandle
 from engine.sample.greedy import greedy_sample
 from engine.sample.reject import chain_reject_sample
 from runtime.req import Req
-from runtime.scheduler_output import ForwardMode, SchedulerOutput
+from runtime.scheduler_output import SchedulerOutput
 
 
 @dataclass
 class ModelRunnerOutput:
     step_id: int
     next_token_ids: Dict[str, List[int]] = field(default_factory=dict)
-    # 供下一步 TARGET_VERIFY
     next_draft_tokens: Dict[str, List[int]] = field(default_factory=dict)
     model_backend: str = "mock"
 
@@ -69,22 +70,24 @@ class ModelRunner:
         next_tokens: Dict[str, List[int]] = {}
         next_drafts: Dict[str, List[int]] = {}
 
-        if self.model_backend == "tiny_lm":
-            next_tokens, next_drafts = self._forward_tiny(output, host_reqs or {})
-        elif output.forward_mode in (
-            ForwardMode.DECODE,
-            ForwardMode.MIXED,
-            ForwardMode.PREBUILT,
-            ForwardMode.TARGET_VERIFY,
-        ):
-            for req_id, n in output.num_scheduled_tokens.items():
-                if n <= 0:
-                    continue
-                phase = output.req_forward_modes.get(req_id, output.forward_mode)
-                if phase in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY):
-                    next_tokens[req_id] = [0]
+        try:
+            if self.model_backend == "tiny_lm":
+                next_tokens, next_drafts = self._forward_tiny(output, host_reqs or {})
+            else:
+                # mock：仅生成步回占位 token
+                for req_id, n in output.num_scheduled_tokens.items():
+                    if n <= 0:
+                        continue
+                    req = (host_reqs or {}).get(req_id)
+                    if req is None:
+                        continue
+                    prompt_len = len(req.prompt_token_ids)
+                    computed = output.req_num_computed_at_schedule.get(req_id, req.num_computed_tokens)
+                    if computed >= prompt_len:
+                        next_tokens[req_id] = [0]
+        finally:
+            self._pool.done(output.step_id)
 
-        self._pool.done(output.step_id)
         return ModelRunnerOutput(
             step_id=output.step_id,
             next_token_ids=next_tokens,
@@ -105,45 +108,29 @@ class ModelRunner:
         for req_id, n in output.num_scheduled_tokens.items():
             if n <= 0:
                 continue
-            phase = output.req_forward_modes.get(req_id, output.forward_mode)
             req = host_reqs.get(req_id)
             if req is None:
                 continue
+            prompt_len = len(req.prompt_token_ids)
+            computed = output.req_num_computed_at_schedule.get(req_id, req.num_computed_tokens)
+            draft = list(spec_map.get(req_id) or [])
 
-            if phase == ForwardMode.EXTEND:
-                # C3 简化：整段重算（喂全 prompt）。真路径须只跑残差
-                # [num_computed, prompt_len)，已命中段经 read_set/池 L0 复用。
+            if computed < prompt_len:
+                # prompt 残差：骨架整段重算；真路径只跑 [computed, prompt_len)
                 _ = self._tiny.forward_logits(req.prompt_token_ids)
                 if self._drafter is not None:
                     self._drafter.post_forward(req_id, req.prompt_token_ids)
                     drafts_out[req_id] = self._drafter.pre_forward(req_id)
                 continue
 
-            if phase == ForwardMode.PREBUILT:
-                # KV 已在 L0：跳过 prefill forward（对齐 SGLang PrebuiltExtendBatch）
-                if self._drafter is not None:
-                    self._drafter.post_forward(req_id, req.prompt_token_ids)
-                    drafts_out[req_id] = self._drafter.pre_forward(req_id)
-                continue
-
-            if phase == ForwardMode.DRAFT_EXTEND:
-                # 前缀命中后重建 draft seed（对齐 SGLang draft-extend 语义骨架）
-                if self._drafter is not None:
-                    self._drafter.post_forward(req_id, req.all_token_ids)
-                    drafts_out[req_id] = self._drafter.pre_forward(req_id)
-                continue
-
-            if phase == ForwardMode.TARGET_VERIFY:
-                draft = list(spec_map.get(req_id) or [])
+            if draft:
                 accepted = chain_reject_sample(
                     req.all_token_ids, draft, self._tiny.greedy_token
                 )
                 out[req_id] = accepted
-            elif phase == ForwardMode.DECODE:
+            else:
                 logits = self._tiny.forward_logits(req.all_token_ids)
                 out[req_id] = [greedy_sample(logits)]
-            else:
-                continue
 
             if self._drafter is not None and req_id in out:
                 new_ctx = list(req.all_token_ids) + list(out[req_id])

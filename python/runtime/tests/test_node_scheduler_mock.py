@@ -121,10 +121,46 @@ def test_future_map_holds_last_token() -> None:
     assert done.output_token_ids[-1] == 1010  # seed=8 → 1009,1010
 
 
+def test_respect_effective_sets_drops_req() -> None:
+    """P2-1：prepare 缩批后 scheduler 不得再 execute 被丢的 req。"""
+    from engine.agents.memory import InMemoryAgent
+    from engine.pool_iface import PoolIface
+    from runtime.role import RoleConfig
+    from runtime.scheduler_output import ForwardMode, ReqIoSet, SchedulerOutput
+
+    ag = InMemoryAgent()
+    ag.force_pull_reqs.add("drop")
+    ag.pull_cost_ms = 50
+    ag.l0_token_end["keep"] = 4  # keep 本地已齐，无需补拉
+    pool = PoolIface(ag, pull_budget_ms=10, allow_partial_hit=True)
+    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    runner = ModelRunner(pool)
+    sched = NodeScheduler(pool, runner, role)
+
+    out = SchedulerOutput(
+        step_id=1,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"drop": 1, "keep": 1},
+        total_num_scheduled_tokens=2,
+        read_set=[
+            ReqIoSet(req_id="drop", token_start=0, token_end=8),
+            ReqIoSet(req_id="keep", token_start=0, token_end=4),
+        ],
+        write_set=[ReqIoSet(req_id="keep", token_start=4, token_end=5)],
+        req_forward_modes={"drop": ForwardMode.DECODE, "keep": ForwardMode.DECODE},
+    )
+    ready = pool.prepare_step(out, {})
+    filtered = sched._respect_effective_sets(out, ready)  # noqa: SLF001
+    assert "drop" not in filtered.num_scheduled_tokens
+    assert "keep" in filtered.num_scheduled_tokens
+    pool.done(out.step_id)
+
+
 if __name__ == "__main__":
     test_extend_then_decode_finishes()
     test_continuous_batching_two_reqs()
     test_overlap_process_lags_execute()
     test_sync_loop_process_before_next_execute()
     test_future_map_holds_last_token()
+    test_respect_effective_sets_drops_req()
     print("test_node_scheduler_mock OK")

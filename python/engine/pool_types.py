@@ -13,7 +13,7 @@ class PoolErrorCode(str, Enum):
     OK = "OK"
     TIMEOUT = "TIMEOUT"  # 补拉超过 pull_budget_ms
     CAPACITY = "CAPACITY"  # 硬配额 / 无空闲 L0 slot
-    NOT_READY = "NOT_READY"  # ready/done 错配
+    PROTOCOL_ERROR = "PROTOCOL_ERROR"  # ready/done fence 错配或重入 prepare
     DOWNSTREAM = "DOWNSTREAM"  # 控制面 / KV 后端失败
     INVALID_ARG = "INVALID_ARG"
 

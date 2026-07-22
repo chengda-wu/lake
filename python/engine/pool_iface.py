@@ -52,11 +52,11 @@ class PoolIface:
         if isinstance(self._agent, InMemoryAgent):
             computed, full = self._agent.probe_local(req.req_id, len(req.prompt_token_ids))
             blocks = computed // 8
-            # local_hit = 整段在 L0（部分命中只填 computed_tokens，走混部残差 EXTEND）
+            # local_hit = 有本机 L0 前缀（部分亦可 → D-direct 残差）；prebuilt 仅整段
             return PrefixHint(
                 computed_tokens=computed,
                 reused_blocks=blocks,
-                local_hit=full,
+                local_hit=computed > 0,
                 prebuilt=full,
             )
         return PrefixHint()

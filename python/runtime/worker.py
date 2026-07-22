@@ -3,12 +3,17 @@
 P3 仍：Router → AgentService.Dispatch(ack) → WorkerService.Generate。
 生产路径：Router Dispatch → agent 组 batch → FFI 引擎；本门面可收窄为控制面 RPC。
 
-参考:vLLM KVConnectorBase_V1(worker↔池);SGLang Scheduler+薄 ModelRunner。
+参考:vLLM EngineCore 单环 schedule→execute（非每请求并行占 runner）；
+KVConnectorBase_V1；SGLang Scheduler+薄 ModelRunner。
+骨架期：共享 PoolIface/ModelRunner 单槽 ready → Generate 必须串行；
+真正 continuous batching 要共享一个长期 NodeScheduler（入队 + 单 step 环），
+而不是每请求新建 scheduler 并行 prepare。
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent import futures
 
 import grpc
@@ -33,7 +38,7 @@ _POOL_ERROR_STATUS = {
     PoolErrorCode.TIMEOUT: grpc.StatusCode.UNAVAILABLE,  # 触发 F4 重路由
     PoolErrorCode.CAPACITY: grpc.StatusCode.RESOURCE_EXHAUSTED,
     PoolErrorCode.DOWNSTREAM: grpc.StatusCode.UNAVAILABLE,
-    PoolErrorCode.NOT_READY: grpc.StatusCode.INTERNAL,
+    PoolErrorCode.PROTOCOL_ERROR: grpc.StatusCode.UNAVAILABLE,  # fence 乱 → F4
     PoolErrorCode.INVALID_ARG: grpc.StatusCode.INVALID_ARGUMENT,
 }
 
@@ -66,8 +71,16 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             enable_drafter=self._role.enable_drafter,
             num_draft_tokens=self._role.num_draft_tokens,
         )
+        # 共享 agent 单槽 _ready_step；对齐 vLLM 单 EngineCore 环，禁止并行 prepare
+        self._generate_lock = threading.Lock()
 
     def Generate(self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext) -> lake_pb2.GenerateResponse:
+        with self._generate_lock:
+            return self._generate_locked(request, context)
+
+    def _generate_locked(
+        self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext
+    ) -> lake_pb2.GenerateResponse:
         node = request.requester_node_id or NODE_ID
         req = build_req_from_generate(
             request_id=request.request_id,
@@ -76,6 +89,7 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             max_new_tokens=request.max_new_tokens or 4,
             node_id=node,
         )
+        # 每请求临时 scheduler：骨架可跑通；生产应改为长期 NodeScheduler + 入队
         sched = NodeScheduler(self._pool, self._runner, self._role)
         try:
             hint = self._pool.probe_prefix(req)
@@ -109,7 +123,8 @@ def serve(bind: str, cp_addr: str, kv_addr: str) -> None:
     cp = lake_pb2_grpc.ControlPlaneServiceStub(cp_chan)
     kv = lake_pb2_grpc.SkeletonKvServiceStub(kv_chan)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    # Generate 已在 servicer 内加锁；max_workers=1 再收一层，避免误并行占槽
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
     lake_pb2_grpc.add_WorkerServiceServicer_to_server(WorkerServicer(cp, kv), server)
     server.add_insecure_port(bind)
     server.start()

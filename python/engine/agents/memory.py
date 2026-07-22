@@ -40,7 +40,10 @@ class InMemoryAgent:
         self.l0_token_end[req_id] = max(self.l0_token_end.get(req_id, 0), token_end)
 
     def probe_local(self, req_id: str, prompt_len: int) -> tuple[int, bool]:
-        """返回 (computed_tokens, full_local)。full_local=整段 prompt 已在 L0。"""
+        """返回 (computed_tokens, full_local)。
+
+        computed>0 ⇒ 有本机前缀（D-direct）；full_local ⇒ 整段在 L0（computed=prompt_len）。
+        """
         have = self.l0_token_end.get(req_id, 0)
         computed = min(have, prompt_len)
         full = prompt_len > 0 and have >= prompt_len
@@ -54,7 +57,7 @@ class InMemoryAgent:
     def prepare_step(self, plan: PreparePlan) -> ReadyHandle:
         self.prepare_calls += 1
         if self._ready_step is not None:
-            raise PoolError(PoolErrorCode.NOT_READY, f"prepare while ready={self._ready_step}")
+            raise PoolError(PoolErrorCode.PROTOCOL_ERROR, f"prepare while ready={self._ready_step}")
 
         # overlap：先冲刷已无冻结引用的延迟结束
         self._flush_deferred_finish()
@@ -107,7 +110,7 @@ class InMemoryAgent:
     def done(self, step_id: int) -> None:
         self.done_calls += 1
         if self._ready_step is None or self._ready_step != step_id:
-            raise PoolError(PoolErrorCode.NOT_READY, f"done step={step_id} ready={self._ready_step}")
+            raise PoolError(PoolErrorCode.PROTOCOL_ERROR, f"done step={step_id} ready={self._ready_step}")
         self._ready_step = None
         # step 结束解冻（简化：清空本步冻结；生产按 block ref）
         self._frozen_reqs.clear()
