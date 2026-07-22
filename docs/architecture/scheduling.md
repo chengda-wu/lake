@@ -83,16 +83,47 @@
 
 ## 2. 池间调度
 
+> 本节「Prefill / Decode / Draft 池」指**部署与扩缩画像**(逻辑池),不是 `python/prefill|decode|draft/` 代码包——进程内只有一套 `engine/`,角色由启动配置选择。见 [`compute-layer.md`](compute-layer.md)「池 ≠ 代码包」。
+
 - Prefill → Decode 的 KV 传递通过存储池传输引擎(RDMA 数据面,见 [`kv-cache-pool.md`](kv-cache-pool.md) "跨实例 KV 传输"),需在 Prefill 完成时序上对齐 Decode 就绪（**仅 PD 分离模式**;混部/D-direct 为本地完成、无跨节点传输,见 [`execution-modes.md`](execution-modes.md)）。
-- 投机解码：Draft 池在 Decode 侧生成候选，验证失败回退到标准 decode。
+- 投机解码：Draft 池(部署画像;默认 drafter 与 Decode 共置,独立 Draft 池可选)在 Decode 侧生成候选，验证失败回退到标准 decode。
 - 反压：Decode 池拥塞时，减缓 Prefill 速率（背压），避免 KV Pool 堆积。属池间内部流控（不丢请求、不降 batch），区别于 gateway 的请求级 shedding。
 
 ## 3. 节点级调度
 
-- **Continuous batching**：Decode 节点动态拼接 batch。
-- **PagedAttention** 风格的块状 KV 管理，与存储池的 block 粒度对齐。
+- **落点**:`python/runtime/node_scheduler.py` → 产出 `SchedulerOutput`(节点侧;字段草图见 [`compute-layer.md`](compute-layer.md)「开发前待补设计」D1)。集群选路仍归 Go Router;计算节点内**一份**调度决策扇出多卡(见 compute-layer TP)。
+- **Host `Req` 权威**:**完全**在 `node_scheduler`(token 历史、采样/stop/grammar、结束判定);`ModelRunner` 无长期请求表。见 [`compute-layer.md`](compute-layer.md) 决策 5。
+- **默认 overlap**:主循环对齐 SGLang `event_loop_overlap`(CPU 收尾 ∥ 下一 GPU forward;device 侧 token 接力)。请求结束 → `agent.on_request_finished`(见 compute-layer「请求结束与资源释放」)。
+- **Continuous batching**：Decode / 混部节点动态拼接 batch;执行形态由角色配置 + 本步 `SchedulerOutput` 选择(同一 `engine/`,非 prefill/decode 分树)。
+- **PagedAttention** 风格的块状 KV 管理，与存储池的 block 粒度对齐(表由池 agent 组装,调度器不持 KV 权威)。
 - **放置与 batch 单向耦合（方案 Z）**：同一 batch 各 sequence 的 KV 必须同时在本机 HBM（attention 一次读全部）。存储池按热度主动预放置 KV 到 HBM 并发布位置视图;调度器读视图组 batch（本地命中优先），缺失补拉，不反向指挥放置。见 [`storage-layer.md`](storage-layer.md) / [`execution-modes.md`](execution-modes.md)。
 - **抢占**：高优先级请求可抢占低优先级，被抢占者的 KV 在存储池中保留（不丢失，本机 HBM 放置释放归还存储池）。
+
+### 3.1 DP 间 step 信息同步(落节点 Scheduler)
+
+> **与 §1.1 正交**:§1.1 否定的是跨 DP 的**二次选路/LB**;本节定的是集体通信所需的 **step 元数据同步**(token 数、可否 graph、forward mode 等)。前者归 Router;后者归节点 Scheduler。引擎(`ModelRunner`)不发起该同步。
+
+**已定**:需要 DP/EP 锁步(如 dp-attn、MoE gathered buffer、需 IDLE 陪跑)时,lake 在 **`runtime/node_scheduler`** 这一层做 DP 间信息同步——对齐 SGLang `prepare_mlp_sync_batch` 的层级,不放进 `engine/model_runner`。
+
+```
+各 DP rank: node_scheduler 组本地 batch
+        → sync(all_gather 本步 num_tokens / mode / graph 可行性…)
+        → 空闲 rank 按需造 IDLE 陪跑
+        → 写出 SchedulerOutput(含 global_num_tokens 等)
+        → ModelRunner 只消费已同步字段做 pad / forward(不自行 all_gather 计数)
+```
+
+| 同步什么(初版方向) | 用途 |
+|--------------------|------|
+| 每 rank `num_tokens` / `num_tokens_for_logprob` | pad-to-max、MLP gather 形状 |
+| local forward mode / 是否有活 batch | 决定 IDLE 陪跑 vs 全局空闲 `on_idle` |
+| can_cuda_graph 等 step 标志 | 跨 rank 取交集,避免一 rank graph 一 rank eager 致 hang |
+
+**参考**:SGLang `managers/scheduler_components/dp_attn.py::prepare_mlp_sync_batch_raw` + `MLPSyncBatchInfo.all_gather`(Scheduler 在 `run_batch` 前 gather);ModelRunner 侧 `forward_batch.prepare_mlp_sync_batch` 仅**消费**已写入的 `global_num_tokens`。见 [`../research/sglang/model-runner.md`](../research/sglang/model-runner.md)「Data Parallel」。vLLM 对等语义在 `dp_utils.sync_cudagraph_and_dp_padding` / `execute_dummy_batch`,协调偏 EngineCore+Coordinator——lake 显式选 SGLang 的 **Scheduler 层**落点。
+
+**不做**:把 token 数 sync 塞进 `pool_iface`/存储池;不把该 sync 做成 Router 热路径(Router 只选端点,不知每 step batch 形状)。
+
+**待补**(并入 compute-layer D1/D5):sync 字段清单、进程组(与 TP 组关系)、纯 DP 无 collective 时跳过、与 headroom 规避 drafter-skip 的衔接。
 
 ## 缓存命中感知调度
 

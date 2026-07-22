@@ -260,9 +260,10 @@ KV 跨节点传输按"源在哪、目在哪"自然落到两类网络:
 
 ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-step 强一致撑不住性能预算):
 
-- **第一级:本地引用计数(池的本地 agent 维护,请求级)**。同 vLLM `block_pool.py::free_blocks`/`touch`、sglang `radix_cache.py::inc_lock_ref`/`dec_lock_ref` 的机制——只是归属从引擎进程改为池的本地 agent(因存算分离、block 归池权威、多引擎共享,ref 不能放某引擎进程内)。引擎只通过 read set/write set 间接表达引用,不持计数。
+- **第一级:本地引用计数(池的本地 agent 维护,请求级)**。同 vLLM `block_pool.py::free_blocks`/`touch`、sglang `radix_cache.py::inc_lock_ref`/`dec_lock_ref` 的机制——只是归属从引擎进程改为池的本地 agent(因存算分离、block 归池权威、多引擎共享,ref 不能放某引擎进程内)。引擎只通过 read set/write set 间接表达引用,不持计数。本地 ref 含三类子计数:**请求引用**、**在途传输引用**、**writeback ref**。
   - **请求引用**:block 进入某请求 read set 时 +1。减点只在**请求结束且无续推引用**时(attention 每步读全部 KV,前缀 block 全程 in-flight,不能中途早减)。F4 续推时 ref 不归零而是**转移到新请求**,避免被淘汰。
   - **在途传输引用**:跨实例传输发起时源 block +1(源端冻结,防 RDMA 半传被覆写致损坏);完成 -1。见"PD 分离下的传输流程"。
+  - **writeback ref**:属本地 ref 的子计数(非全局 ref)。满块注册 radix 后到 L2 durable 前 +1,durable ack 后 -1;请求结束屏障要求 flush+ack 后再释放请求引用,故 writeback ref 随屏障与本地 ref 一并收清。详见「写回与生命周期」与 [`consistency.md`](consistency.md) §3。
   - **ref 归 0 ≠ 删内存,而是变"可驱逐候选"**(内存仍在 L0):对齐 vLLM `free_block_queue` / sglang `evictable_size_`——归 0 后 block 还在 HBM,可被前缀命中复用、可作传输源。真正释放 slot 只在 L0 容量不足**驱逐覆写**时,且 L2/L3 有副本可回填。
   - **归 0 不摘位置视图**:只要未被驱逐覆写,位置视图仍记"X 在该节点 L0"→ 仍可命中、仍可直传(D-direct / D→P 直传的命中来源,见 [`data-flow.md`](data-flow.md) §3.4 子情况 A)。只有驱逐覆写才从位置视图摘掉。
   - **step 期间冻结是引用计数的自然结果**:请求在跑 → ref>0 → 副本不被驱逐。无需额外 fence 机制。
@@ -280,10 +281,13 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 引擎产出(在 L0 slot)
   → [满了] 池算哈希 → 注册 radix → 写回 L2(NVMe,F4 恢复点,抗 worker 失败)
   → [注册后 L2 durable 前,block 持 writeback ref 不可驱逐]
-  → 请求结束 = 写回屏障(flush+ack 所有已注册 block 的 L2 写回,再释放 ref)
-  → [尾块,未满] 池写回(纯容错,不进 radix)
+  → 请求结束(node_scheduler 判定) → agent.on_request_finished
+       = 写回屏障(flush+ack 所有已注册 block 的 L2 写回,再释放本地 ref)
+       + 尾块写回(未满,纯容错,不进 radix)
   → KV 续存(供复用/续推) 或 按 TTL/冷热淘汰
 ```
+
+**请求结束入口(已定)**:Host `Req` 权威在 [`compute-layer.md`](compute-layer.md) 的 `node_scheduler`;判定 `finished` 后**只**调用池本地 agent 的 `on_request_finished`——引擎 / ModelRunner **不**持请求表、**不** free block。默认 overlap 下,该调用落在「上批 CPU 收尾」,可与本批 GPU forward 重叠;agent 须守 in-flight 冻结(类 SGLang free_group)。对照 research:[`../research/sglang/block-lifecycle.md`](../research/sglang/block-lifecycle.md) / [`../research/vllm/block-lifecycle.md`](../research/vllm/block-lifecycle.md)。
 
 两条写回路分开(满块结构性,尾块容错性):
 

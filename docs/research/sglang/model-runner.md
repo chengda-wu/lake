@@ -73,7 +73,7 @@ Req  →  ScheduleBatch  →  ForwardBatch
 
 | 类别 | Req(Python/CPU) | ScheduleBatch | ForwardBatch |
 |------|------------------|---------------|--------------|
-| 完整 token 历史 | `origin_input_ids` / `output_ids` | prefill:`prefill_input_ids_cpu`(pinned)→ resolve 后 `input_ids` **GPU**;decode:从 FutureMap gather | 借用 `input_ids`(GPU) |
+| 完整 token 历史 | `origin_input_ids` / `output_ids` | prefill:`prefill_input_ids_cpu`(pinned)→ resolve 后 `input_ids` **GPU**;decode:从 FutureMap gather（见「Overlap schedule」） | 借用 `input_ids`(GPU) |
 | positions | — | — | `init_new` 构造(GPU) |
 | seq lens | 派生 `seqlen` | `seq_lens` GPU + `seq_lens_cpu` | 借用 |
 | `req_pool_idx` | host `int` | `req_pool_indices` GPU(+cpu 镜像) | 借用 |
@@ -361,7 +361,104 @@ TpModelWorker → ModelRunner.forward → self.model
 
 ---
 
+## Overlap schedule（异步调度 / 消 device 空泡）
+
+> 默认开启（`--disable-overlap-schedule` 关掉）。目标：让 **CPU 收尾藏进 GPU forward 阴影**，并用 **FutureMap 在 device 侧接力 token**，避免「等上步 token 回 CPU 再开下步」的空泡。  
+> Grammar 专项（何时仍被迫同步）见 [`../guided-decoding.md`](../guided-decoding.md)；vLLM 对等物是 async scheduling + `pending_structured_output_tokens`。
+
+### 要消的空泡是什么
+
+同步调度一步大致是：`forward → sync → token 回 CPU → 更新 Req/grammar → 组下批 → H2D → forward`。  
+GPU 在 sync / CPU 工作段空转。Overlap 把这段拆开并行。
+
+### 主循环：`event_loop_overlap`
+
+锚点：`managers/scheduler.py::Scheduler.event_loop_overlap`。
+
+```
+while True:
+  recv / get_next_batch
+  if disable_overlap_for_batch:          # 被迫同步：先排空上批
+      process_batch_result(result_queue.pop)
+  if batch:
+      batch_result = run_batch(batch)    # 启动 GPU forward（不立刻 process）
+      result_queue.append((batch.copy(), batch_result))
+  if last_batch and not disable_overlap:
+      process_batch_result(last)         # CPU：copy_done、更新 Req、grammar accept…
+  launch_batch_sample_if_needed(...)     # 常依赖上批 grammar 态后再 sample
+  last_batch = batch
+```
+
+稳态 decode 时间线：
+
+```
+GPU:  … | forward(N)              | forward(N+1)             | …
+CPU:  … | process(N-1) + sample(N)| process(N) + sample(N+1)| …
+```
+
+`run_batch` 只把工作丢上 GPU 并入队；**上批的 CPU 处理与本批 forward 重叠**。注释原文：*overlaps the CPU processing and GPU computation*。
+
+### FutureMap：device 侧 token 接力
+
+仅 CPU∥GPU 不够：下一步 decode 的 `input_ids` 是上步 sample 的 token。若每步都等 token 回 host 再 H2D，仍出泡。
+
+| 机制 | 符号 | 作用 |
+|------|------|------|
+| 缓冲 | `FutureMap.output_tokens_buf` | 按 `req_pool_indices` 存上步 sample 的 token（GPU） |
+| 写入 | `FutureMap.stash` / `publish` + `_relay_forward_payload` | sample 后把 bonus token（及 spec extras）写入 buf |
+| 读出 | `overlap_utils.resolve_forward_inputs` | decode：`input_ids = output_tokens_buf[req_pool_indices]`（GPU gather）；prefill：pinned `prefill_input_ids_cpu` non_blocking H2D；混批：`mix_running_indices` 拼两路 |
+| Spec extras | `RelayPayload`（`topk_*` / `hidden_states` / …） | overlap 路径经 FutureMap relay；非 overlap V2 可直接装 `next_draft_input` |
+| 不中继 | 整份 `Req` | FutureMap **只**中继 token ids / 部分 spec extras |
+
+`FutureMap` 由 `spec_algorithm.create_future_map` 在 Scheduler 初始化时创建（`scheduler.py`）。
+
+### 延迟 sample：`launch_batch_sample_if_needed`
+
+锚点：`scheduler.py::launch_batch_sample_if_needed`。
+
+若 `GenerationBatchResult.delay_sample_func` 非空：在 `forward_stream` 上跑延迟 sample → `_relay_forward_payload` → `copy_to_cpu`。  
+把 sample 从「forward 结束立刻做」挪到「上批 `process_batch_result` 之后」，便于与 grammar bitmask 重叠（mask 填得比 forward 短时≈零开销）。完成后清掉 closure，避免 structured output 路径 VRAM 泄漏。
+
+### 何时关掉 overlap（被迫同步）
+
+`is_disable_overlap_for_batch` → 先 `pop_and_process` 排空 `result_queue`，再开本批：
+
+| 条件 | 原因 |
+|------|------|
+| **spec + grammar + decode** 且 queue 非空（`need_grammar_sync`） | 尚不支持 overlap×spec×grammar；TODO 在源码注释 |
+| 连续两个 extend/prefill（`SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP`） | 优先首包 TTFT，略损吞吐 |
+| DP attention | 用全局 `is_extend_in_batch` 做关 overlap 决策，保证各 rank 一致，防死锁 |
+
+### 与 vLLM async scheduling 对照
+
+| | SGLang overlap | vLLM async |
+|--|----------------|------------|
+| 主循环 | `event_loop_overlap` + `result_queue` | `AsyncScheduler` + `step_with_batch_queue` / placeholder |
+| Token 接力 | **FutureMap GPU buf** | 多依赖 runner 态 / placeholder；无同名 FutureMap |
+| Structured | 非 spec 可藏进阴影；**spec+grammar 强制关 overlap** | `pending_structured_output_tokens` → defer sample |
+| 默认 | overlap **开** | async 可配 |
+
+细节与「能否绝对无空闲」结论见 [`../guided-decoding.md`](../guided-decoding.md)。
+
+### 对 lake（已定）
+
+见 [`../../architecture/compute-layer.md`](../../architecture/compute-layer.md) 决策 5–6：
+
+- **Host `Req` 全在 `node_scheduler`**；引擎无长期 RequestState。
+- **默认 overlap**；落点在 `node_scheduler`（与 DP sync 同层）；FutureMap 类 device 接力待 D10。
+- 请求结束 → **`agent.on_request_finished`**（非引擎内 `cache_finished_req`）。
+- 与 ready/done / 上批 finished∩本批 prepare 的槽位规则并入 D5；spec+grammar 等仍可作关 overlap 例外（同 guided-decoding）。
+
+### 请求结束与资源释放（阶段）
+
+请求结束判定 + KV 收尾在 **`process_batch_result`（Scheduler CPU）**，经 `release_kv_cache` → `cache_finished_req`；不在 ModelRunner.forward。  
+完整层级（free vs 驱逐 vs L3）与 **vLLM `update_from_output` 双端分工**对照见 [block-lifecycle.md](block-lifecycle.md)「层级 1 — 请求结束」与 [../vllm/block-lifecycle.md](../vllm/block-lifecycle.md) 同节。lake 落点见上「对 lake」。
+
+---
+
 ## 与 vLLM ModelRunner V2 对照
+
+> Scheduler→Worker **字段全集**、差异表与架构根因见专文 [`../scheduler-worker-interface.md`](../scheduler-worker-interface.md)（定 lake D1 时优先读）。
 
 vLLM 现有两套 runner,开关 `VLLM_USE_V2_MODEL_RUNNER`(`vllm_config.use_v2_model_runner`),在 `gpu_worker.py` 分支构造:
 
@@ -821,6 +918,7 @@ Worker × (TP×PP)          ← 每 GPU 一个;无独立 Scheduler
 | 编排 | SpecWorker 内嵌 Scheduler 的 `model_worker` | 仿共置串行;`Drafter.post/pre_forward` 统一自回归与 diffusion |
 | DSPARK | SpecWorker 成熟路径;vLLM V2 亦有较新实现 | 以 SGLang `dspark_components/` 为主参考 |
 | Runner 胖瘦 | 薄执行内核 | 宜保持薄(仿 SGLang);模块拆分/connector 可借 V2 |
+| Overlap / 异步调度 | `event_loop_overlap` + FutureMap(见上专节) | **已定默认开**;落 `node_scheduler`;结束打 agent;`Req` 全在 scheduler(见 compute-layer 决策 5–6) |
 | Dummy / graph warmup | 专用 `_dummy_run` / `capture_prepare` | 待定;若 runner 极简,更贴近 SGLang「另造 batch」而非塞进生产 `execute` flag |
 | DP 拓扑 | 每 rank 独立 Scheduler;Controller 选路;dp-attn 用 IDLE 陪跑(vLLM:每 rank EngineCore + Coordinator wave + dummy) | 选路归控制面;陪跑若需要则显式,勿把隐式 all_gather 嵌进无状态 worker |
 | TP/PP 控制 | 每 GPU 一 Scheduler;ZMQ leader + gloo 广播请求;PP 用 proxy tensor_dict(vLLM:一 Scheduler + Executor 扇出 SchedulerOutput;PP 用 irecv/isend + PPHandler) | 副本内宜「一份调度决策 + 多卡执行」(偏 vLLM);勿每卡复制权威队列 |
@@ -848,8 +946,12 @@ Worker × (TP×PP)          ← 每 GPU 一个;无独立 Scheduler
 | Graph capture 造 batch | `runner/base_cuda_graph_runner.py::capture_prepare` / `capture_one_shape`;实现见 `decode_cuda_graph_runner.py` / `prefill_cuda_graph_runner.py` |
 | Req→token 表 | `mem_cache/memory_pool.py::ReqToTokenPool` |
 | 分配写表 | `mem_cache/allocation.py::alloc_for_extend` / `alloc_for_decode` |
-| H2D / overlap | `managers/overlap_utils.py::resolve_forward_inputs` |
-| 结果信封 | `managers/utils.py::GenerationBatchResult` |
+| H2D / overlap 解析 | `managers/overlap_utils.py::resolve_forward_inputs` |
+| Overlap 主循环 | `managers/scheduler.py::Scheduler.event_loop_overlap` |
+| 关 overlap 条件 | `scheduler.py::is_disable_overlap_for_batch`（`need_grammar_sync`） |
+| 延迟 sample | `scheduler.py::launch_batch_sample_if_needed` / `_relay_forward_payload` |
+| FutureMap | `managers/overlap_utils.py::FutureMap`（`stash` / `publish` / `output_tokens_buf`）+ `RelayPayload` |
+| 结果信封 | `managers/utils.py::GenerationBatchResult`（含 `delay_sample_func`） |
 
 ### Data Parallel(SGLang)
 

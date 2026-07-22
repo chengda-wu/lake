@@ -45,13 +45,38 @@ if not self.is_not_in_free_group:
 
 ### 层级 1 — 请求结束即时 free(不是驱逐)
 
-`radix_cache.py::cache_finished_req`(L437):请求收尾**当场 free 三类**——
+#### 发生在哪个调度阶段?
+
+**Scheduler 的 `process_batch_result`(CPU 收尾),不在 `ModelRunner.forward`。**
+
+```
+run_batch / forward（GPU）
+  → sample（可 delay_sample）
+  → process_batch_result（CPU）          ← 请求结束释放在这里
+       update_finish_state → req.finished()
+       → release_kv_cache → cache_finished_req
+```
+
+| 步骤 | 符号 | 做什么 |
+|------|------|--------|
+| 判定结束 | `Req.update_finish_state` / `req.finished()` | stop / length / abort 等写 `finished_reason` |
+| 收尾入口 | `batch_result_processor._handle_finish_state_updated_req` | MM 释放、draft `note_request_finished`、可选 hisparse / offload |
+| KV 释放 | `mem_cache/common.py::release_kv_cache` | → `tree_cache.cache_finished_req`；顺带收回 over-allocated 槽 |
+| Overlap 下 | `event_loop_overlap` 处理**上批** result | 本步 forward 与上批释放 CPU 重叠；物理 free 可进 free_group（见层级 0） |
+
+例外路径：abort 排队未跑 → abort 处理里直接 `release_kv_cache`；decode offload → D2H 完成后再 release。主循环 / FutureMap 见 [model-runner.md](model-runner.md)「Overlap schedule」。
+
+> **对照 vLLM**：KV 释放也在 Scheduler，但是 **`update_from_output`（吃完 ModelRunnerOutput 之后）**；Worker 另收 `finished_req_ids` 只清 runner 态。见 [../vllm/block-lifecycle.md](../vllm/block-lifecycle.md)「请求结束的调度阶段」。
+
+#### `cache_finished_req` 当场 free 三类
+
+`radix_cache.py::cache_finished_req`:请求收尾**当场 free 三类**——
 
 1. 与树中已有前缀重复的部分 `kv_indices[cache_protected_len:prefix_len]`;
 2. 未对齐的尾块 `kv_indices[key_len:]`(page 对不齐的残尾,直接丢);
 3. 新生成并成功 `insert` 进树的部分**不 free**——转成树节点,`lock_ref` 由请求持有 → `dec_lock_ref` 后变**可驱逐候选**。
 
-**关键:`lock_ref → 0 ≠ 释放**。`dec_lock_ref`(L608)只是把节点从 `protected_size_` 挪到 `evictable_size_`,内存还在、仍可命中复用。
+**关键:`lock_ref → 0 ≠ 释放**。`dec_lock_ref`只是把节点从 `protected_size_` 挪到 `evictable_size_`,内存还在、仍可命中复用。
 
 > **对照 lake**:与 lake「ref 归 0 = 可驱逐候选,非删内存;归 0 不摘位置视图」完全一致。
 
@@ -144,7 +169,9 @@ flowchart TB
 | 机制 | 文件:符号 |
 |------|-----------|
 | 物理槽位 free + 延迟释放组 | `python/sglang/srt/mem_cache/multi_ended_allocator.py`::`free`(L910)/ `free_group_begin`(L1653)/ `free_group_end`(L1657) |
-| 请求结束即时 free | `python/sglang/srt/mem_cache/radix_cache.py`::`cache_finished_req`(L437)/ `cache_unfinished_req`(L489) |
+| 请求结束调度阶段 | `managers/scheduler_components/batch_result_processor.py`::`_handle_finish_state_updated_req` / `process_batch_result_*` |
+| 请求结束 KV 入口 | `mem_cache/common.py`::`release_kv_cache` |
+| 请求结束即时 free | `mem_cache/radix_cache.py`::`cache_finished_req` / `cache_unfinished_req` |
 | ref 计数(可驱逐↔保护) | `radix_cache.py`::`inc_lock_ref`(L593)/ `dec_lock_ref`(L608) |
 | 纯 radix 驱逐(=彻底放弃) | `radix_cache.py`::`evict`(L564) |
 | 分层驱逐入口 | `python/sglang/srt/mem_cache/hiradix_cache.py`::`evict`(L1115)/ `_evict_write_through`(L1139)/ `_evict_write_back`(L1157) |
