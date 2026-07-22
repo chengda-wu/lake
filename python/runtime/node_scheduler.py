@@ -14,7 +14,10 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
 from engine.pool_iface import PoolIface
+from runtime.exec_mode import ExecMode
 from runtime.future_map import FutureMap
+from runtime.mode_select import select_exec_mode, should_prebuilt
+from runtime.prefix_hint import PrefixHint
 from runtime.req import Req
 from runtime.role import RoleConfig
 from runtime.scheduler_output import (
@@ -72,9 +75,16 @@ class NodeScheduler:
     def future_map(self) -> FutureMap:
         return self._future_map
 
-    def add_request(self, req: Req) -> None:
+    def add_request(self, req: Req, hint: Optional[PrefixHint] = None) -> None:
         if req.req_id in self._reqs:
             raise ValueError(f"duplicate req_id={req.req_id}")
+        if hint is not None:
+            req.apply_prefix_hint(hint)
+            req.exec_mode = select_exec_mode(
+                hint, prompt_len=len(req.prompt_token_ids), role=self._role.role
+            )
+            if should_prebuilt(hint, len(req.prompt_token_ids)):
+                req.num_computed_tokens = len(req.prompt_token_ids)
         self._reqs[req.req_id] = req
         self._waiting.append(req.req_id)
         max_new = req.sampling_params.max_new_tokens
@@ -180,17 +190,46 @@ class NodeScheduler:
             if req.finished:
                 continue
 
-            if req.num_computed_tokens < len(req.prompt_token_ids):
+            prompt_len = len(req.prompt_token_ids)
+
+            # D-direct 全命中：PREBUILT 元数据步（跳过 extend forward）
+            if (
+                not req.prebuilt_done
+                and req.num_output_tokens == 0
+                and req.num_computed_tokens >= prompt_len > 0
+                and req.exec_mode == ExecMode.D_DIRECT
+            ):
+                if self._has_unprocessed_phase(rid, ForwardMode.PREBUILT):
+                    continue
+                num_tokens[rid] = 1  # 虚拟工作量：组表 / fence
+                read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=prompt_len))
+                if req.num_computed_tokens == prompt_len and not req.output_token_ids:
+                    new_reqs.append(
+                        NewRequestData(
+                            req_id=rid,
+                            prompt_token_ids=list(req.prompt_token_ids),
+                            sampling_params=req.sampling_params,
+                            num_computed_tokens=req.num_computed_tokens,
+                        )
+                    )
+                else:
+                    cached.req_ids.append(rid)
+                    cached.num_computed_tokens.append(req.num_computed_tokens)
+                    cached.num_output_tokens.append(req.num_output_tokens)
+                req_modes[rid] = ForwardMode.PREBUILT
+                continue
+
+            if req.num_computed_tokens < prompt_len:
                 # EXTEND 不可重叠重入（Host computed 未推进前再 schedule 会双写）
                 if self._has_unprocessed_phase(rid, ForwardMode.EXTEND):
                     continue
-                n = len(req.prompt_token_ids) - req.num_computed_tokens
+                n = prompt_len - req.num_computed_tokens
                 num_tokens[rid] = n
                 write_set.append(
                     ReqIoSet(
                         req_id=rid,
                         token_start=req.num_computed_tokens,
-                        token_end=len(req.prompt_token_ids),
+                        token_end=prompt_len,
                     )
                 )
                 if req.num_computed_tokens == 0 and req.num_output_tokens == 0:
@@ -248,6 +287,8 @@ class NodeScheduler:
         modes = list(req_modes.values())
         if all(m == ForwardMode.EXTEND for m in modes):
             mode = ForwardMode.EXTEND
+        elif all(m == ForwardMode.PREBUILT for m in modes):
+            mode = ForwardMode.PREBUILT
         elif all(m == ForwardMode.DECODE for m in modes):
             mode = ForwardMode.DECODE
         elif all(m == ForwardMode.TARGET_VERIFY for m in modes):
@@ -279,6 +320,14 @@ class NodeScheduler:
             phase = output.req_forward_modes.get(rid, output.forward_mode)
 
             if phase == ForwardMode.EXTEND:
+                req.num_computed_tokens = len(req.prompt_token_ids)
+                drafts = runner_out.next_draft_tokens.get(rid) or []
+                if drafts:
+                    self._pending_drafts[rid] = drafts
+                continue
+
+            if phase == ForwardMode.PREBUILT:
+                req.prebuilt_done = True
                 req.num_computed_tokens = len(req.prompt_token_ids)
                 drafts = runner_out.next_draft_tokens.get(rid) or []
                 if drafts:

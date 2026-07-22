@@ -10,7 +10,9 @@ from typing import Dict, Optional
 
 from engine.agent import StorageAgent
 from engine.agents.grpc_skeleton import GrpcSkeletonAgent, chain_block_hashes, mock_kv_bytes
+from engine.agents.memory import InMemoryAgent
 from engine.pool_types import FinishRequest, PreparePlan, ReadyHandle, StepStats
+from runtime.prefix_hint import PrefixHint
 from runtime.req import Req
 from runtime.scheduler_output import SchedulerOutput
 
@@ -42,6 +44,21 @@ class PoolIface:
     @classmethod
     def from_grpc(cls, cp, kv, **kwargs) -> "PoolIface":
         return cls(GrpcSkeletonAgent(cp, kv), **kwargs)
+
+    def probe_prefix(self, req: Req) -> PrefixHint:
+        """方案 Z：只读命中视图 / Lookup；不放置。"""
+        if isinstance(self._agent, GrpcSkeletonAgent):
+            return self._agent.probe_prefix(req)
+        if isinstance(self._agent, InMemoryAgent):
+            computed, full = self._agent.probe_local(req.req_id, len(req.prompt_token_ids))
+            blocks = computed // 8
+            return PrefixHint(
+                computed_tokens=computed,
+                reused_blocks=blocks,
+                local_hit=computed > 0,
+                prebuilt=full,
+            )
+        return PrefixHint()
 
     def prepare_step(self, output: SchedulerOutput, reqs: Dict[str, Req]) -> ReadyHandle:
         plan = PreparePlan(

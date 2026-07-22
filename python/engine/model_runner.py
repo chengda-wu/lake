@@ -111,7 +111,15 @@ class ModelRunner:
                 continue
 
             if phase == ForwardMode.EXTEND:
+                # 残差：只对未计算尾做前向（整段重算简化：仍喂全 prompt）
                 _ = self._tiny.forward_logits(req.prompt_token_ids)
+                if self._drafter is not None:
+                    self._drafter.post_forward(req_id, req.prompt_token_ids)
+                    drafts_out[req_id] = self._drafter.pre_forward(req_id)
+                continue
+
+            if phase == ForwardMode.PREBUILT:
+                # KV 已在 L0：跳过 prefill forward（对齐 SGLang PrebuiltExtendBatch）
                 if self._drafter is not None:
                     self._drafter.post_forward(req_id, req.prompt_token_ids)
                     drafts_out[req_id] = self._drafter.pre_forward(req_id)

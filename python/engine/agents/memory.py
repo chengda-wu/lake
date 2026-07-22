@@ -35,6 +35,15 @@ class InMemoryAgent:
         self.prepare_calls = 0
         self.done_calls = 0
 
+    def seed_local_prefix(self, req_id: str, token_end: int) -> None:
+        """测试/预放置：把 [0, token_end) 标为已在本机 L0（D-direct）。"""
+        self.l0_token_end[req_id] = max(self.l0_token_end.get(req_id, 0), token_end)
+
+    def probe_local(self, req_id: str, prompt_len: int) -> tuple[int, bool]:
+        have = self.l0_token_end.get(req_id, 0)
+        computed = min(have, prompt_len)
+        return computed, computed > 0 and have >= prompt_len
+
     def prepare_step(self, plan: PreparePlan) -> ReadyHandle:
         self.prepare_calls += 1
         if self._ready_step is not None:

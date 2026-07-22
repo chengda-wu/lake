@@ -15,7 +15,10 @@ import grpc
 
 from engine.model_runner import ModelRunner
 from engine.pool_iface import PoolIface, chain_block_hashes, mock_kv_bytes
+from engine.pool_types import PoolError
 from lake_pb import lake_pb2, lake_pb2_grpc
+from runtime.exec_mode import ExecMode
+from runtime.mode_select import select_exec_mode
 from runtime.node_scheduler import NodeScheduler, build_req_from_generate
 from runtime.role import RoleConfig, WorkerRole
 
@@ -62,21 +65,28 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
         )
         sched = NodeScheduler(self._pool, self._runner, self._role)
         try:
-            sched.add_request(req)
+            hint = self._pool.probe_prefix(req)
+            # P3：无 L0 预放置 → 通常 COLOCATED；命中块数仍进 hint
+            req.exec_mode = select_exec_mode(
+                hint, prompt_len=len(req.prompt_token_ids), role=self._role.role
+            )
+            sched.add_request(req, hint=hint)
             sched.run_until_idle()
+        except PoolError as e:
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
         except grpc.RpcError as e:
             _abort_rpc(context, e)
         except RuntimeError as e:
             context.abort(grpc.StatusCode.INTERNAL, str(e))
 
         done = sched.get_req(req.req_id)
-        # P3 只注册 L2,无 L0 本地命中 → 固定混部,不报 D_DIRECT。
+        mode = done.exec_mode.value if isinstance(done.exec_mode, ExecMode) else str(done.exec_mode)
         return lake_pb2.GenerateResponse(
             request_id=request.request_id,
             output_tokens=done.output_token_ids,
             reused_blocks=done.reused_blocks,
             prefill_blocks=done.prefill_blocks,
-            mode="COLOCATED",
+            mode=mode,
         )
 
 

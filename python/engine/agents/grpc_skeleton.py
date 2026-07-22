@@ -17,6 +17,7 @@ from engine.pool_types import (
     StepStats,
 )
 from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2
+from runtime.prefix_hint import PrefixHint
 from runtime.req import Req
 
 LOG = logging.getLogger("lake.agent.grpc")
@@ -59,6 +60,30 @@ class GrpcSkeletonAgent:
     def bind_host_reqs(self, reqs: Mapping[str, Req]) -> None:
         """PoolIface 在 prepare 前注入 Host Req（协议层不持权威）。"""
         self._host_reqs = reqs
+
+    def probe_prefix(self, req: Req) -> PrefixHint:
+        """只读 LookupPrefix；P3 注册在 L2 → local_hit 恒 False。"""
+        hashes = chain_block_hashes(req.prompt_token_ids)
+        if not hashes:
+            return PrefixHint()
+        try:
+            lookup = self._cp.LookupPrefix(
+                lake_pb2.LookupPrefixRequest(
+                    model_id=req.model_id,
+                    prefix_hashes=hashes,
+                    requester_node_id=req.node_id,
+                )
+            )
+        except grpc.RpcError as e:
+            raise PoolError(PoolErrorCode.DOWNSTREAM, e.details() or str(e)) from e
+        reused = int(lookup.hit_length)
+        computed = min(reused * BLOCK_SIZE, len(req.prompt_token_ids))
+        return PrefixHint(
+            computed_tokens=computed,
+            reused_blocks=reused,
+            local_hit=False,
+            prebuilt=False,
+        )
 
     def prepare_step(self, plan: PreparePlan) -> ReadyHandle:
         if self._ready_step is not None:

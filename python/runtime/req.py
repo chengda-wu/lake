@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from runtime.exec_mode import ExecMode
+from runtime.prefix_hint import PrefixHint
 from runtime.scheduler_output import SamplingParams
 
 
@@ -22,6 +24,8 @@ class Req:
     prefill_blocks: int = 0
     finished: bool = False
     finish_reason: Optional[str] = None
+    exec_mode: ExecMode = ExecMode.COLOCATED
+    prebuilt_done: bool = False  # 已做过 PREBUILT 元数据步
 
     @property
     def num_output_tokens(self) -> int:
@@ -30,3 +34,7 @@ class Req:
     @property
     def all_token_ids(self) -> List[int]:
         return list(self.prompt_token_ids) + list(self.output_token_ids)
+
+    def apply_prefix_hint(self, hint: PrefixHint) -> None:
+        self.num_computed_tokens = min(hint.computed_tokens, len(self.prompt_token_ids))
+        self.reused_blocks = hint.reused_blocks

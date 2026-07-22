@@ -566,7 +566,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C2** | D2/D5：`pool_iface` FFI 草签 + schedule 一步内补拉/ready 序；mock agent 可换 | **done 2026-07-22** |
 | **C3** | TinyLM（纯 Python）+ `kernels/attn_*`（triton 可选回退 ref）+ `sample/greedy`；`model_backend=tiny_lm`；旧三包废止为实现树（保留空壳兼容） | **done 2026-07-22** |
 | **C4** | `drafter/TinyMTPDrafter` post/pre_forward；`TARGET_VERIFY` + chain reject；`DRAFT_EXTEND` 骨架 | **done 2026-07-22** |
-| **C5** | `PREBUILT` + 池驱动 PD/D-direct；与 Go Router 三模式联调 | 待 |
+| **C5** | `PREBUILT` + `mode_select`/`PrefixHint`（D-direct/混部/PD 骨架）；Generate 回填 `exec_mode`；Go Router 权威选路仍后续 | **done 2026-07-22** |
 
 硬约束不变：引擎零分层 / 零引擎驱动 intra-step `wait_event`；失败→F4；过载 shedding 不进 worker。
 

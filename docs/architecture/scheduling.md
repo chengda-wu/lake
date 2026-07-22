@@ -98,6 +98,7 @@
 - **PagedAttention** 风格的块状 KV 管理，与存储池的 block 粒度对齐(表由池 agent 组装,调度器不持 KV 权威)。
 - **放置与 batch 单向耦合（方案 Z）**：同一 batch 各 sequence 的 KV 必须同时在本机 HBM（attention 一次读全部）。存储池按热度主动预放置 KV 到 HBM 并发布位置视图;调度器读视图组 batch（本地命中优先），缺失补拉，不反向指挥放置。见 [`storage-layer.md`](storage-layer.md) / [`execution-modes.md`](execution-modes.md)。
 - **一步交互序（D5 已定）**：`schedule`（只读视图）→ `prepare_step`（**唯一**补拉/占槽/ready）→ `execute` → `done` → 结束则 `on_request_finished`。补拉预算 `pull_budget_ms`（0=同步等到齐）；默认 **不允许部分命中进批**（`allow_partial_hit=false`）。详见 [`compute-layer.md`](compute-layer.md)「D5」。
+- **PREBUILT / 三模式（C5）**：节点消费 `PrefixHint`（`probe_prefix` / Router 下发）；`runtime/mode_select.py` 为纯函数骨架（生产权威仍在 Go Router）。`local_hit` 且整段前缀在 L0 → `ExecMode.D_DIRECT` + `ForwardMode.PREBUILT`（跳过 extend forward，对齐 SGLang PrebuiltExtendBatch）。
 - **抢占**：高优先级请求可抢占低优先级，被抢占者的 KV 在存储池中保留（不丢失，本机 HBM 放置释放归还存储池）。
 
 ### 3.1 DP 间 step 信息同步(落节点 Scheduler)
