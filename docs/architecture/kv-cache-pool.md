@@ -260,9 +260,10 @@ KV 跨节点传输按"源在哪、目在哪"自然落到两类网络:
 
 ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-step 强一致撑不住性能预算):
 
-- **第一级:本地引用计数(池的本地 agent 维护,请求级)**。同 vLLM `block_pool.py::free_blocks`/`touch`、sglang `radix_cache.py::inc_lock_ref`/`dec_lock_ref` 的机制——只是归属从引擎进程改为池的本地 agent(因存算分离、block 归池权威、多引擎共享,ref 不能放某引擎进程内)。引擎只通过 read set/write set 间接表达引用,不持计数。
+- **第一级:本地引用计数(池的本地 agent 维护,请求级)**。同 vLLM `block_pool.py::free_blocks`/`touch`、sglang `radix_cache.py::inc_lock_ref`/`dec_lock_ref` 的机制——只是归属从引擎进程改为池的本地 agent(因存算分离、block 归池权威、多引擎共享,ref 不能放某引擎进程内)。引擎只通过 read set/write set 间接表达引用,不持计数。本地 ref 含三类子计数:**请求引用**、**在途传输引用**、**writeback ref**。
   - **请求引用**:block 进入某请求 read set 时 +1。减点只在**请求结束且无续推引用**时(attention 每步读全部 KV,前缀 block 全程 in-flight,不能中途早减)。F4 续推时 ref 不归零而是**转移到新请求**,避免被淘汰。
   - **在途传输引用**:跨实例传输发起时源 block +1(源端冻结,防 RDMA 半传被覆写致损坏);完成 -1。见"PD 分离下的传输流程"。
+  - **writeback ref**:属本地 ref 的子计数(非全局 ref)。满块注册 radix 后到 L2 durable 前 +1,durable ack 后 -1;请求结束屏障要求 flush+ack 后再释放请求引用,故 writeback ref 随屏障与本地 ref 一并收清。详见「写回与生命周期」与 [`consistency.md`](consistency.md) §3。
   - **ref 归 0 ≠ 删内存,而是变"可驱逐候选"**(内存仍在 L0):对齐 vLLM `free_block_queue` / sglang `evictable_size_`——归 0 后 block 还在 HBM,可被前缀命中复用、可作传输源。真正释放 slot 只在 L0 容量不足**驱逐覆写**时,且 L2/L3 有副本可回填。
   - **归 0 不摘位置视图**:只要未被驱逐覆写,位置视图仍记"X 在该节点 L0"→ 仍可命中、仍可直传(D-direct / D→P 直传的命中来源,见 [`data-flow.md`](data-flow.md) §3.4 子情况 A)。只有驱逐覆写才从位置视图摘掉。
   - **step 期间冻结是引用计数的自然结果**:请求在跑 → ref>0 → 副本不被驱逐。无需额外 fence 机制。

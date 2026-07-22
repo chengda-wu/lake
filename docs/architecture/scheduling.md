@@ -83,8 +83,10 @@
 
 ## 2. 池间调度
 
+> 本节「Prefill / Decode / Draft 池」指**部署与扩缩画像**(逻辑池),不是 `python/prefill|decode|draft/` 代码包——进程内只有一套 `engine/`,角色由启动配置选择。见 [`compute-layer.md`](compute-layer.md)「池 ≠ 代码包」。
+
 - Prefill → Decode 的 KV 传递通过存储池传输引擎(RDMA 数据面,见 [`kv-cache-pool.md`](kv-cache-pool.md) "跨实例 KV 传输"),需在 Prefill 完成时序上对齐 Decode 就绪（**仅 PD 分离模式**;混部/D-direct 为本地完成、无跨节点传输,见 [`execution-modes.md`](execution-modes.md)）。
-- 投机解码：Draft 池在 Decode 侧生成候选，验证失败回退到标准 decode。
+- 投机解码：Draft 池(部署画像;默认 drafter 与 Decode 共置,独立 Draft 池可选)在 Decode 侧生成候选，验证失败回退到标准 decode。
 - 反压：Decode 池拥塞时，减缓 Prefill 速率（背压），避免 KV Pool 堆积。属池间内部流控（不丢请求、不降 batch），区别于 gateway 的请求级 shedding。
 
 ## 3. 节点级调度

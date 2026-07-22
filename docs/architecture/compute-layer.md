@@ -243,7 +243,7 @@ HBM 也归存储池后(见 [`overview.md`](overview.md) / [`kv-cache-pool.md`](k
 - 尾块路:请求结束时未满的尾块,在请求结束点写回一次(写全部已填 token,重放整块覆盖),纯容错不进 radix。
 - 满块写回频率 N(满一个就写 vs 攒几个)留 P7。尾块只在请求结束写一次,无增量式。
 
-**(3) ref 分两级**(详见 [`kv-cache-pool.md`](kv-cache-pool.md) "引用计数与驱逐"):**本地引用计数**(池的本地 agent,请求级,同 vLLM/sglang 机制,只是归池 agent 而非引擎)+ **全局引用汇总**(控制面,最终一致,供 tier/GC,不进 hot step loop)。引擎只通过 read set/write set 间接表达引用,不持计数。ref>0 即冻结(请求引用 + 在途传输引用);**ref 归 0 变可驱逐候选而非删内存**(对齐 vLLM `free_block_queue`/sglang `evictable_size_`),归 0 不摘位置视图(未驱逐覆写则仍可命中/直传);step 期间冻结是引用计数自然结果,无需额外 fence。F4 续推 ref 转移到新请求。
+**(3) ref 分两级**(详见 [`kv-cache-pool.md`](kv-cache-pool.md) "引用计数与驱逐"):**本地引用计数**(池的本地 agent,请求级,同 vLLM/sglang 机制,只是归池 agent 而非引擎)+ **全局引用汇总**(控制面,最终一致,供 tier/GC,不进 hot step loop)。引擎只通过 read set/write set 间接表达引用,不持计数。ref>0 即冻结(本地 ref 含请求引用 + 在途传输引用 + writeback ref);**ref 归 0 变可驱逐候选而非删内存**(对齐 vLLM `free_block_queue`/sglang `evictable_size_`),归 0 不摘位置视图(未驱逐覆写则仍可命中/直传);step 期间冻结是引用计数自然结果,无需额外 fence。F4 续推 ref 转移到新请求。
 
 **(4) 权重对称性**:权重也是池管、也被 graph 捕获、也要 in-flight 冻结,机制与 KV 一致(只读、跨请求共享、不写回)。本节不展开,见"冷启动压缩"。
 
