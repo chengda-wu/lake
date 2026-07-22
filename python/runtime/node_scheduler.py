@@ -59,6 +59,10 @@ class NodeScheduler:
         self.timeline: List[Tuple[str, int]] = []
 
     @property
+    def _use_runner_tokens(self) -> bool:
+        return self._role.model_backend == "tiny_lm"
+
+    @property
     def future_map(self) -> FutureMap:
         return self._future_map
 
@@ -68,7 +72,10 @@ class NodeScheduler:
         self._reqs[req.req_id] = req
         self._waiting.append(req.req_id)
         max_new = req.sampling_params.max_new_tokens
-        self._mock_remaining[req.req_id] = mock_decode_tokens(req.prompt_token_ids, max_new)
+        if self._role.model_backend == "mock":
+            self._mock_remaining[req.req_id] = mock_decode_tokens(req.prompt_token_ids, max_new)
+        else:
+            self._mock_remaining[req.req_id] = []
 
     def run_until_idle(self) -> None:
         """主循环：默认 overlap（对齐 SGLang event_loop_overlap）。"""
@@ -124,7 +131,7 @@ class NodeScheduler:
     def _run_batch(self, output: SchedulerOutput) -> None:
         ready = self._pool.prepare_step(output, self._reqs)
         self.timeline.append(("execute", output.step_id))
-        runner_out = self._runner.execute_model(output, ready)
+        runner_out = self._runner.execute_model(output, ready, self._reqs)
         self._result_queue.append(_BatchResult(output=output, runner_out=runner_out))
 
     def _pop_and_process(self) -> None:
@@ -195,10 +202,16 @@ class NodeScheduler:
                 req_modes[rid] = ForwardMode.EXTEND
                 continue
 
-            remain = self._mock_remaining.get(rid) or []
             inflight = self._inflight_decode.get(rid, 0)
-            if len(remain) <= inflight:
-                continue
+            if self._use_runner_tokens:
+                # tiny_lm：按 max_new 与已产出 + in-flight 决定是否再 decode
+                left = req.sampling_params.max_new_tokens - req.num_output_tokens - inflight
+                if left <= 0:
+                    continue
+            else:
+                remain = self._mock_remaining.get(rid) or []
+                if len(remain) <= inflight:
+                    continue
 
             num_tokens[rid] = 1
             # overlap：decode 输入可经 FutureMap.resolve（上步 token）
@@ -252,14 +265,21 @@ class NodeScheduler:
 
             if phase == ForwardMode.DECODE:
                 self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - 1)
-                remain = self._mock_remaining.get(rid) or []
-                if remain:
-                    tok = remain.pop(0)
-                    req.output_token_ids.append(tok)
-                    req.num_computed_tokens += 1
-                    self._mock_remaining[rid] = remain
-                    self._future_map.stash(rid, tok)
-                # MIXED 批内其它 phase 不走这里
+                if self._use_runner_tokens:
+                    produced = runner_out.next_token_ids.get(rid) or []
+                    if produced:
+                        tok = int(produced[0])
+                        req.output_token_ids.append(tok)
+                        req.num_computed_tokens += 1
+                        self._future_map.stash(rid, tok)
+                else:
+                    remain = self._mock_remaining.get(rid) or []
+                    if remain:
+                        tok = remain.pop(0)
+                        req.output_token_ids.append(tok)
+                        req.num_computed_tokens += 1
+                        self._mock_remaining[rid] = remain
+                        self._future_map.stash(rid, tok)
 
             if req.num_output_tokens >= req.sampling_params.max_new_tokens:
                 req.finished = True

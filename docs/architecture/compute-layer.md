@@ -564,7 +564,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C0** | D1 定稿 + `engine/`·`runtime/node_scheduler` 骨架 + mock 单请求走通 schedule→ready→execute→done→`on_request_finished`；P3 Generate 改挂新路径 | **done 2026-07-22** |
 | **C1** | continuous batching + overlap 主循环骨架（CPU mock，无真 GPU）；Host `Req` 生命周期完整；`FutureMap` host 占位（D10） | **done 2026-07-22** |
 | **C2** | D2/D5：`pool_iface` FFI 草签 + schedule 一步内补拉/ready 序；mock agent 可换 | **done 2026-07-22** |
-| **C3** | 真小模型 + Triton attn 最小路径（仍混部）；废止 `prefill/`·`decode/`·`draft/` 为实现树；CI import 切换 | 待（P5 核心） |
+| **C3** | TinyLM（纯 Python）+ `kernels/attn_*`（triton 可选回退 ref）+ `sample/greedy`；`model_backend=tiny_lm`；旧三包废止为实现树（保留空壳兼容） | **done 2026-07-22** |
 | **C4** | `drafter/` post/pre_forward；`TARGET_VERIFY` / `DRAFT_EXTEND` | 待 |
 | **C5** | `PREBUILT` + 池驱动 PD/D-direct；与 Go Router 三模式联调 | 待 |
 
@@ -645,7 +645,7 @@ process_batch_result → finished? → on_request_finished
 | D1 | **`SchedulerOutput` / `NodeScheduleOutput` 字段草图** | **已定**（见上节「D1」） | 本节；代码 `runtime/scheduler_output.py` |
 | D2 | **`pool_iface` FFI 契约** | **已定**（见上节「D2」）；代码 `engine/agent.py` + `pool_types.py` | 本节；FFI 不进 proto |
 | D3 | **角色配置 schema** | `role=prefill\|decode\|hybrid` 已定方向;未定完整启动配置(模型、TP、是否挂 drafter、arena 尺寸、上报指标标签)；C0 仅最小 `RoleConfig` | `runtime` 配置节;与冷启动 Warm 对齐 |
-| D4 | **Attention 后端与 metadata 边界** | 用 Triton;未定 `AttentionMetadata` 谁填(runner vs agent 已写好的 block table 如何挂 metadata)、首版后端集合 | 对照 vLLM `AttentionMetadataBuilder`;agent 出表、runner 出其余 metadata |
+| D4 | **Attention 后端与 metadata 边界** | C3：`engine/attn/backend.py` + `kernels/attn_{ref,triton}` 就位；`AttentionMetadata`/block table 挂载仍待（agent 出表） | 对照 vLLM `AttentionMetadataBuilder` |
 | D5 | **节点级 scheduler 与 agent 的交互序** | **已定**（见上节「D5」）：schedule→prepare(预算)→ready→execute→done；默认 all-or-nothing；overlap 延迟 free | 本节 + [`scheduling.md`](scheduling.md) §3 |
 
 ### 可与骨架并行(不阻塞空壳,阻塞真模型)

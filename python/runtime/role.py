@@ -21,4 +21,6 @@ class RoleConfig:
     # D5：prepare 补拉预算；0=同步等到齐（P3 mock）
     pull_budget_ms: int = 0
     allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
+    # C3：mock=P3 可复现递推；tiny_lm=纯 Python 最小因果 LM
+    model_backend: str = "mock"  # mock | tiny_lm
     # arena / TP / 指标标签等留 D3

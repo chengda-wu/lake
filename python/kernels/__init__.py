@@ -1,1 +1,9 @@
-"""Triton kernel 集空壳。P2:仅占位包,无 kernel。"""
+"""Triton / 参考 kernel 集。
+
+C3：`attn_ref` 为默认；`attn_triton` 在无 triton 时回退 ref。
+"""
+
+from kernels.attn_ref import causal_attn
+from kernels.attn_triton import causal_attn_triton
+
+__all__ = ["causal_attn", "causal_attn_triton"]
