@@ -16,7 +16,13 @@
 | 对应本地 submodule | `3rdparty/dynamo` @ 同上 SHA（vendor 时一致） |
 | Vendor 日期 | 2026-07-21 |
 
-## 本树相对上游的改动（P4.1 / PR #21）
+## 工具链 / MSRV
+
+- vendor crate 使用 **`edition = "2024"`**（上游 let chains），需要较新的 **Rust stable**（CI：`dtolnay/rust-toolchain@stable`）。
+- 本地若仍是旧 toolchain（无 2024 edition），`cargo build -p kvbm-logical` 会直接失败——先 `rustup update stable`，勿降 edition 回写上游语义。
+- lake 业务 crate 仍可为 `edition = "2021"`；仅 vendor 成员要求 2024。
+
+## 本树相对上游的改动（P4.1 / GitHub PR #21）
 
 **业务源码未改**（`src/` / tests / benches 与 `3rdparty/dynamo` 对应路径 `diff` 应为空）。  
 `Cargo.toml` 是**构建接入层**：去 workspace 继承、填实版本、改 path——其中若干约束相对上游有意偏离，见下节，勿读成「Cargo.toml 也字节级一致」。

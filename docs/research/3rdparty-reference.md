@@ -186,12 +186,12 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 - Dynamo `kvbm-physical::TransferManager` 是**抽象**，生产数据面仍优先接 A（Mooncake TE），避免两套传输栈。
 - 其余（SGLang HiCache 策略、LMCache 后端思路、vLLM `KVConnectorBase_V1`、Dynamo kv-router 选路公式）继续以**借鉴/对照**为主，默认不链进依赖树；计算层（P5）再评估 vLLM/SGLang 引擎经 connector 接入。
 
-**现状（P3）**：零代码级复用——ControlPlane / SkeletonKv / Agent / Router / Worker 均为自研联通骨架；上表从 **P4** 起落地。约定仍适用：`3rdparty/` 只读，改造先 fork 换 URL（见下「submodule 使用约定」）。
+**现状（P4.1 / [PR #21](https://github.com/chengda-wu/lake/pull/21)）**：复用 **B** 已 in-tree vendor 入 `rust/vendor/{kvbm-logical,dynamo-tokens}/`（pin 与 re-vendor 见 `rust/vendor/UPSTREAM.md`）；**lake 业务 crate（controlplane / kv-pool / …）尚未链依赖**，仍是 P3 自研联通骨架。复用 **A**（Mooncake TE）仍待 P4 传输切片。`3rdparty/` 继续只读参考；vendor 改造不回写 submodule（见下「submodule 使用约定」）。
 
 锚点（复用时回溯）：
 
 - A：`3rdparty/mooncake/mooncake-transfer-engine/`（见 [`mooncake/transfer-engine.md`](mooncake/transfer-engine.md)）
-- B：`PositionalRadixTree` / `BlockManager` — `3rdparty/dynamo/lib/kvbm-logical/`（符号表见下节）
+- B：`rust/vendor/kvbm-logical/`（源：`3rdparty/dynamo/lib/kvbm-logical/`）— `PositionalRadixTree` / `BlockManager`（符号表见下节）
 
 ## 实现参考顺序建议
 
