@@ -422,6 +422,7 @@ class NodeScheduler:
                     req.num_computed_tokens += 1
                 if produced:
                     self._future_map.stash(rid, int(produced[-1]))
+                # D10：InMemory 绝对值 commit × overlap 不安全；见 compute-layer D10
                 self._pool.commit_write_extent(rid, len(req.all_token_ids))
                 next_d = runner_out.next_draft_tokens.get(rid) or []
                 if next_d and not req.finished:

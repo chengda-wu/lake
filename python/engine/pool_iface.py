@@ -87,6 +87,10 @@ class PoolIface:
         )
 
     def commit_write_extent(self, req_id: str, token_end: int) -> None:
-        """TARGET_VERIFY 等预留高水位后，按实际接受长度回收写槽（生产类 free_group）。"""
+        """回收写槽高水位（verify 未接受 / 实际产出短于预留）。
+
+        D10：仅 InMemory 实现；绝对值 min 与默认 overlap 不兼容（见 compute-layer D10）。
+        生产应对齐 vLLM V2 device 侧会计；GrpcSkeleton 为 no-op。
+        """
         if isinstance(self._agent, InMemoryAgent):
             self._agent.commit_write_extent(req_id, token_end)

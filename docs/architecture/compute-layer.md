@@ -638,6 +638,7 @@ process_batch_result → finished? → on_request_finished
 - 上批 `on_request_finished` 可与本批 `prepare_step` 并发；agent 须 **延迟归还** 仍被本步冻结的槽（类 SGLang `free_group`）。`InMemoryAgent` 用 deferred finish 模拟。
 - EXTEND 不可在 Host `computed` 未推进前重入（C1 已守）。
 - **ready 先于 execute**；不存在「先跑 forward 再等 KV」的引擎内 `wait_event`。
+- **`commit_write_extent`（D10）**：见下表 D10——host 绝对值 `min` 回收与 overlap 不兼容；骨架仅 InMemory 实现，生产改 device 会计。
 
 **阈值**：`pull_budget_ms` 初值与 TTFT/ITL 预算对齐，待 P7 校准；默认 0 保 P3 正确性。
 
@@ -660,7 +661,7 @@ process_batch_result → finished? → on_request_finished
 | # | 缺口 | 说明 |
 |---|------|------|
 | D6 | **Dummy / CUDA graph capture 路径** | overlap 默认已定;dummy/graph 偏 V2 `_dummy_run` 复用生产入口,还是 SGLang 另造 batch——需二选一并写清 skip 分支(勿污染 serving / overlap 语义) |
-| D10 | **FutureMap 等价物 + overlap×agent 时序** | C1：`runtime/future_map.py` host 占位（`stash`/`publish`/`resolve`）；生产 GPU buf + 上批 `on_request_finished`∩本批 `prepare` 槽位冻结仍待（并入 D5） | 对齐 SGLang `FutureMap` + free_group |
+| D10 | **FutureMap 等价物 + overlap×agent 时序** | C1：`runtime/future_map.py` host 占位（`stash`/`publish`/`resolve`）；生产 GPU buf + 上批 `on_request_finished`∩本批 `prepare` 槽位冻结仍待（并入 D5）。**已知 mock 债**：`InMemoryAgent.commit_write_extent` 用绝对值 `min` 收 L0 高水位——在默认 overlap 下，`process(N-1)` 会回缩掉 `prepare(N)` 已抬高的预留（普通 DECODE 与 TARGET_VERIFY 皆然）；`GrpcSkeletonAgent` 上 commit 为 no-op，故 P3 不触发。生产应对齐 vLLM V2 **device 侧**接受长度会计（类 `free_group`），host `min` 不得压后续 prepare；在此之前勿把 InMemory+overlap 当正确槽位语义。 | 对齐 SGLang `FutureMap` + free_group；vLLM V2 device accounting |
 | D7 | **Sampling / structured output 挂载点** | 状态归属已有 research;engine 内 `sample/` 与 grammar bitmask 的 step 序(相对 `execute_model`/`sample_tokens`)未钉 | 见 [`../research/sampling-params.md`](../research/sampling-params.md)、[`../research/guided-decoding.md`](../research/guided-decoding.md) |
 | D8 | **TP 扇出在 runtime 的形态** | 已定"一份调度 + 多卡执行"、单卡先行;未定 Executor/collective_rpc 等价物是否自研还是薄封装 | 对照 vLLM `MultiprocExecutor.collective_rpc` |
 | D9 | **权重加载回调进 runner** | 冷启动流式 load + pin 已定;未定 `load_model` 与 arena 绑定、layer-ready 后如何开始接请求 | 与 Warm→Ready 状态机对齐 |

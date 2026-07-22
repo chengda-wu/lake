@@ -50,7 +50,12 @@ class InMemoryAgent:
         return computed, full
 
     def commit_write_extent(self, req_id: str, token_end: int) -> None:
-        """将 L0 写高水位收到实际 token_end（回收未接受的 verify 预留槽）。"""
+        """将 L0 写高水位收到实际 token_end（回收未接受的 verify 预留槽）。
+
+        D10 mock 债：``min(current, token_end)`` 在 overlap 下会砍掉后续 prepare
+        已抬高的预留（DECODE / TARGET_VERIFY 皆然）。单测请 ``enable_overlap=False``，
+        或待 device 会计落地后改掉本实现。
+        """
         if req_id in self.l0_token_end:
             self.l0_token_end[req_id] = min(self.l0_token_end[req_id], max(0, token_end))
 
