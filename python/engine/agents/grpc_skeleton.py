@@ -91,12 +91,10 @@ class GrpcSkeletonAgent:
 
         stats: Dict[str, StepStats] = {}
         try:
+            # 只回 StepStats；Host Req 字段由 node_scheduler process 统一写入
             for io in plan.write_set:
                 req = self._host_reqs[io.req_id]
-                st = self._ensure_prefix_kv(req)
-                stats[io.req_id] = st
-                req.reused_blocks = st.reused_blocks
-                req.prefill_blocks = st.prefill_blocks
+                stats[io.req_id] = self._ensure_prefix_kv(req)
             for io in plan.read_set:
                 if io.req_id in stats:
                     continue

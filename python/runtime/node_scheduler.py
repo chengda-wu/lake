@@ -14,6 +14,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
 from engine.pool_iface import PoolIface
+from engine.pool_types import ReadyHandle
 from runtime.exec_mode import ExecMode
 from runtime.future_map import FutureMap
 from runtime.mode_select import select_exec_mode, should_prebuilt
@@ -42,6 +43,7 @@ def mock_decode_tokens(prompt: List[int], max_new: int) -> List[int]:
 class _BatchResult:
     output: SchedulerOutput
     runner_out: ModelRunnerOutput
+    ready: ReadyHandle
 
 
 class NodeScheduler:
@@ -148,15 +150,27 @@ class NodeScheduler:
         ready = self._pool.prepare_step(output, self._reqs)
         self.timeline.append(("execute", output.step_id))
         runner_out = self._runner.execute_model(output, ready, self._reqs)
-        self._result_queue.append(_BatchResult(output=output, runner_out=runner_out))
+        self._result_queue.append(_BatchResult(output=output, runner_out=runner_out, ready=ready))
 
     def _pop_and_process(self) -> None:
         if not self._result_queue:
             return
         batch = self._result_queue.popleft()
         self.timeline.append(("process", batch.output.step_id))
+        self._apply_ready_stats(batch.ready)
         self._process_batch_result(batch.output, batch.runner_out)
         self._future_map.publish()
+
+    def _apply_ready_stats(self, ready: ReadyHandle) -> None:
+        """agent 只回 StepStats；Host Req 复用字段在此统一写入。"""
+        for rid, st in ready.stats_by_req.items():
+            req = self._reqs.get(rid)
+            if req is None:
+                continue
+            if st.reused_blocks:
+                req.reused_blocks = st.reused_blocks
+            if st.prefill_blocks:
+                req.prefill_blocks = st.prefill_blocks
 
     def _drain_results(self) -> None:
         while self._result_queue:
@@ -225,6 +239,11 @@ class NodeScheduler:
                     continue
                 n = prompt_len - req.num_computed_tokens
                 num_tokens[rid] = n
+                # D1：read_set 覆盖已命中段；write_set 为残差
+                if req.num_computed_tokens > 0:
+                    read_set.append(
+                        ReqIoSet(req_id=rid, token_start=0, token_end=req.num_computed_tokens)
+                    )
                 write_set.append(
                     ReqIoSet(
                         req_id=rid,
@@ -350,6 +369,8 @@ class NodeScheduler:
                         req.num_computed_tokens += 1
                     if produced:
                         self._future_map.stash(rid, int(produced[-1]))
+                    # 回收 TARGET_VERIFY 预留但未接受的写槽
+                    self._pool.commit_write_extent(rid, len(req.all_token_ids))
                     next_d = runner_out.next_draft_tokens.get(rid) or []
                     if next_d and not req.finished:
                         self._pending_drafts[rid] = next_d
@@ -361,6 +382,7 @@ class NodeScheduler:
                         req.num_computed_tokens += 1
                         self._mock_remaining[rid] = remain
                         self._future_map.stash(rid, tok)
+                    self._pool.commit_write_extent(rid, len(req.all_token_ids))
 
             if req.num_output_tokens >= req.sampling_params.max_new_tokens:
                 req.finished = True

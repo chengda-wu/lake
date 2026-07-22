@@ -19,6 +19,16 @@ def test_mode_select_d_direct() -> None:
     assert should_prebuilt(h, 16)
 
 
+def test_mode_select_partial_hit_is_colocated() -> None:
+    """部分本地命中不得标 D_DIRECT（评审 #1）。"""
+    h = PrefixHint(computed_tokens=8, local_hit=False)  # probe 仅整段才 local_hit
+    assert select_exec_mode(h, prompt_len=16) == ExecMode.COLOCATED
+    # 即使误标 local_hit，computed < prompt_len 也不得 D_DIRECT
+    h2 = PrefixHint(computed_tokens=8, local_hit=True)
+    assert select_exec_mode(h2, prompt_len=16) == ExecMode.COLOCATED
+    assert not should_prebuilt(h2, 16)
+
+
 def test_mode_select_pd_role() -> None:
     h = PrefixHint()
     assert select_exec_mode(h, prompt_len=8, role=WorkerRole.DECODE) == ExecMode.PD_DISAGG
@@ -66,8 +76,30 @@ def test_prebuilt_then_decode() -> None:
     assert done.num_output_tokens == 2
 
 
+def test_partial_hit_extend_has_read_set() -> None:
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    runner = ModelRunner(pool, model_backend="mock")
+    sched = NodeScheduler(pool, runner, role)
+    prompt = list(range(16))
+    ag.seed_local_prefix("p1", 8)  # 部分命中
+    hint = pool.probe_prefix(build_req_from_generate("p1", "m", prompt, 1, "n0"))
+    assert hint.computed_tokens == 8
+    assert hint.local_hit is False
+    req = build_req_from_generate("p1", "m", prompt, 1, "n0")
+    sched.add_request(req, hint=hint)
+    assert req.exec_mode == ExecMode.COLOCATED
+    out = sched.schedule()
+    assert out.forward_mode == ForwardMode.EXTEND
+    assert any(io.token_end == 8 for io in out.read_set)
+    assert any(io.token_start == 8 for io in out.write_set)
+
+
 if __name__ == "__main__":
     test_mode_select_d_direct()
+    test_mode_select_partial_hit_is_colocated()
     test_mode_select_pd_role()
     test_prebuilt_then_decode()
+    test_partial_hit_extend_has_read_set()
     print("test_prebuilt OK")

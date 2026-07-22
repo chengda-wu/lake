@@ -11,9 +11,9 @@ ModelRunner ← attn/sample 链路与确定性采样。
 from __future__ import annotations
 
 import math
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
-from kernels.attn_triton import causal_attn_triton
+from engine.attn.backend import AttentionBackend, build_attn_backend
 
 
 def _lcg(seed: int) -> int:
@@ -55,12 +55,15 @@ class TinyLM:
         d_model: int = 32,
         n_heads: int = 4,
         seed: int = 7,
+        attn_backend: str = "triton",
+        attn: Optional[AttentionBackend] = None,
     ) -> None:
         assert d_model % n_heads == 0
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
+        self._attn: AttentionBackend = attn or build_attn_backend(attn_backend)
         self.embed = _rand_matrix(vocab_size, d_model, seed)
         self.wq = _rand_matrix(d_model, d_model, seed + 1)
         self.wk = _rand_matrix(d_model, d_model, seed + 2)
@@ -84,8 +87,8 @@ class TinyLM:
         q = [_matvec(self.wq, h) for h in x]
         k = [_matvec(self.wk, h) for h in x]
         v = [_matvec(self.wv, h) for h in x]
-        # 多头：拼回简化为整宽一次 attn（C3 数值验收足够）
-        attn_out = causal_attn_triton(q, k, v)
+        # 多头：拼回简化为整宽一次 attn（经 AttentionBackend，非直接 import kernel）
+        attn_out = self._attn.forward(q, k, v)
         y = [_layernorm(_add(h, _matvec(self.wo, a))) for h, a in zip(x, attn_out)]
         last = y[-1]
         return [sum(row[j] * last[j] for j in range(self.d_model)) for row in self.w_out]

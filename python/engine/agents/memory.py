@@ -40,9 +40,16 @@ class InMemoryAgent:
         self.l0_token_end[req_id] = max(self.l0_token_end.get(req_id, 0), token_end)
 
     def probe_local(self, req_id: str, prompt_len: int) -> tuple[int, bool]:
+        """返回 (computed_tokens, full_local)。full_local=整段 prompt 已在 L0。"""
         have = self.l0_token_end.get(req_id, 0)
         computed = min(have, prompt_len)
-        return computed, computed > 0 and have >= prompt_len
+        full = prompt_len > 0 and have >= prompt_len
+        return computed, full
+
+    def commit_write_extent(self, req_id: str, token_end: int) -> None:
+        """将 L0 写高水位收到实际 token_end（回收未接受的 verify 预留槽）。"""
+        if req_id in self.l0_token_end:
+            self.l0_token_end[req_id] = min(self.l0_token_end[req_id], max(0, token_end))
 
     def prepare_step(self, plan: PreparePlan) -> ReadyHandle:
         self.prepare_calls += 1

@@ -86,6 +86,13 @@ def test_deferred_finish_until_done() -> None:
     assert ag.finished == ["r1"]
 
 
+def test_commit_write_extent_shrinks() -> None:
+    ag = InMemoryAgent()
+    ag.l0_token_end["r1"] = 20  # verify 预留高水位
+    ag.commit_write_extent("r1", 12)
+    assert ag.l0_token_end["r1"] == 12
+
+
 def test_pool_iface_facade() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag, pull_budget_ms=0)
@@ -116,5 +123,6 @@ if __name__ == "__main__":
     test_pull_budget_timeout()
     test_allow_partial_hit_drops_req()
     test_deferred_finish_until_done()
+    test_commit_write_extent_shrinks()
     test_pool_iface_facade()
     print("test_pool_agent OK")

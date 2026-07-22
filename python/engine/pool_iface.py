@@ -52,10 +52,11 @@ class PoolIface:
         if isinstance(self._agent, InMemoryAgent):
             computed, full = self._agent.probe_local(req.req_id, len(req.prompt_token_ids))
             blocks = computed // 8
+            # local_hit = 整段在 L0（部分命中只填 computed_tokens，走混部残差 EXTEND）
             return PrefixHint(
                 computed_tokens=computed,
                 reused_blocks=blocks,
-                local_hit=computed > 0,
+                local_hit=full,
                 prebuilt=full,
             )
         return PrefixHint()
@@ -84,3 +85,8 @@ class PoolIface:
         self._agent.on_request_finished(
             FinishRequest(req_id=req.req_id, node_id=req.node_id, model_id=req.model_id)
         )
+
+    def commit_write_extent(self, req_id: str, token_end: int) -> None:
+        """TARGET_VERIFY 等预留高水位后，按实际接受长度回收写槽（生产类 free_group）。"""
+        if isinstance(self._agent, InMemoryAgent):
+            self._agent.commit_write_extent(req_id, token_end)

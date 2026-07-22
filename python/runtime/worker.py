@@ -15,7 +15,7 @@ import grpc
 
 from engine.model_runner import ModelRunner
 from engine.pool_iface import PoolIface, chain_block_hashes, mock_kv_bytes
-from engine.pool_types import PoolError
+from engine.pool_types import PoolError, PoolErrorCode
 from lake_pb import lake_pb2, lake_pb2_grpc
 from runtime.exec_mode import ExecMode
 from runtime.mode_select import select_exec_mode
@@ -29,6 +29,14 @@ NODE_ID = "worker-0"
 # 兼容 scripts/verify-p3.sh 等旧 import
 __all__ = ["WorkerServicer", "serve", "chain_block_hashes", "mock_kv_bytes", "NODE_ID"]
 
+_POOL_ERROR_STATUS = {
+    PoolErrorCode.TIMEOUT: grpc.StatusCode.UNAVAILABLE,  # 触发 F4 重路由
+    PoolErrorCode.CAPACITY: grpc.StatusCode.RESOURCE_EXHAUSTED,
+    PoolErrorCode.DOWNSTREAM: grpc.StatusCode.UNAVAILABLE,
+    PoolErrorCode.NOT_READY: grpc.StatusCode.INTERNAL,
+    PoolErrorCode.INVALID_ARG: grpc.StatusCode.INVALID_ARGUMENT,
+}
+
 
 def _abort_rpc(context: grpc.ServicerContext, exc: grpc.RpcError) -> None:
     code = exc.code() if hasattr(exc, "code") else grpc.StatusCode.INTERNAL
@@ -36,6 +44,11 @@ def _abort_rpc(context: grpc.ServicerContext, exc: grpc.RpcError) -> None:
     if code == grpc.StatusCode.UNAVAILABLE:
         context.abort(grpc.StatusCode.UNAVAILABLE, f"downstream: {details}")
     context.abort(grpc.StatusCode.INTERNAL, f"downstream: {details}")
+
+
+def _abort_pool_error(context: grpc.ServicerContext, exc: PoolError) -> None:
+    status = _POOL_ERROR_STATUS.get(exc.code, grpc.StatusCode.INTERNAL)
+    context.abort(status, str(exc))
 
 
 class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
@@ -73,7 +86,7 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             sched.add_request(req, hint=hint)
             sched.run_until_idle()
         except PoolError as e:
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
+            _abort_pool_error(context, e)
         except grpc.RpcError as e:
             _abort_rpc(context, e)
         except RuntimeError as e:

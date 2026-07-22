@@ -111,7 +111,8 @@ class ModelRunner:
                 continue
 
             if phase == ForwardMode.EXTEND:
-                # 残差：只对未计算尾做前向（整段重算简化：仍喂全 prompt）
+                # C3 简化：整段重算（喂全 prompt）。真路径须只跑残差
+                # [num_computed, prompt_len)，已命中段经 read_set/池 L0 复用。
                 _ = self._tiny.forward_logits(req.prompt_token_ids)
                 if self._drafter is not None:
                     self._drafter.post_forward(req_id, req.prompt_token_ids)

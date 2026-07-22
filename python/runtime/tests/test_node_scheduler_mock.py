@@ -38,6 +38,9 @@ class FakePool:
     def on_request_finished(self, req) -> None:
         self.finished.append(req.req_id)
 
+    def commit_write_extent(self, req_id: str, token_end: int) -> None:
+        return None
+
 
 def _make_sched(overlap: bool = True, max_running: int = 8) -> Tuple[NodeScheduler, FakePool]:
     pool = FakePool()

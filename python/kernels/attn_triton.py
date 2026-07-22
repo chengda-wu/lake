@@ -1,6 +1,7 @@
-"""Triton attention 入口（可选依赖）。
+"""Triton attention 入口占位。
 
-未安装 triton 时回退 `attn_ref`。真正 GPU kernel 留后续迭代。
+C3/C5：数值路径统一走 `attn_ref`（CI 无 GPU）。
+真 Triton kernel 落地前，勿把「import 成功」当成「走了 GPU 路径」。
 """
 
 from __future__ import annotations
@@ -15,9 +16,5 @@ def causal_attn_triton(
     k: List[List[float]],
     v: List[List[float]],
 ) -> List[List[float]]:
-    try:
-        import triton  # noqa: F401
-    except ImportError:
-        return causal_attn(q, k, v)
-    # C3：接口就位；数值仍走参考实现（避免无 GPU CI 挂）
+    # TODO(C3+): 真 triton kernel；当前始终参考实现
     return causal_attn(q, k, v)
