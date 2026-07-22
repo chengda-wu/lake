@@ -31,3 +31,13 @@
 2. 同步拷贝 `lib/kvbm-logical` → `rust/vendor/kvbm-logical`、`lib/tokens` → `rust/vendor/dynamo-tokens`（保留 lake 侧 `Cargo.toml` 填实版本与 path 依赖；冲突时以「能编过 + 单测绿」为准手工合并）。
 3. 刷新本文件的 Commit / Vendor 日期；`LICENSE` 若上游变更一并更新。
 4. `cd rust && cargo test -p dynamo-tokens -p kvbm-logical` + workspace fmt/clippy 全绿后再提交。
+
+
+## LICENSE 说明
+
+各 crate 与 `rust/vendor/LICENSE` 使用**纯 Apache-2.0 全文**（附 NVIDIA 版权说明）。
+已去掉上游根 `LICENSE` 开头针对 `lib/llm/tests/data/deepseek-v3.2` 的 NOTICE——vendor
+树不含该测试数据，避免误导。
+
+上游 `lib/kvbm-logical/AGENTS.md`（指向 Claude Code 规则的 symlink）不纳入 vendor，
+与 lake「忽略 submodule 自带 `.claude`/agent 规则」约定一致。
