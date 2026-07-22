@@ -44,7 +44,12 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             pull_budget_ms=self._role.pull_budget_ms,
             allow_partial_hit=self._role.allow_partial_hit,
         )
-        self._runner = ModelRunner(self._pool, model_backend=self._role.model_backend)
+        self._runner = ModelRunner(
+            self._pool,
+            model_backend=self._role.model_backend,
+            enable_drafter=self._role.enable_drafter,
+            num_draft_tokens=self._role.num_draft_tokens,
+        )
 
     def Generate(self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext) -> lake_pb2.GenerateResponse:
         node = request.requester_node_id or NODE_ID

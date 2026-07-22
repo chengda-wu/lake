@@ -16,6 +16,7 @@ class WorkerRole(str, Enum):
 class RoleConfig:
     role: WorkerRole = WorkerRole.HYBRID
     enable_drafter: bool = False
+    num_draft_tokens: int = 2  # C4：MTP 宽度
     enable_overlap: bool = True  # 默认开；对齐 SGLang event_loop_overlap
     max_running_reqs: int = 8  # continuous batching 上限（C1）
     # D5：prepare 补拉预算；0=同步等到齐（P3 mock）

@@ -1,30 +1,31 @@
-"""薄 ModelRunner：consume ready → forward → done →（sample 可同路径）。
+"""薄 ModelRunner：consume ready → forward → done →（sample / 投机同路径）。
 
-对齐 vLLM `GPUModelRunner.execute_model` 的 step 入口外形；
-无 `RequestState` / 无 block_table apply（对齐 SGLang 薄 runner + lake Q1/Q2）。
+对齐 vLLM `GPUModelRunner.execute_model`；投机编排仿 SGLang 共置串行
+（target → post_forward → 下轮 pre_forward → target_verify）。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
+from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.input_batch import InputBatch
 from engine.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from engine.sample.greedy import greedy_sample
+from engine.sample.reject import chain_reject_sample
 from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, SchedulerOutput
 
 
 @dataclass
 class ModelRunnerOutput:
-    """本步前向结果。"""
-
     step_id: int
     next_token_ids: Dict[str, List[int]] = field(default_factory=dict)
-    # 调试：backend 名
+    # 供下一步 TARGET_VERIFY
+    next_draft_tokens: Dict[str, List[int]] = field(default_factory=dict)
     model_backend: str = "mock"
 
 
@@ -35,6 +36,9 @@ class ModelRunner:
         *,
         model_backend: str = "mock",
         tiny_lm: Optional[TinyLM] = None,
+        enable_drafter: bool = False,
+        num_draft_tokens: int = 2,
+        drafter: Optional[TinyMTPDrafter] = None,
     ) -> None:
         self._pool = pool
         self._input_batch = InputBatch()
@@ -42,6 +46,15 @@ class ModelRunner:
         self._tiny: Optional[TinyLM] = tiny_lm
         if model_backend == "tiny_lm" and self._tiny is None:
             self._tiny = TinyLM()
+        self.enable_drafter = enable_drafter
+        self._drafter: Optional[TinyMTPDrafter] = drafter
+        if enable_drafter and self._drafter is None and self._tiny is not None:
+            self._drafter = TinyMTPDrafter(
+                num_draft_tokens=num_draft_tokens,
+                vocab_size=self._tiny.vocab_size,
+                d_model=self._tiny.d_model,
+                n_heads=self._tiny.n_heads,
+            )
 
     def execute_model(
         self,
@@ -54,21 +67,28 @@ class ModelRunner:
 
         self._input_batch.req_ids = list(output.num_scheduled_tokens.keys())
         next_tokens: Dict[str, List[int]] = {}
+        next_drafts: Dict[str, List[int]] = {}
 
         if self.model_backend == "tiny_lm":
-            next_tokens = self._forward_tiny(output, host_reqs or {})
-        elif output.forward_mode in (ForwardMode.DECODE, ForwardMode.MIXED, ForwardMode.PREBUILT):
+            next_tokens, next_drafts = self._forward_tiny(output, host_reqs or {})
+        elif output.forward_mode in (
+            ForwardMode.DECODE,
+            ForwardMode.MIXED,
+            ForwardMode.PREBUILT,
+            ForwardMode.TARGET_VERIFY,
+        ):
             for req_id, n in output.num_scheduled_tokens.items():
                 if n <= 0:
                     continue
                 phase = output.req_forward_modes.get(req_id, output.forward_mode)
-                if phase == ForwardMode.DECODE:
-                    next_tokens[req_id] = [0]  # mock 占位；scheduler 用 mock_remaining 覆盖
+                if phase in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY):
+                    next_tokens[req_id] = [0]
 
         self._pool.done(output.step_id)
         return ModelRunnerOutput(
             step_id=output.step_id,
             next_token_ids=next_tokens,
+            next_draft_tokens=next_drafts,
             model_backend=self.model_backend,
         )
 
@@ -76,9 +96,12 @@ class ModelRunner:
         self,
         output: SchedulerOutput,
         host_reqs: Mapping[str, Req],
-    ) -> Dict[str, List[int]]:
+    ) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
         assert self._tiny is not None
         out: Dict[str, List[int]] = {}
+        drafts_out: Dict[str, List[int]] = {}
+        spec_map = output.scheduled_spec_decode_tokens or {}
+
         for req_id, n in output.num_scheduled_tokens.items():
             if n <= 0:
                 continue
@@ -86,14 +109,40 @@ class ModelRunner:
             req = host_reqs.get(req_id)
             if req is None:
                 continue
+
             if phase == ForwardMode.EXTEND:
-                # 预热前向（验证链路）；不产出 token
                 _ = self._tiny.forward_logits(req.prompt_token_ids)
+                if self._drafter is not None:
+                    self._drafter.post_forward(req_id, req.prompt_token_ids)
+                    drafts_out[req_id] = self._drafter.pre_forward(req_id)
                 continue
-            if phase == ForwardMode.DECODE:
-                # 整段重算（C3）；生产改为读池 arena + block table
-                ctx = req.all_token_ids
-                logits = self._tiny.forward_logits(ctx)
-                tok = greedy_sample(logits)
-                out[req_id] = [tok]
-        return out
+
+            if phase == ForwardMode.DRAFT_EXTEND:
+                # 前缀命中后重建 draft seed（对齐 SGLang draft-extend 语义骨架）
+                if self._drafter is not None:
+                    self._drafter.post_forward(req_id, req.all_token_ids)
+                    drafts_out[req_id] = self._drafter.pre_forward(req_id)
+                continue
+
+            if phase == ForwardMode.TARGET_VERIFY:
+                draft = list(spec_map.get(req_id) or [])
+                accepted = chain_reject_sample(
+                    req.all_token_ids, draft, self._tiny.greedy_token
+                )
+                out[req_id] = accepted
+            elif phase == ForwardMode.DECODE:
+                logits = self._tiny.forward_logits(req.all_token_ids)
+                out[req_id] = [greedy_sample(logits)]
+            else:
+                continue
+
+            if self._drafter is not None and req_id in out:
+                new_ctx = list(req.all_token_ids) + list(out[req_id])
+                self._drafter.post_forward(req_id, new_ctx)
+                drafts_out[req_id] = self._drafter.pre_forward(req_id)
+
+        return out, drafts_out
+
+    def clear_drafter(self, req_id: str) -> None:
+        if self._drafter is not None:
+            self._drafter.clear(req_id)

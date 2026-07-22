@@ -55,12 +55,18 @@ class NodeScheduler:
         self._inflight_decode: Dict[str, int] = {}
         self._future_map = FutureMap()
         self._result_queue: Deque[_BatchResult] = deque()
+        # C4：上步 pre_forward 产出、待 TARGET_VERIFY 的 draft
+        self._pending_drafts: Dict[str, List[int]] = {}
         # 测试钩子：记录 execute / process 时序
         self.timeline: List[Tuple[str, int]] = []
 
     @property
     def _use_runner_tokens(self) -> bool:
         return self._role.model_backend == "tiny_lm"
+
+    @property
+    def _spec_enabled(self) -> bool:
+        return self._role.enable_drafter and self._use_runner_tokens
 
     @property
     def future_map(self) -> FutureMap:
@@ -167,6 +173,7 @@ class NodeScheduler:
         read_set: List[ReqIoSet] = []
         write_set: List[ReqIoSet] = []
         req_modes: Dict[str, ForwardMode] = {}
+        spec_tokens: Dict[str, List[int]] = {}
 
         for rid in list(self._running):
             req = self._reqs[rid]
@@ -204,7 +211,6 @@ class NodeScheduler:
 
             inflight = self._inflight_decode.get(rid, 0)
             if self._use_runner_tokens:
-                # tiny_lm：按 max_new 与已产出 + in-flight 决定是否再 decode
                 left = req.sampling_params.max_new_tokens - req.num_output_tokens - inflight
                 if left <= 0:
                     continue
@@ -213,17 +219,28 @@ class NodeScheduler:
                 if len(remain) <= inflight:
                     continue
 
-            num_tokens[rid] = 1
+            pending = self._pending_drafts.get(rid) or []
             # overlap：decode 输入可经 FutureMap.resolve（上步 token）
             _ = self._future_map.resolve(rid)
             end = len(req.all_token_ids) + inflight
             read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
-            write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + 1))
             cached.req_ids.append(rid)
             cached.num_computed_tokens.append(req.num_computed_tokens + inflight)
             cached.num_output_tokens.append(req.num_output_tokens + inflight)
-            req_modes[rid] = ForwardMode.DECODE
-            self._inflight_decode[rid] = inflight + 1
+
+            if self._spec_enabled and pending and not self._has_unprocessed_phase(rid, ForwardMode.TARGET_VERIFY):
+                # 一步验证 draft + bonus；写槽按最多 len(draft)+1
+                max_accept = min(len(pending) + 1, left if self._use_runner_tokens else len(pending) + 1)
+                num_tokens[rid] = max_accept
+                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + max_accept))
+                req_modes[rid] = ForwardMode.TARGET_VERIFY
+                spec_tokens[rid] = list(pending)
+                self._inflight_decode[rid] = inflight + max_accept
+            else:
+                num_tokens[rid] = 1
+                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + 1))
+                req_modes[rid] = ForwardMode.DECODE
+                self._inflight_decode[rid] = inflight + 1
 
         if not num_tokens:
             return SchedulerOutput(step_id=step, forward_mode=ForwardMode.IDLE, total_num_scheduled_tokens=0)
@@ -233,6 +250,8 @@ class NodeScheduler:
             mode = ForwardMode.EXTEND
         elif all(m == ForwardMode.DECODE for m in modes):
             mode = ForwardMode.DECODE
+        elif all(m == ForwardMode.TARGET_VERIFY for m in modes):
+            mode = ForwardMode.TARGET_VERIFY
         else:
             mode = ForwardMode.MIXED
 
@@ -248,6 +267,7 @@ class NodeScheduler:
             global_num_tokens=None,
             can_run_graph=None,
             req_forward_modes=req_modes,
+            scheduled_spec_decode_tokens=spec_tokens or None,
         )
 
     def _has_unprocessed_phase(self, rid: str, phase: ForwardMode) -> bool:
@@ -259,19 +279,31 @@ class NodeScheduler:
             phase = output.req_forward_modes.get(rid, output.forward_mode)
 
             if phase == ForwardMode.EXTEND:
-                # 不以 pool 是否已改 computed 为准；本步权威推进
                 req.num_computed_tokens = len(req.prompt_token_ids)
+                drafts = runner_out.next_draft_tokens.get(rid) or []
+                if drafts:
+                    self._pending_drafts[rid] = drafts
                 continue
 
-            if phase == ForwardMode.DECODE:
-                self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - 1)
+            if phase in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY):
+                scheduled_n = output.num_scheduled_tokens.get(rid, 1)
+                self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - scheduled_n)
+                if phase == ForwardMode.TARGET_VERIFY:
+                    self._pending_drafts.pop(rid, None)
+
                 if self._use_runner_tokens:
-                    produced = runner_out.next_token_ids.get(rid) or []
-                    if produced:
-                        tok = int(produced[0])
-                        req.output_token_ids.append(tok)
+                    produced = list(runner_out.next_token_ids.get(rid) or [])
+                    left = req.sampling_params.max_new_tokens - req.num_output_tokens
+                    if left < len(produced):
+                        produced = produced[:left]
+                    for tok in produced:
+                        req.output_token_ids.append(int(tok))
                         req.num_computed_tokens += 1
-                        self._future_map.stash(rid, tok)
+                    if produced:
+                        self._future_map.stash(rid, int(produced[-1]))
+                    next_d = runner_out.next_draft_tokens.get(rid) or []
+                    if next_d and not req.finished:
+                        self._pending_drafts[rid] = next_d
                 else:
                     remain = self._mock_remaining.get(rid) or []
                     if remain:
@@ -291,7 +323,9 @@ class NodeScheduler:
         if rid in self._running:
             self._running.remove(rid)
         self._inflight_decode.pop(rid, None)
+        self._pending_drafts.pop(rid, None)
         self._future_map.clear(rid)
+        self._runner.clear_drafter(rid)
         self._pool.on_request_finished(req)
         LOG.info("finished req_id=%s reason=%s out=%d", rid, req.finish_reason, req.num_output_tokens)
 
