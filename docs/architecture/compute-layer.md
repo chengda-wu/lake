@@ -561,8 +561,8 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 
 | 里程碑 | 内容 | 状态 |
 |--------|------|------|
-| **C0** | D1 定稿 + `engine/`·`runtime/node_scheduler` 骨架 + mock 单请求走通 schedule→ready→execute→done→`on_request_finished`；P3 Generate 改挂新路径 | **进行中** |
-| **C1** | continuous batching + overlap 主循环骨架（CPU mock，无真 GPU）；Host `Req` 生命周期完整 | 待 |
+| **C0** | D1 定稿 + `engine/`·`runtime/node_scheduler` 骨架 + mock 单请求走通 schedule→ready→execute→done→`on_request_finished`；P3 Generate 改挂新路径 | **done 2026-07-22** |
+| **C1** | continuous batching + overlap 主循环骨架（CPU mock，无真 GPU）；Host `Req` 生命周期完整；`FutureMap` host 占位（D10） | **done 2026-07-22** |
 | **C2** | D2/D5：`pool_iface` FFI 草签 + schedule 一步内补拉/ready 序；mock agent 可换 | 待 |
 | **C3** | 真小模型 + Triton attn 最小路径（仍混部）；废止 `prefill/`·`decode/`·`draft/` 为实现树；CI import 切换 | 待（P5 核心） |
 | **C4** | `drafter/` post/pre_forward；`TARGET_VERIFY` / `DRAFT_EXTEND` | 待 |
@@ -589,7 +589,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | # | 缺口 | 说明 |
 |---|------|------|
 | D6 | **Dummy / CUDA graph capture 路径** | overlap 默认已定;dummy/graph 偏 V2 `_dummy_run` 复用生产入口,还是 SGLang 另造 batch——需二选一并写清 skip 分支(勿污染 serving / overlap 语义) |
-| D10 | **FutureMap 等价物 + overlap×agent 时序** | device 侧 token 接力缓冲的归属(scheduler 持 vs pool_iface);上批 `on_request_finished` 与本批 `prepare` 的槽位冻结规则 | 对齐 SGLang `FutureMap` + free_group;并入 D5 |
+| D10 | **FutureMap 等价物 + overlap×agent 时序** | C1：`runtime/future_map.py` host 占位（`stash`/`publish`/`resolve`）；生产 GPU buf + 上批 `on_request_finished`∩本批 `prepare` 槽位冻结仍待（并入 D5） | 对齐 SGLang `FutureMap` + free_group |
 | D7 | **Sampling / structured output 挂载点** | 状态归属已有 research;engine 内 `sample/` 与 grammar bitmask 的 step 序(相对 `execute_model`/`sample_tokens`)未钉 | 见 [`../research/sampling-params.md`](../research/sampling-params.md)、[`../research/guided-decoding.md`](../research/guided-decoding.md) |
 | D8 | **TP 扇出在 runtime 的形态** | 已定"一份调度 + 多卡执行"、单卡先行;未定 Executor/collective_rpc 等价物是否自研还是薄封装 | 对照 vLLM `MultiprocExecutor.collective_rpc` |
 | D9 | **权重加载回调进 runner** | 冷启动流式 load + pin 已定;未定 `load_model` 与 arena 绑定、layer-ready 后如何开始接请求 | 与 Warm→Ready 状态机对齐 |

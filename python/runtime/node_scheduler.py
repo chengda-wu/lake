@@ -1,17 +1,20 @@
-"""节点级调度：Host Req 权威 + continuous batching + overlap 主循环（C0 同步简化）。
+"""节点级调度：Host Req 权威 + continuous batching + overlap 主循环。
 
-参考:SGLang `managers/scheduler.py::event_loop_overlap`（CPU 收尾 ∥ GPU forward）；
+参考:SGLang `managers/scheduler.py::event_loop_overlap` + `overlap_utils.FutureMap`；
 vLLM `Scheduler.schedule` → `SchedulerOutput`。
-lake：结束 → `pool_iface.on_request_finished`；DP sync 落本层（C0 单卡跳过）。
+lake：结束 → `pool_iface.on_request_finished`；DP sync 落本层（单卡跳过）。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
 from engine.pool_iface import PoolIface
+from runtime.future_map import FutureMap
 from runtime.req import Req
 from runtime.role import RoleConfig
 from runtime.scheduler_output import (
@@ -32,6 +35,12 @@ def mock_decode_tokens(prompt: List[int], max_new: int) -> List[int]:
     return [((seed + i + 1) % 1000) + 1000 for i in range(max_new)]
 
 
+@dataclass
+class _BatchResult:
+    output: SchedulerOutput
+    runner_out: ModelRunnerOutput
+
+
 class NodeScheduler:
     def __init__(self, pool: PoolIface, runner: ModelRunner, role: Optional[RoleConfig] = None) -> None:
         self._pool = pool
@@ -41,8 +50,17 @@ class NodeScheduler:
         self._waiting: List[str] = []
         self._running: List[str] = []
         self._step_id = 0
-        # C0：单请求 Generate 预生成的 mock 输出队列
         self._mock_remaining: Dict[str, List[int]] = {}
+        # 已 schedule、尚未 process 的 decode token 数（overlap 下 Host Req 滞后一步）
+        self._inflight_decode: Dict[str, int] = {}
+        self._future_map = FutureMap()
+        self._result_queue: Deque[_BatchResult] = deque()
+        # 测试钩子：记录 execute / process 时序
+        self.timeline: List[Tuple[str, int]] = []
+
+    @property
+    def future_map(self) -> FutureMap:
+        return self._future_map
 
     def add_request(self, req: Req) -> None:
         if req.req_id in self._reqs:
@@ -53,23 +71,81 @@ class NodeScheduler:
         self._mock_remaining[req.req_id] = mock_decode_tokens(req.prompt_token_ids, max_new)
 
     def run_until_idle(self) -> None:
-        """同步主循环（C0：无 overlap 队列；C1 再对齐 event_loop_overlap）。"""
-        while self._waiting or self._running:
+        """主循环：默认 overlap（对齐 SGLang event_loop_overlap）。"""
+        if self._role.enable_overlap:
+            self._event_loop_overlap()
+        else:
+            self._event_loop_normal()
+
+    def _event_loop_normal(self) -> None:
+        while self._waiting or self._running or self._result_queue:
             output = self.schedule()
-            if output.total_num_scheduled_tokens == 0 and output.forward_mode != ForwardMode.IDLE:
-                break
-            ready = self._pool.prepare_step(output, self._reqs)
-            runner_out = self._runner.execute_model(output, ready)
-            self._process_batch_result(output, runner_out)
+            if output.total_num_scheduled_tokens == 0:
+                self._drain_results()
+                if not self._waiting and not self._running:
+                    break
+                continue
+            self._run_batch(output)
+            self._pop_and_process()
+
+    def _event_loop_overlap(self) -> None:
+        """
+        while True:
+          schedule
+          if disable_overlap: drain
+          run_batch → result_queue
+          process 上批（与本批 forward 重叠）
+        """
+        while True:
+            disable = self._should_disable_overlap()
+            if disable:
+                self._drain_results()
+
+            output = self.schedule()
+            if output.total_num_scheduled_tokens == 0:
+                self._drain_results()
+                if not self._waiting and not self._running and not self._result_queue:
+                    break
+                continue
+
+            self._run_batch(output)
+
+            if not disable and len(self._result_queue) > 1:
+                self._pop_and_process()
+
+        self._drain_results()
+
+    def _should_disable_overlap(self) -> bool:
+        """关 overlap 例外（C1：连续 EXTEND 可选；spec+grammar 留给 D7）。"""
+        # 若 waiting 里将有 extend、且队列非空，可强制同步以利 TTFT（对齐
+        # SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP 精神）。C1 默认不强制。
+        return False
+
+    def _run_batch(self, output: SchedulerOutput) -> None:
+        ready = self._pool.prepare_step(output, self._reqs)
+        self.timeline.append(("execute", output.step_id))
+        runner_out = self._runner.execute_model(output, ready)
+        self._result_queue.append(_BatchResult(output=output, runner_out=runner_out))
+
+    def _pop_and_process(self) -> None:
+        if not self._result_queue:
+            return
+        batch = self._result_queue.popleft()
+        self.timeline.append(("process", batch.output.step_id))
+        self._process_batch_result(batch.output, batch.runner_out)
+        self._future_map.publish()
+
+    def _drain_results(self) -> None:
+        while self._result_queue:
+            self._pop_and_process()
 
     def schedule(self) -> SchedulerOutput:
         self._step_id += 1
         step = self._step_id
 
-        # 晋升 waiting → running（C0：一次一个新请求 + 已有 running）
-        if self._waiting and not self._running:
-            rid = self._waiting.pop(0)
-            self._running.append(rid)
+        # continuous batching：填满 running 槽
+        while self._waiting and len(self._running) < self._role.max_running_reqs:
+            self._running.append(self._waiting.pop(0))
 
         if not self._running:
             return SchedulerOutput(
@@ -83,16 +159,25 @@ class NodeScheduler:
         num_tokens: Dict[str, int] = {}
         read_set: List[ReqIoSet] = []
         write_set: List[ReqIoSet] = []
+        req_modes: Dict[str, ForwardMode] = {}
 
-        # C0 策略：新请求第一步 EXTEND（写满 prompt KV）；之后 DECODE 每次 1 token
-        modes: List[ForwardMode] = []
         for rid in list(self._running):
             req = self._reqs[rid]
+            if req.finished:
+                continue
+
             if req.num_computed_tokens < len(req.prompt_token_ids):
+                # EXTEND 不可重叠重入（Host computed 未推进前再 schedule 会双写）
+                if self._has_unprocessed_phase(rid, ForwardMode.EXTEND):
+                    continue
                 n = len(req.prompt_token_ids) - req.num_computed_tokens
                 num_tokens[rid] = n
                 write_set.append(
-                    ReqIoSet(req_id=rid, token_start=req.num_computed_tokens, token_end=len(req.prompt_token_ids))
+                    ReqIoSet(
+                        req_id=rid,
+                        token_start=req.num_computed_tokens,
+                        token_end=len(req.prompt_token_ids),
+                    )
                 )
                 if req.num_computed_tokens == 0 and req.num_output_tokens == 0:
                     new_reqs.append(
@@ -107,24 +192,30 @@ class NodeScheduler:
                     cached.req_ids.append(rid)
                     cached.num_computed_tokens.append(req.num_computed_tokens)
                     cached.num_output_tokens.append(req.num_output_tokens)
-                modes.append(ForwardMode.EXTEND)
-            else:
-                remain = self._mock_remaining.get(rid) or []
-                if not remain:
-                    continue
-                num_tokens[rid] = 1
-                # decode 读已有前缀（逻辑范围）；写 1 个新 token 槽
-                end = len(req.all_token_ids)
-                read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
-                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + 1))
-                cached.req_ids.append(rid)
-                cached.num_computed_tokens.append(req.num_computed_tokens)
-                cached.num_output_tokens.append(req.num_output_tokens)
-                modes.append(ForwardMode.DECODE)
+                req_modes[rid] = ForwardMode.EXTEND
+                continue
+
+            remain = self._mock_remaining.get(rid) or []
+            inflight = self._inflight_decode.get(rid, 0)
+            if len(remain) <= inflight:
+                continue
+
+            num_tokens[rid] = 1
+            # overlap：decode 输入可经 FutureMap.resolve（上步 token）
+            _ = self._future_map.resolve(rid)
+            end = len(req.all_token_ids) + inflight
+            read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
+            write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + 1))
+            cached.req_ids.append(rid)
+            cached.num_computed_tokens.append(req.num_computed_tokens + inflight)
+            cached.num_output_tokens.append(req.num_output_tokens + inflight)
+            req_modes[rid] = ForwardMode.DECODE
+            self._inflight_decode[rid] = inflight + 1
 
         if not num_tokens:
             return SchedulerOutput(step_id=step, forward_mode=ForwardMode.IDLE, total_num_scheduled_tokens=0)
 
+        modes = list(req_modes.values())
         if all(m == ForwardMode.EXTEND for m in modes):
             mode = ForwardMode.EXTEND
         elif all(m == ForwardMode.DECODE for m in modes):
@@ -143,30 +234,32 @@ class NodeScheduler:
             write_set=write_set,
             global_num_tokens=None,
             can_run_graph=None,
+            req_forward_modes=req_modes,
         )
 
-    def _process_batch_result(self, output: SchedulerOutput, runner_out: ModelRunnerOutput) -> None:
-        for rid, n in output.num_scheduled_tokens.items():
-            req = self._reqs[rid]
-            if output.forward_mode in (ForwardMode.EXTEND, ForwardMode.MIXED) and req.num_computed_tokens < len(
-                req.prompt_token_ids
-            ):
-                # extend：pool_iface 已保证 KV；推进 computed
-                req.num_computed_tokens = len(req.prompt_token_ids)
-                if output.forward_mode == ForwardMode.EXTEND:
-                    continue
+    def _has_unprocessed_phase(self, rid: str, phase: ForwardMode) -> bool:
+        return any(br.output.req_forward_modes.get(rid) == phase for br in self._result_queue)
 
-            # decode：消费 mock 队列（保证与旧 P3 输出一致）
-            if rid in runner_out.next_token_ids or output.forward_mode in (
-                ForwardMode.DECODE,
-                ForwardMode.MIXED,
-            ):
+    def _process_batch_result(self, output: SchedulerOutput, runner_out: ModelRunnerOutput) -> None:
+        for rid in output.num_scheduled_tokens:
+            req = self._reqs[rid]
+            phase = output.req_forward_modes.get(rid, output.forward_mode)
+
+            if phase == ForwardMode.EXTEND:
+                # 不以 pool 是否已改 computed 为准；本步权威推进
+                req.num_computed_tokens = len(req.prompt_token_ids)
+                continue
+
+            if phase == ForwardMode.DECODE:
+                self._inflight_decode[rid] = max(0, self._inflight_decode.get(rid, 0) - 1)
                 remain = self._mock_remaining.get(rid) or []
                 if remain:
                     tok = remain.pop(0)
                     req.output_token_ids.append(tok)
                     req.num_computed_tokens += 1
                     self._mock_remaining[rid] = remain
+                    self._future_map.stash(rid, tok)
+                # MIXED 批内其它 phase 不走这里
 
             if req.num_output_tokens >= req.sampling_params.max_new_tokens:
                 req.finished = True
@@ -177,6 +270,8 @@ class NodeScheduler:
         req = self._reqs[rid]
         if rid in self._running:
             self._running.remove(rid)
+        self._inflight_decode.pop(rid, None)
+        self._future_map.clear(rid)
         self._pool.on_request_finished(req)
         LOG.info("finished req_id=%s reason=%s out=%d", rid, req.finish_reason, req.num_output_tokens)
 

@@ -70,3 +70,5 @@ class SchedulerOutput:
     can_run_graph: Optional[bool] = None
     scheduled_spec_decode_tokens: Optional[Dict[str, List[int]]] = None
     has_structured_output: bool = False
+    # 每请求本步形态（MIXED 批内区分；process 不靠批级 mode 推断）
+    req_forward_modes: Dict[str, ForwardMode] = field(default_factory=dict)
