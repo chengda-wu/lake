@@ -162,15 +162,18 @@ class NodeScheduler:
         self._future_map.publish()
 
     def _apply_ready_stats(self, ready: ReadyHandle) -> None:
-        """agent 只回 StepStats；Host Req 复用字段在此统一写入。"""
+        """agent 只回 StepStats；Host Req 复用字段在此统一写入。
+
+        仅采纳带 prefill_blocks 的步（EXTEND/前缀 ensure）。decode 步常带回
+        reused>0 的回声或空统计，不得覆盖冷启动的 reused==0。
+        """
         for rid, st in ready.stats_by_req.items():
             req = self._reqs.get(rid)
             if req is None:
                 continue
-            if st.reused_blocks:
-                req.reused_blocks = st.reused_blocks
             if st.prefill_blocks:
                 req.prefill_blocks = st.prefill_blocks
+                req.reused_blocks = st.reused_blocks
 
     def _drain_results(self) -> None:
         while self._result_queue:

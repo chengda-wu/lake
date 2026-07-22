@@ -24,11 +24,11 @@ class FakePool:
             phase = output.req_forward_modes.get(rid, output.forward_mode)
             if phase == ForwardMode.EXTEND:
                 nblocks = (len(req.prompt_token_ids) + 7) // 8
+                # 只回 StepStats；由 scheduler._apply_ready_stats 写入 Host Req
                 st = StepStats(reused_blocks=0, prefill_blocks=nblocks)
-                req.reused_blocks = 0
-                req.prefill_blocks = nblocks
             else:
-                st = StepStats(reused_blocks=req.reused_blocks, prefill_blocks=0)
+                # 模拟「decode 误报 reused」：不得覆盖冷启动 reused==0
+                st = StepStats(reused_blocks=99, prefill_blocks=0)
             stats[rid] = st
         return ReadyHandle(step_id=output.step_id, stats_by_req=stats)
 
@@ -61,6 +61,9 @@ def test_extend_then_decode_finishes() -> None:
     assert pool.finished == ["r1"]
     assert ForwardMode.EXTEND in pool.prepared_modes
     assert ForwardMode.DECODE in pool.prepared_modes
+    # 冷启动：EXTEND prefill>0 写入后，decode 步 reused=99 不得覆盖
+    assert done.reused_blocks == 0
+    assert done.prefill_blocks == 2
 
 
 def test_continuous_batching_two_reqs() -> None:

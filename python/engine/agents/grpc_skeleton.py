@@ -91,10 +91,16 @@ class GrpcSkeletonAgent:
 
         stats: Dict[str, StepStats] = {}
         try:
-            # 只回 StepStats；Host Req 字段由 node_scheduler process 统一写入
+            # 只回 StepStats；Host Req 字段由 node_scheduler process 统一写入。
+            # 前缀 ensure 仅在写 prompt 区间时做：DECODE 写槽也会进 write_set，
+            # 若对整段 prompt 再 Lookup，会把刚 Register 的块算成「复用」污染 reused_blocks。
             for io in plan.write_set:
                 req = self._host_reqs[io.req_id]
-                stats[io.req_id] = self._ensure_prefix_kv(req)
+                prompt_len = len(req.prompt_token_ids)
+                if io.token_start < prompt_len:
+                    stats[io.req_id] = self._ensure_prefix_kv(req)
+                else:
+                    stats.setdefault(io.req_id, StepStats())
             for io in plan.read_set:
                 if io.req_id in stats:
                     continue
