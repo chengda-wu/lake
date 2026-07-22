@@ -91,7 +91,7 @@
 
 ## 3. 节点级调度
 
-- **落点**:`python/runtime/node_scheduler.py` → 产出 `SchedulerOutput`(节点侧;字段草图见 [`compute-layer.md`](compute-layer.md)「开发前待补设计」D1)。集群选路仍归 Go Router;计算节点内**一份**调度决策扇出多卡(见 compute-layer TP)。
+- **落点**:`python/runtime/node_scheduler.py` → 产出 `SchedulerOutput`(节点侧;字段草图见 [`compute-layer.md`](compute-layer.md)「D1 — SchedulerOutput 字段草图」)。集群选路仍归 Go Router;计算节点内**一份**调度决策扇出多卡(见 compute-layer TP)。
 - **Host `Req` 权威**:**完全**在 `node_scheduler`(token 历史、采样/stop/grammar、结束判定);`ModelRunner` 无长期请求表。见 [`compute-layer.md`](compute-layer.md) 决策 5。
 - **默认 overlap**:主循环对齐 SGLang `event_loop_overlap`(CPU 收尾 ∥ 下一 GPU forward;device 侧 token 接力)。请求结束 → `agent.on_request_finished`(见 compute-layer「请求结束与资源释放」)。
 - **Continuous batching**：Decode / 混部节点动态拼接 batch;执行形态由角色配置 + 本步 `SchedulerOutput` 选择(同一 `engine/`,非 prefill/decode 分树)。
@@ -123,7 +123,7 @@
 
 **不做**:把 token 数 sync 塞进 `pool_iface`/存储池;不把该 sync 做成 Router 热路径(Router 只选端点,不知每 step batch 形状)。
 
-**待补**(并入 compute-layer D1/D5):sync 字段清单、进程组(与 TP 组关系)、纯 DP 无 collective 时跳过、与 headroom 规避 drafter-skip 的衔接。
+**D1 已定**：`global_num_tokens` / `can_run_graph` 进 `SchedulerOutput`；单卡或无需 collective 时字段为 `None` 并跳过 sync。仍待补(D5/D8)：进程组与 TP 组关系、与 headroom 规避 drafter-skip 的衔接。
 
 ## 缓存命中感知调度
 

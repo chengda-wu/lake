@@ -1,4 +1,4 @@
-"""计算层 runtime:P3 提供 WorkerService mock;生产含 gRPC/RDMA client + 节点级 scheduler。"""
+"""计算层 runtime:WorkerService + node_scheduler（Host Req 权威）。"""
 
 from lake_pb import lake_pb2_grpc
 
