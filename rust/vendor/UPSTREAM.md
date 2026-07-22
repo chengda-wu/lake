@@ -18,12 +18,25 @@
 
 ## 本树相对上游的改动（P4.1 / PR #21）
 
-**仅构建接入，业务源码未改**（与 `3rdparty/dynamo` 对应路径 `diff` 应为空）：
+**业务源码未改**（`src/` / tests / benches 与 `3rdparty/dynamo` 对应路径 `diff` 应为空）。  
+`Cargo.toml` 是**构建接入层**：去 workspace 继承、填实版本、改 path——其中若干约束相对上游有意偏离，见下节，勿读成「Cargo.toml 也字节级一致」。
 
-- `Cargo.toml`：去掉 dynamo workspace 继承，填实依赖版本；`dynamo-tokens` 改为 `path = "../dynamo-tokens"`。
 - `edition = "2024"`（上游 let chains 需要）。
+- `dynamo-tokens` → `path = "../dynamo-tokens"`。
 
 源码级改造（`InactiveIndex` 提 `pub`、拆 `EventsManager`、tier G1–G4→L0–L3、`check_presence` 线性一致等）**不在本 pin**，随 #20 后续切片（P4.2+）按需改。
+
+## Cargo.toml 相对上游的版本/feature 偏差
+
+填实依赖时对齐 **lake workspace 风格** 与上游 crate 意图，而非逐字复制 dynamo workspace 根：
+
+| 依赖 | 上游 | vendor | 说明 |
+|------|------|--------|------|
+| `tokio` | `=1.48.0` + `full` | `"1"` + `rt-multi-thread/macros/net/signal/sync/time` | 与 lake 根 `tokio` 同风格；显式含 `sync`/`time`，不靠 `tokio-stream` 间接补齐。dev-deps 仍 `features = ["full"]`。 |
+| `bytes` | crate 局部 `"1.10"`（覆盖根 `"1.9"`） | `"1.10"` | 对齐上游 crate 局部约束（曾误填根值 1.9，已改）。semver 解析结果通常与 lock 一致。 |
+| `tracing-subscriber` | workspace `"0.3"`（dev） | **省略** | 上游/vendor 源码均无引用，属死依赖；曾误填 `"0.1"`（像抄了 `tracing` 版本号），已删除而非改成 0.3。 |
+
+其余填实版本（`dashmap`/`parking_lot`/`prometheus`/…）与上游 workspace 根定义对齐。re-vendor 时保留上表策略，勿盲目改回 `=1.48.0`+`full`。
 
 ## Re-vendor 约定
 

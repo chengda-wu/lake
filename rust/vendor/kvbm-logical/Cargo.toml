@@ -22,7 +22,8 @@ dynamo-tokens = { path = "../dynamo-tokens" }
 
 anyhow = "1"
 async-stream = "0.3"
-bytes = "1.9"
+# 上游 crate 局部覆盖 workspace 根 1.9 → 1.10；semver 仍解析到 lock 同版本。
+bytes = "1.10"
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 derive_builder = "0.20"
 futures = "0.3"
@@ -34,7 +35,9 @@ rmp-serde = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2.0.17"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+# 对齐 lake workspace 风格(version "1" + 显式 features);较上游 =1.48.0+full 放松。
+# 显式含 sync/time,不依赖 tokio-stream 间接补齐(见 ../UPSTREAM.md)。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
@@ -53,7 +56,7 @@ tokio = { version = "1", features = ["full"] }
 # tracing-mutex 包装 parking_lot 原语,构建运行期锁获取 DAG,遇序反转/环即 panic。
 # 仅 #[cfg(test)] 用(每次获取的全局 DAG 代价在生产热路径不可接受)。
 tracing-mutex = { version = "0.3", features = ["parking_lot"] }
-tracing-subscriber = "0.1"
+# 上游经 workspace 继承 tracing-subscriber 0.3,但源码/测例均未引用——死依赖,vendor 不带。
 
 # match_blocks / acquire 热路径 criterion benchmark。需 testing feature(src/testing/ helpers)。
 [[bench]]
