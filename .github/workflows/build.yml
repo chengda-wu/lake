@@ -69,7 +69,7 @@ jobs:
       # 装运行时依赖即可,空壳阶段不 pip install -e .(PEP 668 机器会炸;
       # worker 包就在 python/ 下,PYTHONPATH 直接 import,与本地验证一致)。
       - run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0"
-      - run: PYTHONPATH=. python -c "from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2; import prefill, decode, draft, kernels, runtime, engine; from runtime.node_scheduler import NodeScheduler; from engine.model_runner import ModelRunner; print('py OK')"
+      - run: PYTHONPATH=. python -c "from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2; import prefill, decode, draft, kernels, runtime, engine; from runtime.node_scheduler import NodeScheduler; from engine.model_runner import ModelRunner; from engine.agent import StorageAgent; from engine.agents import InMemoryAgent; print('py OK')"
 
   # stub drift:重生成 Go/Python stub 后 git diff --exit-code。
   # 拦「proto 改了没重生成 stub」与「工具版本漂移致生成物变」(见 PR #17 review #4)。

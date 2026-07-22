@@ -37,9 +37,14 @@ def _abort_rpc(context: grpc.ServicerContext, exc: grpc.RpcError) -> None:
 
 class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
     def __init__(self, cp: lake_pb2_grpc.ControlPlaneServiceStub, kv: lake_pb2_grpc.SkeletonKvServiceStub):
-        self._pool = PoolIface(cp, kv)
-        self._runner = ModelRunner(self._pool)
         self._role = RoleConfig(role=WorkerRole.HYBRID)
+        self._pool = PoolIface.from_grpc(
+            cp,
+            kv,
+            pull_budget_ms=self._role.pull_budget_ms,
+            allow_partial_hit=self._role.allow_partial_hit,
+        )
+        self._runner = ModelRunner(self._pool)
 
     def Generate(self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext) -> lake_pb2.GenerateResponse:
         node = request.requester_node_id or NODE_ID

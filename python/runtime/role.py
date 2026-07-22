@@ -18,4 +18,7 @@ class RoleConfig:
     enable_drafter: bool = False
     enable_overlap: bool = True  # 默认开；对齐 SGLang event_loop_overlap
     max_running_reqs: int = 8  # continuous batching 上限（C1）
+    # D5：prepare 补拉预算；0=同步等到齐（P3 mock）
+    pull_budget_ms: int = 0
+    allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
     # arena / TP / 指标标签等留 D3

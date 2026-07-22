@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from engine.input_batch import InputBatch
-from engine.pool_iface import PoolIface, ReadyHandle
+from engine.pool_iface import PoolIface
+from engine.pool_types import ReadyHandle
 from runtime.scheduler_output import ForwardMode, SchedulerOutput
 
 

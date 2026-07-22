@@ -563,12 +563,76 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 |--------|------|------|
 | **C0** | D1 定稿 + `engine/`·`runtime/node_scheduler` 骨架 + mock 单请求走通 schedule→ready→execute→done→`on_request_finished`；P3 Generate 改挂新路径 | **done 2026-07-22** |
 | **C1** | continuous batching + overlap 主循环骨架（CPU mock，无真 GPU）；Host `Req` 生命周期完整；`FutureMap` host 占位（D10） | **done 2026-07-22** |
-| **C2** | D2/D5：`pool_iface` FFI 草签 + schedule 一步内补拉/ready 序；mock agent 可换 | 待 |
+| **C2** | D2/D5：`pool_iface` FFI 草签 + schedule 一步内补拉/ready 序；mock agent 可换 | **done 2026-07-22** |
 | **C3** | 真小模型 + Triton attn 最小路径（仍混部）；废止 `prefill/`·`decode/`·`draft/` 为实现树；CI import 切换 | 待（P5 核心） |
 | **C4** | `drafter/` post/pre_forward；`TARGET_VERIFY` / `DRAFT_EXTEND` | 待 |
 | **C5** | `PREBUILT` + 池驱动 PD/D-direct；与 Go Router 三模式联调 | 待 |
 
 硬约束不变：引擎零分层 / 零引擎驱动 intra-step `wait_event`；失败→F4；过载 shedding 不进 worker。
+
+## D2 — `pool_iface` / StorageAgent FFI 草签（已定 2026-07-22）
+
+> **不进 protobuf**（边6 = PyO3 / `.so`）。Python 落点：`engine/agent.py::StorageAgent` + `engine/pool_types.py`；P3 实现 `engine/agents/grpc_skeleton.py`；单测 `engine/agents/memory.py`。
+
+### 函数表面
+
+| 方法 | 输入 | 输出 / 错误 | 语义 |
+|------|------|-------------|------|
+| `prepare_step(plan)` | `PreparePlan` | `ReadyHandle` / `PoolError` | ready fence：read 保证在 L0（缺则补拉）→ 分配 write slot → 冻结 → 组 block table |
+| `done(step_id)` | `int` | `/ NOT_READY` | done fence：解冻；触发满块写回路径（生产） |
+| `on_request_finished(finish)` | `FinishRequest` | `/ DOWNSTREAM` | 尾块路 + 写回屏障 + 本地 ref--；**唯一** KV 收尾 |
+
+### `PreparePlan` / `ReadyHandle` 要点
+
+- Plan 只带逻辑 `read_set` / `write_set` + `pull_budget_ms` / `allow_partial_hit`，**无**物理 `block_ids`。
+- Ready 回 `step_id` + per-req `StepStats`；生产另写固定地址 block table（引擎只读）。
+- `allow_partial_hit=true` 且预算不足时，Ready 可带回缩后的 `effective_*_set`（调度器须尊重）；默认 `false` = all-or-nothing。
+
+### 错误码 `PoolErrorCode`
+
+| 码 | 何时 | 调度侧建议 |
+|----|------|------------|
+| `TIMEOUT` | 补拉超过 `pull_budget_ms` | 本批放弃该组 / 上报信号；失败重路由走 F4，不 mode-fallback |
+| `CAPACITY` | 无 L0 slot / 硬配额 | 同上；请求级 shedding 仍归 gateway |
+| `NOT_READY` | ready/done 错配或重入 prepare | 视为实现 bug / 故障 → F4 |
+| `DOWNSTREAM` | 控制面 / KV 后端失败 | F4 |
+| `INVALID_ARG` | plan 非法 | 拒批 |
+
+### 参考与关键差异（D2）
+
+- **参考**：vLLM `KVConnectorBase_V1`：`start_load_kv` / `wait_for_save` / `request_finished`（`vllm/distributed/kv_transfer/kv_connector/v1/base.py`）。
+- **值得参考**：scheduler/worker 双侧钩子拆分、请求结束一次回调、异步 load 与 forward 边界。
+- **关键差异**：vLLM connector 可选、引擎拥有 paged buffer；lake agent **必经**、表组装与 L0 槽归池，引擎只 consume ready→done。
+
+## D5 — schedule ↔ agent 一步交互序（已定 2026-07-22）
+
+守方案 Z：**调度只读视图组 batch，不指挥放置**；补拉只在 `prepare_step` 内由 agent 发起。
+
+```
+node_scheduler.schedule()          # 读命中视图镜像；产出 SchedulerOutput（含 read/write set）
+        │
+        ▼
+pool_iface.prepare_step(plan)      # ★ 唯一点发起补拉 / 占槽 / 冻结 / 组表
+        │  pull_budget_ms:
+        │    0     → 同步等到齐（P3 mock）
+        │    >0    → 超时 TIMEOUT；或 allow_partial_hit 缩批
+        │  默认不允许「部分命中仍整批进算」——缺块不进批（all-or-nothing）
+        ▼
+ready ──────────────────────────► ModelRunner.execute_model
+        │                              │
+        │                              ▼
+        │                         pool_iface.done(step_id)
+        ▼
+process_batch_result → finished? → on_request_finished
+```
+
+**与 overlap（C1）**：
+
+- 上批 `on_request_finished` 可与本批 `prepare_step` 并发；agent 须 **延迟归还** 仍被本步冻结的槽（类 SGLang `free_group`）。`InMemoryAgent` 用 deferred finish 模拟。
+- EXTEND 不可在 Host `computed` 未推进前重入（C1 已守）。
+- **ready 先于 execute**；不存在「先跑 forward 再等 KV」的引擎内 `wait_event`。
+
+**阈值**：`pull_budget_ms` 初值与 TTFT/ITL 预算对齐，待 P7 校准；默认 0 保 P3 正确性。
 
 ## 开发前待补设计
 
@@ -579,10 +643,10 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | # | 缺口 | 现状 | 建议落点 |
 |---|------|------|----------|
 | D1 | **`SchedulerOutput` / `NodeScheduleOutput` 字段草图** | **已定**（见上节「D1」） | 本节；代码 `runtime/scheduler_output.py` |
-| D2 | **`pool_iface` FFI 契约** | 文档有 ready/done 语义;无 Python↔agent 函数签名、错误码、超时、与边6(worker↔agent FFI)对齐 | `compute-layer` 本节附录或 `proto`/IDL 旁路说明(FFI 不进 proto) |
+| D2 | **`pool_iface` FFI 契约** | **已定**（见上节「D2」）；代码 `engine/agent.py` + `pool_types.py` | 本节；FFI 不进 proto |
 | D3 | **角色配置 schema** | `role=prefill\|decode\|hybrid` 已定方向;未定完整启动配置(模型、TP、是否挂 drafter、arena 尺寸、上报指标标签)；C0 仅最小 `RoleConfig` | `runtime` 配置节;与冷启动 Warm 对齐 |
 | D4 | **Attention 后端与 metadata 边界** | 用 Triton;未定 `AttentionMetadata` 谁填(runner vs agent 已写好的 block table 如何挂 metadata)、首版后端集合 | 对照 vLLM `AttentionMetadataBuilder`;agent 出表、runner 出其余 metadata |
-| D5 | **节点级 scheduler 与 agent 的交互序** | 方案 Z:读视图组 batch、缺失补拉;未定 schedule 一步内"补拉等待预算 / 是否允许部分命中进 batch / 与 ready fence 谁先谁后"；C0 mock 同步准备 | `scheduling.md` §3 + 本节 step 热路径细化 |
+| D5 | **节点级 scheduler 与 agent 的交互序** | **已定**（见上节「D5」）：schedule→prepare(预算)→ready→execute→done；默认 all-or-nothing；overlap 延迟 free | 本节 + [`scheduling.md`](scheduling.md) §3 |
 
 ### 可与骨架并行(不阻塞空壳,阻塞真模型)
 
