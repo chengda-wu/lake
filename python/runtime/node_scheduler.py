@@ -158,13 +158,14 @@ class NodeScheduler:
     def _respect_effective_sets(self, output: SchedulerOutput, ready: ReadyHandle) -> SchedulerOutput:
         """按 ReadyHandle.effective_*_set 过滤本步；丢弃的 req 回滚 inflight，下步重试。
 
-        effective_* 皆空 ⇒ 视为未缩批（兼容未填该字段的 FakePool/旧 agent）。
+        effective_* = None ⇒ agent 未填（FakePool/旧 agent）→ 未缩批，原样执行。
+        effective_* = []  ⇒ agent 显式缩批至空（allow_partial_hit 把全批丢掉）→ 降为 IDLE。
         """
-        if not ready.effective_read_set and not ready.effective_write_set:
+        if ready.effective_read_set is None and ready.effective_write_set is None:
             return output
-        keep = {io.req_id for io in ready.effective_read_set} | {
-            io.req_id for io in ready.effective_write_set
-        }
+        eff_r = ready.effective_read_set if ready.effective_read_set is not None else output.read_set
+        eff_w = ready.effective_write_set if ready.effective_write_set is not None else output.write_set
+        keep = {io.req_id for io in eff_r} | {io.req_id for io in eff_w}
         planned = set(output.num_scheduled_tokens)
         dropped = planned - keep
         if not dropped:
@@ -221,8 +222,8 @@ class NodeScheduler:
             scheduled_cached_reqs=cached,
             num_scheduled_tokens=num_tokens,
             total_num_scheduled_tokens=sum(num_tokens.values()),
-            read_set=[io for io in ready.effective_read_set if io.req_id in keep],
-            write_set=[io for io in ready.effective_write_set if io.req_id in keep],
+            read_set=[io for io in eff_r if io.req_id in keep],
+            write_set=[io for io in eff_w if io.req_id in keep],
             global_num_tokens=output.global_num_tokens,
             can_run_graph=output.can_run_graph,
             req_forward_modes=req_modes,

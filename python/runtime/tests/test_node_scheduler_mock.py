@@ -156,6 +156,55 @@ def test_respect_effective_sets_drops_req() -> None:
     pool.done(out.step_id)
 
 
+def test_respect_effective_sets_drops_all() -> None:
+    """P1：allow_partial_hit 把全批丢掉时，effective_*=[] 不得当成「未缩批」。
+
+    旧实现 ``not eff_read and not eff_write`` 把全空视为未缩批 → 缺块 req 仍进算。
+    现 None=未缩批、[]=缩批至空 → 应降为 IDLE。
+    """
+    from engine.agents.memory import InMemoryAgent
+    from engine.pool_iface import PoolIface
+    from runtime.role import RoleConfig
+    from runtime.scheduler_output import ForwardMode, ReqIoSet, SchedulerOutput
+
+    ag = InMemoryAgent()
+    ag.force_pull_reqs.update("a", "b")  # 两 req 都需补拉
+    ag.pull_cost_ms = 50
+    pool = PoolIface(ag, pull_budget_ms=10, allow_partial_hit=True)
+    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    runner = ModelRunner(pool)
+    sched = NodeScheduler(pool, runner, role)
+
+    out = SchedulerOutput(
+        step_id=2,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"a": 1, "b": 1},
+        total_num_scheduled_tokens=2,
+        read_set=[
+            ReqIoSet(req_id="a", token_start=0, token_end=8),
+            ReqIoSet(req_id="b", token_start=0, token_end=8),
+        ],
+        write_set=[
+            ReqIoSet(req_id="a", token_start=8, token_end=9),
+            ReqIoSet(req_id="b", token_start=8, token_end=9),
+        ],
+        req_forward_modes={"a": ForwardMode.DECODE, "b": ForwardMode.DECODE},
+    )
+    ready = pool.prepare_step(out, {})
+    # agent 把两 req 都因预算超限缩掉 → effective_*=[]（非 None）
+    assert ready.effective_read_set == []
+    assert ready.effective_write_set == []
+
+    filtered = sched._respect_effective_sets(out, ready)  # noqa: SLF001
+    assert filtered.forward_mode == ForwardMode.IDLE
+    assert filtered.num_scheduled_tokens == {}
+    assert filtered.total_num_scheduled_tokens == 0
+    # 被丢 req 的 inflight 须回滚（下步重试）
+    assert sched._inflight_decode.get("a", 0) == 0  # noqa: SLF001
+    assert sched._inflight_decode.get("b", 0) == 0  # noqa: SLF001
+    pool.done(out.step_id)
+
+
 if __name__ == "__main__":
     test_extend_then_decode_finishes()
     test_continuous_batching_two_reqs()
@@ -163,4 +212,5 @@ if __name__ == "__main__":
     test_sync_loop_process_before_next_execute()
     test_future_map_holds_last_token()
     test_respect_effective_sets_drops_req()
+    test_respect_effective_sets_drops_all()
     print("test_node_scheduler_mock OK")

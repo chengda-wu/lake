@@ -43,9 +43,11 @@ class ReadyHandle:
 
     step_id: int
     stats_by_req: Dict[str, StepStats] = field(default_factory=dict)
-    # 若 allow_partial_hit 且预算不足，agent 可回缩后的实际集合（默认与 plan 相同）
-    effective_read_set: List[ReqIoSet] = field(default_factory=list)
-    effective_write_set: List[ReqIoSet] = field(default_factory=list)
+    # 缩批语义：None = agent 未填（FakePool/旧 agent）→ 未缩批，按原 plan 执行；
+    # [] = agent 显式缩批至空（allow_partial_hit 把全批丢掉）→ 调度器须降为 IDLE。
+    # 非 None 时为缩批后的实际集合（默认与 plan 相同）。
+    effective_read_set: Optional[List[ReqIoSet]] = None
+    effective_write_set: Optional[List[ReqIoSet]] = None
 
 
 @dataclass
