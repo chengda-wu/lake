@@ -18,9 +18,16 @@
 
 ## 工具链 / MSRV
 
-- vendor crate 使用 **`edition = "2024"`**（上游 let chains），需要较新的 **Rust stable**（CI：`dtolnay/rust-toolchain@stable`）。
-- 本地若仍是旧 toolchain（无 2024 edition），`cargo build -p kvbm-logical` 会直接失败——先 `rustup update stable`，勿降 edition 回写上游语义。
+- vendor crate 使用 **`edition = "2024"`**（上游 let chains）。
+- **钉死工具链**：`rust/rust-toolchain.toml` → `1.96.1`（与 `3rdparty/dynamo/rust-toolchain.toml` 对齐）；CI 用 `dtolnay/rust-toolchain@1.96.1`，**不用**滚动 `@stable`。
+- 本地若仍是旧 toolchain（无 2024 edition），`cargo build -p kvbm-logical` 会直接失败——`rustup toolchain install 1.96.1`（或按该文件自动安装），勿降 edition 回写上游语义。
 - lake 业务 crate 仍可为 `edition = "2021"`；仅 vendor 成员要求 2024。
+
+## CI / clippy
+
+- **业务 crate**：`cargo clippy --workspace --all-targets --exclude kvbm-logical --exclude dynamo-tokens -- -D warnings`。
+- **vendor 排除 `-D warnings`**：本树约定业务源码不改；滚动 lint / 新 stable 若 deny 进 vendor，会逼改 fork 或堆 `allow`。排除后 lint 洁净度与「我们的 CI」解耦；vendor 正确性靠下方单测门禁。
+- **vendor 单测**：`cargo test -p dynamo-tokens -p kvbm-logical`（约 500，含 proptest）在 P4.1 起作为**每 PR** rust job 门禁，锁「业务源码未改 + 构建接入仍绿」。P4.2 链业务依赖后若嫌慢，可改 label / `schedule` 触发，勿静默删门禁。
 
 ## 本树相对上游的改动（P4.1 / GitHub PR #21）
 
@@ -49,7 +56,7 @@
 1. 更新 `3rdparty/dynamo` 到目标 commit（或从上游检出同等树）。
 2. 同步拷贝 `lib/kvbm-logical` → `rust/vendor/kvbm-logical`、`lib/tokens` → `rust/vendor/dynamo-tokens`（保留 lake 侧 `Cargo.toml` 填实版本与 path 依赖；冲突时以「能编过 + 单测绿」为准手工合并）。
 3. 刷新本文件的 Commit / Vendor 日期；`LICENSE` 若上游变更一并更新。
-4. `cd rust && cargo test -p dynamo-tokens -p kvbm-logical` + workspace fmt/clippy 全绿后再提交。
+4. `cd rust && cargo test -p dynamo-tokens -p kvbm-logical` + `cargo fmt --check` + 业务 crate clippy（`--exclude` vendor，见上节）全绿后再提交。
 
 
 ## LICENSE 说明

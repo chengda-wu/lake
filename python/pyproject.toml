@@ -13,6 +13,8 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-# 等价 setup.py 的 find_packages():python/ 下顶层包(prefill/decode/draft/
-# kernels/runtime/lake_pb)。包布局(归并为 lake 单包)留 P5 Python worker 大改时统一。
+# 白名单(非 find_packages 自动发现):新增 python/ 顶层包必须改这里,否则
+# `pip install -e .` 会静默不打包。CI 现走 PYTHONPATH,import 不受影响,属隐患。
+# 当前包:prefill/decode/draft/kernels/runtime/lake_pb。
+# P5 计算层若引入 engine/(或其它顶层包)务必同步 include;最终倾向归并为单包 lake。
 include = ["prefill*", "decode*", "draft*", "kernels*", "runtime*", "lake_pb*"]
