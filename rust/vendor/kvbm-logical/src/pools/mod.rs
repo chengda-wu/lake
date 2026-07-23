@@ -25,8 +25,8 @@ pub mod backends {
     pub use super::inactive::backends::*;
 }
 
-pub use store::InactiveIndex;
 pub(crate) use store::BlockStore;
+pub use store::InactiveIndex;
 
 pub(crate) use crate::SequenceHash;
 use crate::blocks::BlockId;
