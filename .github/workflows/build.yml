@@ -20,7 +20,8 @@ jobs:
           submodules: false
       # tonic-build(build.rs)调 protoc 在线生成 stub,CI 需装 protoc。
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # 版本钉在 rust/rust-toolchain.toml(与 3rdparty/dynamo 对齐),勿用滚动 @stable。
+      - uses: dtolnay/rust-toolchain@1.96.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -30,9 +31,13 @@ jobs:
       # storage-agent 双角色 feature 各自可单独编译(默认全开;部署期只开其一)。
       - run: cargo build -p lake-storage-agent --no-default-features --features compute
       - run: cargo build -p lake-storage-agent --no-default-features --features kvnode
-      # 格式 + lint 防回归(P3 代码阶段前的质量门)。
+      # 格式 + lint 先跑;失败时免白跑 ~500 vendor 测。
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # vendor 只读、源码不改:-D warnings 排除之,避免上游/新 lint 逼改 fork。
+      # 见 rust/vendor/UPSTREAM.md「CI / clippy」。
+      - run: cargo clippy --workspace --all-targets --exclude kvbm-logical --exclude dynamo-tokens -- -D warnings
+      # P4.1 正确性门禁(故意每 PR 跑;嫌慢可改 label/定时,见 UPSTREAM.md)。
+      - run: cargo test -p dynamo-tokens -p kvbm-logical
 
   go:
     runs-on: ubuntu-latest
@@ -60,7 +65,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 setup.py)。
+      # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 python/pyproject.toml)。
       # 装运行时依赖即可,空壳阶段不 pip install -e .(PEP 668 机器会炸;
       # worker 包就在 python/ 下,PYTHONPATH 直接 import,与本地验证一致)。
       - run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0"

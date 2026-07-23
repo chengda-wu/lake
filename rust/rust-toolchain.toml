@@ -1,0 +1,6 @@
+# Pin Rust so rolling stable lint/edition changes cannot break CI on
+# read-only vendored crates (see rust/vendor/UPSTREAM.md).
+# Align with 3rdparty/dynamo/rust-toolchain.toml (vendor source).
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]

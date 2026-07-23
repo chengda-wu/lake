@@ -1,0 +1,32 @@
+# Vendored from ai-dynamo/dynamo (lib/tokens) for lake P4 KV Pool.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# 许可全文见本目录 LICENSE；上游 pin 见 ../UPSTREAM.md。
+#
+# P4.1 仅构建接入:原 crate 用 dynamo workspace 继承(workspace = true),lake 不嵌套该
+# workspace,故填实版本。业务源码未改(PositionalRadixTree / PositionalLineageHash
+# 供 kvbm-logical 复用)。
+
+[package]
+name = "dynamo-tokens"
+description = "Token management tools (vendored for lake)"
+version = "1.3.0"
+edition = "2024"
+authors = ["NVIDIA"]
+license = "Apache-2.0"
+repository = "https://github.com/ai-dynamo/dynamo"
+
+[dependencies]
+dashmap = "6.1"
+derive-getters = "0.5"
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+bs58 = "0.5"
+bytemuck = "1.22"
+
+[dev-dependencies]
+itertools = "0.14"
+rmp-serde = "1"
+serde_json = "1"

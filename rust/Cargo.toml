@@ -8,6 +8,8 @@ members = [
     "tiered-store",
     "transfer",
     "storage-agent",
+    "vendor/dynamo-tokens",
+    "vendor/kvbm-logical",
 ]
 
 # 存储层 Rust 工作区。
