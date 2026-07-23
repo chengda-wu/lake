@@ -45,7 +45,11 @@ service ControlPlaneService {
   //   PutStart 不进控制面(agent 本地记账即可),防半块被读。仿 Mooncake PutEnd 的控制面侧。
   //   release 一致,写控制面内存,不进 etcd。
   //   与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
+  //   P4.2:须带 prefix_hashes 全链以便控制面建 PositionalLineageHash;`blocks` 可为 miss 后缀。
   rpc RegisterBlocks(RegisterBlocksRequest) returns (Ack);
+
+  // P4.2:两级 ref 全局汇总(agent 本地一级 → 本 RPC 二级)。流式上报;不进 ViewEvent(B1)。
+  rpc ReportRef(stream RefDelta) returns (Ack);
 
   // 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
   rpc RequestBarrier(RequestBarrierRequest) returns (Ack);
@@ -139,6 +143,23 @@ message LocateResponse {
 message RegisterBlocksRequest {
   string node_id                 = 1;
   repeated lake.BlockMeta blocks = 2;  // agent 写完 L2 durable 后上报(单次=PutEnd,见上方 RPC 注释)
+  // P4.2:完整有序前缀 hash 链(与 LookupPrefix.prefix_hashes 同形)。
+  //   `blocks` 可以是 miss 后缀;控制面用本字段 root/extend 建 lineage。
+  repeated bytes prefix_hashes   = 3;
+}
+
+// --- 两级 ref(P4.2) ---
+enum RefKind {
+  REF_KIND_UNSPECIFIED = 0;
+  REQUEST              = 1;  // 请求持有
+  IN_FLIGHT            = 2;  // 在途传输
+  WRITEBACK            = 3;  // 写回未 durable ack
+}
+message RefDelta {
+  lake.KVBlockID id = 1;
+  RefKind kind      = 2;
+  int32 delta       = 3;   // +1 / -1(允许多)
+  string node_id    = 4;
 }
 
 // --- 请求屏障 ---

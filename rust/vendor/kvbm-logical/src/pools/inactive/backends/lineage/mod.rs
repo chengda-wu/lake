@@ -130,7 +130,7 @@ impl LineageSlot {
     }
 }
 
-pub(crate) struct LineageBackend {
+pub struct LineageBackend {
     slots: Vec<LineageSlot>,
     /// Free-list head; links through `LineageSlot::next_sibling`.
     free_head: Option<u32>,
@@ -154,13 +154,13 @@ impl Default for LineageBackend {
 impl LineageBackend {
     /// Create with no pre-sized capacity and the default (`Tick`) eviction
     /// policy. Production builds go through [`with_policy`](Self::with_policy).
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_capacity(0)
     }
 
     /// Create pre-sized for `capacity` real blocks with the default
     /// (`Tick`) eviction policy.
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self::with_policy(capacity, LeafPolicy::tick(capacity))
     }
 
