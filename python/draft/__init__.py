@@ -1,6 +1,5 @@
-"""Draft worker 空壳(投机解码)。P2:仅验证包可 import;无业务逻辑。"""
+"""已废止为实现树——投机解码见 `engine/drafter/`（post/pre_forward）。"""
 
-from lake_pb import schema_pb2
+from engine.drafter import TinyMTPDrafter
 
-# draft KV 进池统一管理(pool_kind);类型占位。
-_ = schema_pb2.PoolKind
+_ = TinyMTPDrafter

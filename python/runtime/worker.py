@@ -1,52 +1,46 @@
-"""P3 mock worker:LookupPrefix → SkeletonKv Get/Put → RegisterBlocks → mock decode.
+"""WorkerService gRPC 门面：Dispatch 后的 Generate 挂到 node_scheduler + engine。
 
-生产路径:Router Dispatch → agent → FFI 引擎。P3 由 Router 先 Dispatch(agent ack)再调 WorkerService.Generate。
-参考:vLLM KVConnectorBase_V1(worker↔池 Get/Put 必须校验);早期 src/ 前缀复用冒烟。
+P3 仍：Router → AgentService.Dispatch(ack) → WorkerService.Generate。
+生产路径：Router Dispatch → agent 组 batch → FFI 引擎；本门面可收窄为控制面 RPC。
+
+参考:vLLM EngineCore 单环 schedule→execute（非每请求并行占 runner）；
+KVConnectorBase_V1；SGLang Scheduler+薄 ModelRunner。
+骨架期：共享 PoolIface/ModelRunner 单槽 ready → Generate 必须串行；
+真正 continuous batching 要共享一个长期 NodeScheduler（入队 + 单 step 环），
+而不是每请求新建 scheduler 并行 prepare。
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
+import threading
 from concurrent import futures
-from typing import List, Sequence
 
 import grpc
 
-from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2
+from engine.model_runner import ModelRunner
+from engine.pool_iface import PoolIface, chain_block_hashes, mock_kv_bytes
+from engine.pool_types import PoolError, PoolErrorCode
+from lake_pb import lake_pb2, lake_pb2_grpc
+from runtime.exec_mode import ExecMode
+from runtime.mode_select import select_exec_mode
+from runtime.node_scheduler import NodeScheduler, build_req_from_generate
+from runtime.role import RoleConfig, WorkerRole
 
 LOG = logging.getLogger("lake.worker")
 
-BLOCK_SIZE = 8  # P3 mock;生产默认 128
 NODE_ID = "worker-0"
 
+# 兼容 scripts/verify-p3.sh 等旧 import
+__all__ = ["WorkerServicer", "serve", "chain_block_hashes", "mock_kv_bytes", "NODE_ID"]
 
-def chain_block_hashes(token_ids: Sequence[int], block_size: int = BLOCK_SIZE) -> List[bytes]:
-    """前缀链式 hash:h_i = sha256(h_{i-1} || tokens_i),起点 parent=空。"""
-    hashes: List[bytes] = []
-    parent = b""
-    for i in range(0, len(token_ids), block_size):
-        chunk = list(token_ids[i : i + block_size])
-        if not chunk:
-            break
-        h = hashlib.sha256()
-        h.update(parent)
-        for t in chunk:
-            h.update(int(t).to_bytes(4, "little", signed=False))
-        digest = h.digest()
-        hashes.append(digest)
-        parent = digest
-    return hashes
-
-
-def mock_kv_bytes(block_hash: bytes) -> bytes:
-    return b"KV:" + block_hash[:16]
-
-
-def mock_decode_tokens(prompt: Sequence[int], max_new: int) -> List[int]:
-    """可复现 mock:基于 prompt 末 token 递推固定序列。"""
-    seed = prompt[-1] if prompt else 0
-    return [((seed + i + 1) % 1000) + 1000 for i in range(max_new)]
+_POOL_ERROR_STATUS = {
+    PoolErrorCode.TIMEOUT: grpc.StatusCode.UNAVAILABLE,  # 触发 F4 重路由
+    PoolErrorCode.CAPACITY: grpc.StatusCode.RESOURCE_EXHAUSTED,
+    PoolErrorCode.DOWNSTREAM: grpc.StatusCode.UNAVAILABLE,
+    PoolErrorCode.PROTOCOL_ERROR: grpc.StatusCode.UNAVAILABLE,  # fence 乱 → F4
+    PoolErrorCode.INVALID_ARG: grpc.StatusCode.INVALID_ARGUMENT,
+}
 
 
 def _abort_rpc(context: grpc.ServicerContext, exc: grpc.RpcError) -> None:
@@ -57,120 +51,69 @@ def _abort_rpc(context: grpc.ServicerContext, exc: grpc.RpcError) -> None:
     context.abort(grpc.StatusCode.INTERNAL, f"downstream: {details}")
 
 
+def _abort_pool_error(context: grpc.ServicerContext, exc: PoolError) -> None:
+    status = _POOL_ERROR_STATUS.get(exc.code, grpc.StatusCode.INTERNAL)
+    context.abort(status, str(exc))
+
+
 class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
     def __init__(self, cp: lake_pb2_grpc.ControlPlaneServiceStub, kv: lake_pb2_grpc.SkeletonKvServiceStub):
-        self._cp = cp
-        self._kv = kv
+        self._role = RoleConfig(role=WorkerRole.HYBRID, model_backend="mock")
+        self._pool = PoolIface.from_grpc(
+            cp,
+            kv,
+            pull_budget_ms=self._role.pull_budget_ms,
+            allow_partial_hit=self._role.allow_partial_hit,
+        )
+        self._runner = ModelRunner(
+            self._pool,
+            model_backend=self._role.model_backend,
+            enable_drafter=self._role.enable_drafter,
+            num_draft_tokens=self._role.num_draft_tokens,
+        )
+        # 共享 agent 单槽 _ready_step；对齐 vLLM 单 EngineCore 环，禁止并行 prepare
+        self._generate_lock = threading.Lock()
 
     def Generate(self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext) -> lake_pb2.GenerateResponse:
-        prompt = list(request.prompt_tokens)
-        model_id = request.model_id or "mock-llm"
+        with self._generate_lock:
+            return self._generate_locked(request, context)
+
+    def _generate_locked(
+        self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext
+    ) -> lake_pb2.GenerateResponse:
         node = request.requester_node_id or NODE_ID
-        max_new = request.max_new_tokens or 4
-
-        hashes = chain_block_hashes(prompt)
-        ids = [
-            schema_pb2.KVBlockID(
-                model_id=model_id,
-                block_hash=h,
-                pool_kind=schema_pb2.TARGET,
-                scope="public",
-            )
-            for h in hashes
-        ]
-
+        req = build_req_from_generate(
+            request_id=request.request_id,
+            model_id=request.model_id or "mock-llm",
+            prompt_tokens=list(request.prompt_tokens),
+            max_new_tokens=request.max_new_tokens or 4,
+            node_id=node,
+        )
+        # 每请求临时 scheduler：骨架可跑通；生产应改为长期 NodeScheduler + 入队
+        sched = NodeScheduler(self._pool, self._runner, self._role)
         try:
-            lookup = self._cp.LookupPrefix(
-                lake_pb2.LookupPrefixRequest(
-                    model_id=model_id,
-                    prefix_hashes=hashes,
-                    requester_node_id=node,
-                )
+            hint = self._pool.probe_prefix(req)
+            # P3：无 L0 预放置 → 通常 COLOCATED；命中块数仍进 hint
+            req.exec_mode = select_exec_mode(
+                hint, prompt_len=len(req.prompt_token_ids), role=self._role.role
             )
+            sched.add_request(req, hint=hint)
+            sched.run_until_idle()
+        except PoolError as e:
+            _abort_pool_error(context, e)
         except grpc.RpcError as e:
             _abort_rpc(context, e)
+        except RuntimeError as e:
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
 
-        reused = int(lookup.hit_length)
-        miss_ids = ids[reused:]
-
-        # 校验 SkeletonKv 字节路径:Lookup 命中必须真能 Get 到 bytes。
-        if reused:
-            try:
-                got = self._kv.GetBlocks(lake_pb2.GetBlocksRequest(ids=ids[:reused]))
-            except grpc.RpcError as e:
-                _abort_rpc(context, e)
-            if len(got.blocks) != reused:
-                context.abort(
-                    grpc.StatusCode.INTERNAL,
-                    f"GetBlocks mismatch: lookup hit={reused} got={len(got.blocks)}",
-                )
-            # 按请求 id 顺序对账 block_hash(同长度错块集合也要拒)。
-            for i, blk in enumerate(got.blocks):
-                want = bytes(ids[i].block_hash)
-                if not blk.id or bytes(blk.id.block_hash) != want:
-                    got_h = bytes(blk.id.block_hash) if blk.id else b""
-                    context.abort(
-                        grpc.StatusCode.INTERNAL,
-                        f"GetBlocks hash mismatch at {i}: want={want.hex()} got={got_h.hex()}",
-                    )
-                if not blk.data.startswith(b"KV:"):
-                    context.abort(grpc.StatusCode.INTERNAL, "GetBlocks: bad mock KV payload")
-            LOG.info("GetBlocks hit=%d ok", reused)
-
-        # mock prefill:为 miss block 写不透明 KV + 注册元数据
-        if miss_ids:
-            opaques = [
-                lake_pb2.OpaqueBlock(id=bid, data=mock_kv_bytes(bid.block_hash)) for bid in miss_ids
-            ]
-            try:
-                put = self._kv.PutBlocks(lake_pb2.PutBlocksRequest(node_id=node, blocks=opaques))
-            except grpc.RpcError as e:
-                _abort_rpc(context, e)
-            if not put.ok:
-                context.abort(grpc.StatusCode.INTERNAL, put.err or "PutBlocks failed")
-
-            metas = []
-            for bid in miss_ids:
-                metas.append(
-                    schema_pb2.BlockMeta(
-                        id=bid,
-                        block_kind=schema_pb2.T_TYPE,
-                        locations=[
-                            schema_pb2.Location(
-                                tier=schema_pb2.L2,
-                                node_id=node,
-                                segment_id=1,
-                                offset=0,
-                            )
-                        ],
-                        l3_present=False,
-                        ref_count=1,
-                    )
-                )
-            try:
-                reg = self._cp.RegisterBlocks(
-                    lake_pb2.RegisterBlocksRequest(node_id=node, blocks=metas)
-                )
-            except grpc.RpcError as e:
-                _abort_rpc(context, e)
-            if not reg.ok:
-                context.abort(grpc.StatusCode.INTERNAL, reg.err or "RegisterBlocks failed")
-
-        try:
-            self._cp.RequestBarrier(
-                lake_pb2.RequestBarrierRequest(request_id=request.request_id, node_id=node)
-            )
-        except grpc.RpcError as e:
-            _abort_rpc(context, e)
-
-        out = mock_decode_tokens(prompt, max_new)
-        # P3 只注册 L2,无 L0 本地命中 → 固定混部,不报 D_DIRECT。
+        done = sched.get_req(req.req_id)
+        mode = done.exec_mode.value if isinstance(done.exec_mode, ExecMode) else str(done.exec_mode)
         return lake_pb2.GenerateResponse(
             request_id=request.request_id,
-            output_tokens=out,
-            reused_blocks=reused,
-            prefill_blocks=len(miss_ids),
-            mode="COLOCATED",
+            output_tokens=done.output_token_ids,
+            reused_blocks=done.reused_blocks,
+            prefill_blocks=done.prefill_blocks,
+            mode=mode,
         )
 
 
@@ -180,9 +123,10 @@ def serve(bind: str, cp_addr: str, kv_addr: str) -> None:
     cp = lake_pb2_grpc.ControlPlaneServiceStub(cp_chan)
     kv = lake_pb2_grpc.SkeletonKvServiceStub(kv_chan)
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    # Generate 已在 servicer 内加锁；max_workers=1 再收一层，避免误并行占槽
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
     lake_pb2_grpc.add_WorkerServiceServicer_to_server(WorkerServicer(cp, kv), server)
     server.add_insecure_port(bind)
     server.start()
-    LOG.info("WorkerService on %s (cp=%s kv=%s)", bind, cp_addr, kv_addr)
+    LOG.info("WorkerService on %s (cp=%s kv=%s) via node_scheduler+engine", bind, cp_addr, kv_addr)
     server.wait_for_termination()

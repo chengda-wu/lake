@@ -1,7 +1,5 @@
-"""Decode 逻辑(P3:混部在 runtime.WorkerServicer.Generate 内 mock)。"""
+"""已废止为实现树——请用 `engine` + `runtime`（角色=decode）。"""
 
-from lake_pb import lake_pb2, schema_pb2
+from lake_pb import lake_pb2
 
-_ = schema_pb2.Location
-_ = lake_pb2.RequestBarrierRequest
-_ = lake_pb2.GenerateResponse
+_ = lake_pb2.GenerateRequest

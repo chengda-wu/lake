@@ -14,17 +14,20 @@ echo "==> rust: bins + controlplane unit tests"
 echo "==> go: module"
 (cd go && go build ./...)
 
-echo "==> python: stub + runtime import"
+echo "==> python: stub + runtime/engine import"
 PYTHONPATH=python python3 -c "
 from lake_pb import lake_pb2, lake_pb2_grpc, schema_pb2
-import runtime, prefill, decode
+import runtime, prefill, decode, engine
 from runtime.worker import chain_block_hashes, mock_kv_bytes
+from runtime.node_scheduler import NodeScheduler, build_req_from_generate, mock_decode_tokens
+from engine.model_runner import ModelRunner
 assert hasattr(lake_pb2_grpc, 'WorkerServiceStub')
 assert hasattr(lake_pb2_grpc, 'SkeletonKvServiceStub')
 assert hasattr(lake_pb2_grpc, 'AgentServiceStub')
 h = chain_block_hashes(list(range(24)))
 assert len(h) == 3, h
 assert mock_kv_bytes(h[0]).startswith(b'KV:')
+assert mock_decode_tokens([7], 2) == [1008, 1009]
 print('py OK')
 "
 
