@@ -20,10 +20,12 @@ pub mod tests;
 #[cfg(test)]
 mod block_proptest;
 
-/// Eviction backends. Public: lake-safe set. `pub(crate)`: rest for BlockManager.
+/// Eviction backends. Public: lake needs (`MultiLru` + `Lineage`). Rest `pub(crate)`.
 pub mod backends {
-    pub(crate) use super::inactive::backends::{FifoReusePolicy, HashMapBackend, LeafPolicy};
-    pub use super::inactive::backends::{LineageBackend, LruBackend, MultiLruBackend};
+    pub(crate) use super::inactive::backends::{
+        FifoReusePolicy, HashMapBackend, LeafPolicy, LruBackend,
+    };
+    pub use super::inactive::backends::{LineageBackend, MultiLruBackend};
 }
 
 pub(crate) use store::BlockStore;

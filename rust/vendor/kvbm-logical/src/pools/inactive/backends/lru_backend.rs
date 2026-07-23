@@ -12,14 +12,14 @@ use crate::blocks::SequenceHash;
 use crate::pools::IdBuildHasher;
 use crate::pools::store::InactiveIndex;
 
-pub struct LruBackend {
+pub(crate) struct LruBackend {
     /// Identity-hashed: `SequenceHash` is already a content hash, so
     /// SipHash over it would be wasted work on the lookup hot path.
     cache: LruCache<SequenceHash, BlockId, IdBuildHasher>,
 }
 
 impl LruBackend {
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
             cache: LruCache::with_hasher(capacity, IdBuildHasher),
         }

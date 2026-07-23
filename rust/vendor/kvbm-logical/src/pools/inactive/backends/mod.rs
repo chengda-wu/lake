@@ -3,9 +3,8 @@
 
 //! Backend storage strategies for the inactive index.
 //!
-//! lake P4.2: only export backends that do not leak `pub(crate)` types
-//! (`InactiveBlock` / `FifoPolicy` / `TickPolicy`) into the public API.
-//! Fifo/HashMap/ReusePolicy/LeafPolicy stay `pub(crate)`.
+//! lake P4.2: pub only what controlplane needs (`MultiLru` + `Lineage`).
+//! Other backends stay `pub(crate)` (BlockManager / avoid private_interfaces).
 
 use super::*;
 
@@ -23,6 +22,6 @@ pub(crate) use fifo::FifoReusePolicy;
 pub(crate) use hashmap_backend::HashMapBackend;
 pub(crate) use lineage::LeafPolicy;
 pub use lineage::LineageBackend;
-pub use lru_backend::LruBackend;
+pub(crate) use lru_backend::LruBackend;
 pub use multi_lru_backend::MultiLruBackend;
 pub(crate) use reuse_policy::ReusePolicy; // hashmap_backend: `use super::ReusePolicy`

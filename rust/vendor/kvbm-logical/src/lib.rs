@@ -39,11 +39,10 @@ pub use integrations::{
     SchedulableSequenceBuilder, ScheduleError, SequenceDelegate, SequenceEvent, SequenceState,
 };
 pub use manager::BlockManager;
-// lake P4.2: pub surface limited to types that do not leak pub(crate)
-// InactiveBlock / FifoPolicy / TickPolicy (else private_interfaces + -D warnings).
+// lake P4.2: pub only what controlplane drives (InactiveIndex + MultiLru + Lineage).
 pub use pools::{
     InactiveIndex,
-    backends::{LineageBackend, LruBackend, MultiLruBackend},
+    backends::{LineageBackend, MultiLruBackend},
 };
 pub use registry::BlockRegistry;
 pub use sequence::{

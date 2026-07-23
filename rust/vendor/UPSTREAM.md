@@ -39,7 +39,7 @@
 
 | 项 | 上游 | vendor | 说明 |
 |----|------|--------|------|
-| `InactiveIndex` + `MultiLru`/`Lineage`/`Lru` | `pub(crate)` | `pub` + crate root re-export | lake 薄驱动；**不** pub `Fifo`/`ReusePolicy`/`HashMap`/`LeafPolicy`（会经 `InactiveBlock`/`FifoPolicy` 触发 `private_interfaces`，CI `-D warnings` 红） |
+| `InactiveIndex` + `MultiLruBackend` + `LineageBackend` | `pub(crate)` | `pub` + crate root re-export | **仅** lake controlplane 所需；`Lru`/`HashMap`/`Fifo`/`ReusePolicy`/`LeafPolicy` 保持 `pub(crate)`（少改动；且避免 `private_interfaces`） |
 | `mark_present` / `mark_absent` | `pub(crate)` | `pub` | 无 BlockStore 时由 CP 标 presence |
 | `LogicalLayoutHandle` | `G1..G4` | `L0..L3` | lake 统一编址；vendor 内原无引用 |
 | `EventsManager` | 可选挂 registry | **仍保留模块**；lake **不接线** | 物理删除字段留后续小 PR |
