@@ -39,13 +39,26 @@
 
 | 项 | 上游 | vendor | 说明 |
 |----|------|--------|------|
-| `InactiveIndex` + `MultiLruBackend` + `LineageBackend` | `pub(crate)` | `pub` + crate root re-export | **仅** lake controlplane 所需；`Lru`/`HashMap`/`Fifo`/`ReusePolicy`/`LeafPolicy` 保持 `pub(crate)`（少改动；且避免 `private_interfaces`） |
+| `InactiveIndex` + `MultiLruBackend` + `LineageBackend` | `pub(crate)` | `pub` + crate root re-export | **仅** lake controlplane 所需（见下「为何不 pub Lru/Fifo」） |
 | `mark_present` / `mark_absent` | `pub(crate)` | `pub` | 无 BlockStore 时由 CP 标 presence |
 | `LogicalLayoutHandle` | `G1..G4` | `L0..L3` | lake 统一编址；vendor 内原无引用 |
 | `EventsManager` | 可选挂 registry | **仍保留模块**；lake **不接线** | 物理删除字段留后续小 PR |
 | `check_presence` 注释 | store-shadow | 注明 lake 同锁线性 | 实现未改 |
 
 其余 `src/` 业务逻辑与上游 pin 一致（除上表）。
+
+#### 为何不 pub `LruBackend` / `FifoReusePolicy` / `HashMapBackend`
+
+lake 冷热策略已定（见 `docs/architecture/kv-cache-pool.md`）：`ref>0` 冻结 + **LFU-Aging** + **前缀亲和**。
+
+| vendor backend | 语义 | lake P4.2 |
+|----------------|------|-----------|
+| `MultiLruBackend` | TinyLFU 分档 + 档内 LRU ≈ LFU-Aging | **pub**，主路径 |
+| `LineageBackend` | 只从叶子驱逐 ≈ 前缀亲和 | **pub**，前缀保护 |
+| `LruBackend` | 纯 LRU | 保持 `pub(crate)`——被 MultiLru 覆盖，不单独做策略 |
+| `FifoReusePolicy` / `HashMapBackend` | FIFO + HashMap 槽位复用 | 保持 `pub(crate)`——绑 `BlockStore` 字节池；lake 不用 BlockStore，薄驱动只吃 `(seq, block_id)` |
+
+不是 LRU/FIFO「没用」，而是当前策略不需要它们当一等公民；crate 内仍供 Dynamo `BlockManager` 使用。以后若另开策略再按需提 `pub`。连带少改动，也避开 `InactiveBlock` 等经 public API 泄漏触发的 `private_interfaces`（CI `-D warnings`）。
 
 ## Cargo.toml 相对上游的版本/feature 偏差
 
