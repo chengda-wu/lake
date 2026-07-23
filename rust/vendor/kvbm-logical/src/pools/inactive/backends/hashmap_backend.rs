@@ -13,14 +13,14 @@ use crate::pools::{InactiveBlock, SeqHashMap};
 
 use super::ReusePolicy;
 
-pub(crate) struct HashMapBackend {
+pub struct HashMapBackend {
     /// Identity-hashed: `SequenceHash` is already a content hash.
     blocks: SeqHashMap<BlockId>,
     reuse_policy: Box<dyn ReusePolicy>,
 }
 
 impl HashMapBackend {
-    pub(crate) fn new(reuse_policy: Box<dyn ReusePolicy>) -> Self {
+    pub fn new(reuse_policy: Box<dyn ReusePolicy>) -> Self {
         Self {
             blocks: SeqHashMap::default(),
             reuse_policy,

@@ -29,15 +29,23 @@
 - **vendor 排除 `-D warnings`**：本树约定业务源码不改；滚动 lint / 新 stable 若 deny 进 vendor，会逼改 fork 或堆 `allow`。排除后 lint 洁净度与「我们的 CI」解耦；vendor 正确性靠下方单测门禁。
 - **vendor 单测**：`cargo test -p dynamo-tokens -p kvbm-logical`（约 500，含 proptest）在 P4.1 起作为**每 PR** rust job 门禁，锁「业务源码未改 + 构建接入仍绿」。P4.2 链业务依赖后若嫌慢，可改 label / `schedule` 触发，勿静默删门禁。
 
-## 本树相对上游的改动（P4.1 / GitHub PR #21）
+## 本树相对上游的改动
 
-**业务源码未改**（`src/` / tests / benches 与 `3rdparty/dynamo` 对应路径 `diff` 应为空）。  
-`Cargo.toml` 是**构建接入层**：去 workspace 继承、填实版本、改 path——其中若干约束相对上游有意偏离，见下节，勿读成「Cargo.toml 也字节级一致」。
+### P4.1（构建接入）
 
-- `edition = "2024"`（上游 let chains 需要）。
-- `dynamo-tokens` → `path = "../dynamo-tokens"`。
+`Cargo.toml`：去 workspace 继承、填实版本、改 path；`edition = "2024"`；`dynamo-tokens` → `path = "../dynamo-tokens"`。见下节偏差表。
 
-源码级改造（`InactiveIndex` 提 `pub`、拆 `EventsManager`、tier G1–G4→L0–L3、`check_presence` 线性一致等）**不在本 pin**，随 #20 后续切片（P4.2+）按需改。
+### P4.2（最小源码改造，#20）
+
+| 项 | 上游 | vendor | 说明 |
+|----|------|--------|------|
+| `InactiveIndex` + backends | `pub(crate)` | `pub` + crate root re-export | lake controlplane 薄驱动复用，不用 `BlockStore` |
+| `mark_present` / `mark_absent` | `pub(crate)` | `pub` | 无 BlockStore 时由 CP 标 presence |
+| `LogicalLayoutHandle` | `G1..G4` | `L0..L3` | lake 统一编址；vendor 内原无引用 |
+| `EventsManager` | 可选挂 registry | **仍保留模块**；lake **不接线** | 物理删除字段留后续小 PR |
+| `check_presence` 注释 | store-shadow | 注明 lake 同锁线性 | 实现未改 |
+
+其余 `src/` 业务逻辑与上游 pin 一致（除上表）。
 
 ## Cargo.toml 相对上游的版本/feature 偏差
 

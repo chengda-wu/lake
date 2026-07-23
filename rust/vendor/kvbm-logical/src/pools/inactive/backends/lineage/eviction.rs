@@ -37,19 +37,19 @@
 use std::collections::BTreeMap;
 
 /// Leaf-eviction ordering strategy for `LineageBackend`. See the module docs.
-pub(crate) enum LeafPolicy {
+pub enum LeafPolicy {
     Fifo(FifoPolicy),
     Tick(TickPolicy),
 }
 
 impl LeafPolicy {
     /// Intrusive-FIFO policy, pre-sized for `capacity` slots.
-    pub(crate) fn fifo(capacity: usize) -> Self {
+    pub fn fifo(capacity: usize) -> Self {
         Self::Fifo(FifoPolicy::with_capacity(capacity))
     }
 
     /// Insertion-tick `BTreeMap` policy, pre-sized for `capacity` slots.
-    pub(crate) fn tick(capacity: usize) -> Self {
+    pub fn tick(capacity: usize) -> Self {
         Self::Tick(TickPolicy::with_capacity(capacity))
     }
 

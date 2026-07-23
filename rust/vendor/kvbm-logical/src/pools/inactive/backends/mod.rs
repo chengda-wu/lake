@@ -15,9 +15,9 @@ mod reuse_policy;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use fifo::FifoReusePolicy;
-pub(crate) use hashmap_backend::HashMapBackend;
-pub(crate) use lineage::{LeafPolicy, LineageBackend};
-pub(crate) use lru_backend::LruBackend;
-pub(crate) use multi_lru_backend::MultiLruBackend;
-pub(crate) use reuse_policy::ReusePolicy;
+pub use fifo::FifoReusePolicy;
+pub use hashmap_backend::HashMapBackend;
+pub use lineage::{LeafPolicy, LineageBackend};
+pub use lru_backend::LruBackend;
+pub use multi_lru_backend::MultiLruBackend;
+pub use reuse_policy::ReusePolicy;
