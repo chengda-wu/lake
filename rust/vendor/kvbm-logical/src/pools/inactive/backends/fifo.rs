@@ -19,7 +19,7 @@ pub type PriorityKey = u64;
 
 /// FIFO reuse policy
 #[derive(Debug)]
-pub struct FifoReusePolicy {
+pub(crate) struct FifoReusePolicy {
     keys: HashMap<BlockId, PriorityKey>,
     blocks: BTreeMap<PriorityKey, InactiveBlock>,
     next_seq: u64,

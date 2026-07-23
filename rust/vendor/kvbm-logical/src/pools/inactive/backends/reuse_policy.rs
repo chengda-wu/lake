@@ -9,7 +9,7 @@
 use super::{BlockId, InactiveBlock};
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReusePolicyError {
+pub(crate) enum ReusePolicyError {
     #[allow(dead_code)]
     #[error("Block {0} already exists in free list")]
     BlockAlreadyExists(BlockId),
@@ -23,7 +23,7 @@ pub enum ReusePolicyError {
 /// Different implementations can provide different priority strategies
 /// for selecting which block to allocate next.
 #[allow(dead_code)]
-pub trait ReusePolicy: Send + Sync + std::fmt::Debug {
+pub(crate) trait ReusePolicy: Send + Sync + std::fmt::Debug {
     /// Insert a block into the free list
     ///
     /// The implementation will compute the priority key and manage the free list

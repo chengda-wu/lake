@@ -36,7 +36,7 @@
 
 mod eviction;
 
-pub use eviction::LeafPolicy;
+pub(crate) use eviction::LeafPolicy;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
@@ -171,7 +171,7 @@ impl LineageBackend {
     /// ghosts can briefly push past `capacity`; that grows the slab once,
     /// amortized — not a steady-state cost. The `Tick` policy's `BTreeMap`
     /// is the one structure that always churns nodes.)
-    pub fn with_policy(capacity: usize, leaves: LeafPolicy) -> Self {
+    pub(crate) fn with_policy(capacity: usize, leaves: LeafPolicy) -> Self {
         Self {
             slots: Vec::with_capacity(capacity),
             free_head: None,

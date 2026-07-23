@@ -39,12 +39,11 @@ pub use integrations::{
     SchedulableSequenceBuilder, ScheduleError, SequenceDelegate, SequenceEvent, SequenceState,
 };
 pub use manager::BlockManager;
+// lake P4.2: pub surface limited to types that do not leak pub(crate)
+// InactiveBlock / FifoPolicy / TickPolicy (else private_interfaces + -D warnings).
 pub use pools::{
     InactiveIndex,
-    backends::{
-        FifoReusePolicy, HashMapBackend, LeafPolicy, LineageBackend, LruBackend, MultiLruBackend,
-        ReusePolicy,
-    },
+    backends::{LineageBackend, LruBackend, MultiLruBackend},
 };
 pub use registry::BlockRegistry;
 pub use sequence::{
@@ -53,7 +52,7 @@ pub use sequence::{
 };
 pub use tinylfu::{FrequencyTracker, TinyLFUTracker};
 // Re-export manager helpers used to build trackers for MultiLruBackend.
-pub use manager::{FrequencyTrackingCapacity, InactiveBackendConfig, LineageEviction};
+pub use manager::FrequencyTrackingCapacity;
 
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
