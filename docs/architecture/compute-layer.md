@@ -577,7 +577,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C6** | **Worker 长期单环**：一份 `NodeScheduler`+`ModelRunner`；`Generate` 只入队等待；step 环独立线程；每 step 前 drain 入队以真正 continuous batching；`RoleConfig.from_env`（D3 最小） | **done 2026-07-24** |
 | **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | **done 2026-07-24** |
 | **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | **done 2026-07-24** |
-| **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | pending |
+| **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | **done 2026-07-24** |
 | **C10** | Warm/容量信号/角色 PD 联调（挂 P4/P5 后半；Go Router 权威选路） | pending |
 
 硬约束不变：引擎零分层 / 零引擎驱动 intra-step `wait_event`；失败→F4；过载 shedding 不进 worker。
@@ -593,7 +593,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | 1 | **C6** Worker 单环 ✅ | `runtime/worker_engine.py` + `worker.py`、`node_scheduler.py`（`has_work` / `before_schedule` / `on_req_finished`）、`role.py` | 无 | 两并发 submit 同 scheduler；同 step 多 `req_id`；单测绿 |
 | 2 | **C7** budget/chunk ✅ | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget + decode 优先 + admission 单测 |
 | 3 | **C8** InputBatch/attn ✅ | `input_batch.py`、`model_runner.py`、`attn/metadata.py`、`kernels/attn_ref.py` | D4 初版已钉 | tiny_lm 同批两请求；`forward_query_logits` 残差 |
-| 4 | **C9** D10+D6 | `agents/memory.py`、`future_map.py`、`model_runner.py` | D10 | overlap 多步槽位不回缩；dummy warmup |
+| 4 | **C9** D10+D6 ✅ | `agents/memory.py`（prepare 代数防 shrink）、`model_runner.dummy_run` | D10 | 新 prepare 后旧 commit 不压 HWM；dummy 不触 pool |
 | 5 | **C10** 联调 | worker + pool + router | P4 进度 | 见 P5 未勾项 |
 
 **本轮不做**：runner 内 BlockPool / `finished_req_ids` 清态；SGLang 分相状态机；TP `collective_rpc`（D8）；真 CUDA graph / 真权重；gateway shedding。
@@ -681,8 +681,8 @@ process_batch_result → finished? → on_request_finished
 
 | # | 缺口 | 说明 |
 |---|------|------|
-| D6 | **Dummy / CUDA graph capture 路径** | overlap 默认已定;dummy/graph 偏 V2 `_dummy_run` 复用生产入口,还是 SGLang 另造 batch——需二选一并写清 skip 分支(勿污染 serving / overlap 语义) |
-| D10 | **FutureMap 等价物 + overlap×agent 时序** | C1：`runtime/future_map.py` host 占位（`stash`/`publish`/`resolve`）；生产 GPU buf + 上批 `on_request_finished`∩本批 `prepare` 槽位冻结仍待（并入 D5）。**已知 mock 债**：`InMemoryAgent.commit_write_extent` 用绝对值 `min` 收 L0 高水位——在默认 overlap 下，`process(N-1)` 会回缩掉 `prepare(N)` 已抬高的预留（普通 DECODE 与 TARGET_VERIFY 皆然）；`GrpcSkeletonAgent` 上 commit 为 no-op，故 P3 不触发。生产应对齐 vLLM V2 **device 侧**接受长度会计（类 `free_group`），host `min` 不得压后续 prepare；在此之前勿把 InMemory+overlap 当正确槽位语义。 | 对齐 SGLang `FutureMap` + free_group；vLLM V2 device accounting |
+| D6 | **Dummy / CUDA graph capture 路径** | **C9 已选 V2**：`ModelRunner.dummy_run` 造假 `SchedulerOutput` + `execute_model(..., dummy_run=True)`（跳过 pool.done）；真 CUDA graph capture 仍后置 |
+| D10 | **FutureMap 等价物 + overlap×agent 时序** | C1：`runtime/future_map.py` host 占位；**C9**：`InMemoryAgent` 用 `_prepares_since_commit` 防止旧 commit 压新 prepare HWM（mock 级 device accounting）。生产仍需 GPU buf FutureMap + 真 free_group；`GrpcSkeletonAgent` commit 仍为 no-op。 | 对齐 SGLang `FutureMap` + free_group；vLLM V2 device accounting |
 | D7 | **Sampling / structured output 挂载点** | 状态归属已有 research;engine 内 `sample/` 与 grammar bitmask 的 step 序(相对 `execute_model`/`sample_tokens`)未钉 | 见 [`../research/sampling-params.md`](../research/sampling-params.md)、[`../research/guided-decoding.md`](../research/guided-decoding.md) |
 | D8 | **TP 扇出在 runtime 的形态** | 已定"一份调度 + 多卡执行"、单卡先行;未定 Executor/collective_rpc 等价物是否自研还是薄封装 | 对照 vLLM `MultiprocExecutor.collective_rpc` |
 | D9 | **权重加载回调进 runner** | 冷启动流式 load + pin 已定;未定 `load_model` 与 arena 绑定、layer-ready 后如何开始接请求 | 与 Warm→Ready 状态机对齐 |

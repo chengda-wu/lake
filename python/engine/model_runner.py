@@ -222,3 +222,31 @@ class ModelRunner:
     def clear_drafter(self, req_id: str) -> None:
         if self._drafter is not None:
             self._drafter.clear(req_id)
+
+    def dummy_run(
+        self,
+        *,
+        num_reqs: int = 1,
+        tokens_per_req: int = 1,
+        step_id: int = 0,
+    ) -> ModelRunnerOutput:
+        """对齐 vLLM `GPUModelRunner._dummy_run`：造假 SchedulerOutput 走生产入口。
+
+        用于 warmup / graph capture 占位；跳过真实 add/update 与 pool.done。
+        """
+        from runtime.scheduler_output import ForwardMode
+
+        num_tokens = {
+            f"dummy-{i}": tokens_per_req for i in range(num_reqs)
+        }
+        output = SchedulerOutput(
+            step_id=step_id,
+            forward_mode=ForwardMode.DECODE,
+            num_scheduled_tokens=num_tokens,
+            total_num_scheduled_tokens=sum(num_tokens.values()),
+            req_forward_modes={rid: ForwardMode.DECODE for rid in num_tokens},
+            req_num_computed_at_schedule={rid: 1 for rid in num_tokens},
+            can_run_graph=True,
+        )
+        ready = ReadyHandle(step_id=step_id)
+        return self.execute_model(output, ready, host_reqs={}, dummy_run=True)
