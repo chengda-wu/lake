@@ -244,7 +244,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [~] **C6–C10** 填充 scheduler/worker/runner（vLLM 为主）：详见 [`architecture/compute-layer.md`](architecture/compute-layer.md)「C6–C10 填充计划」
   - [x] **C6**：Worker 长期单环（一份 scheduler；Generate 入队；step 前 drain）
   - [x] **C7**：token_budget + chunked extend
-  - [ ] **C8**：InputBatch + AttentionMetadata（D4）+ TinyLM 批路径
+  - [x] **C8**：InputBatch + AttentionMetadata（D4）+ TinyLM 批路径
   - [ ] **C9**：D10 overlap×agent + D6 dummy_run
   - [ ] **C10**：Warm/容量信号/PD 联调
 - [ ] 同步工程基建：CI 以 `engine`/`runtime`/`kernels` 为主（旧三包仅兼容 import）

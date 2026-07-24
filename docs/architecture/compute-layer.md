@@ -576,7 +576,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C5** | vLLM 调度几何 + `mode_select`/`PrefixHint`（D-direct/混部/PD）；整段本地命中→computed=prompt_len；Generate 回填 `exec_mode`；Go Router 权威选路仍后续 | **done 2026-07-22** |
 | **C6** | **Worker 长期单环**：一份 `NodeScheduler`+`ModelRunner`；`Generate` 只入队等待；step 环独立线程；每 step 前 drain 入队以真正 continuous batching；`RoleConfig.from_env`（D3 最小） | **done 2026-07-24** |
 | **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | **done 2026-07-24** |
-| **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | pending |
+| **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | **done 2026-07-24** |
 | **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | pending |
 | **C10** | Warm/容量信号/角色 PD 联调（挂 P4/P5 后半；Go Router 权威选路） | pending |
 
@@ -592,7 +592,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 |----|--------|------|----------|------|
 | 1 | **C6** Worker 单环 ✅ | `runtime/worker_engine.py` + `worker.py`、`node_scheduler.py`（`has_work` / `before_schedule` / `on_req_finished`）、`role.py` | 无 | 两并发 submit 同 scheduler；同 step 多 `req_id`；单测绿 |
 | 2 | **C7** budget/chunk ✅ | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget + decode 优先 + admission 单测 |
-| 3 | **C8** InputBatch/attn | `input_batch.py`、`model_runner.py`、`attn/`、`kernels/` | **先钉 D4** | tiny_lm 同批两请求；命中后只算残差 |
+| 3 | **C8** InputBatch/attn ✅ | `input_batch.py`、`model_runner.py`、`attn/metadata.py`、`kernels/attn_ref.py` | D4 初版已钉 | tiny_lm 同批两请求；`forward_query_logits` 残差 |
 | 4 | **C9** D10+D6 | `agents/memory.py`、`future_map.py`、`model_runner.py` | D10 | overlap 多步槽位不回缩；dummy warmup |
 | 5 | **C10** 联调 | worker + pool + router | P4 进度 | 见 P5 未勾项 |
 
@@ -674,7 +674,7 @@ process_batch_result → finished? → on_request_finished
 | D1 | **`SchedulerOutput` / `NodeScheduleOutput` 字段草图** | **已定**（见上节「D1」） | 本节；代码 `runtime/scheduler_output.py` |
 | D2 | **`pool_iface` FFI 契约** | **已定**（见上节「D2」）；代码 `engine/agent.py` + `pool_types.py` | 本节；FFI 不进 proto |
 | D3 | **角色配置 schema** | `role=prefill\|decode\|hybrid` 已定方向;未定完整启动配置(模型、TP、是否挂 drafter、arena 尺寸、上报指标标签)；C0 仅最小 `RoleConfig` | `runtime` 配置节;与冷启动 Warm 对齐 |
-| D4 | **Attention 后端与 metadata 边界** | C3：`engine/attn/backend.py` + `kernels/attn_{ref,triton}` 就位；`AttentionMetadata`/block table 挂载仍待（agent 出表） | 对照 vLLM `AttentionMetadataBuilder` |
+| D4 | **Attention 后端与 metadata 边界** | **C8 初版已定**：`attn/metadata.py::AttentionMetadata` + `ReadyHandle.block_table_by_req`（agent 出表、runner 只读）；`forward_queries` 残差路径；真固定地址 tensor / paged kernel 仍待生产 | 对照 vLLM `AttentionMetadataBuilder` |
 | D5 | **节点级 scheduler 与 agent 的交互序** | **已定**（见上节「D5」）：schedule→prepare(预算)→ready→execute→done；默认 all-or-nothing；overlap 延迟 free | 本节 + [`scheduling.md`](scheduling.md) §3 |
 
 ### 可与骨架并行(不阻塞空壳,阻塞真模型)
