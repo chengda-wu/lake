@@ -31,7 +31,8 @@
 
 源码入口:`3rdparty/sglang/docs/advanced_features/hicache_design.md`、`python/sglang/srt/mem_cache/`。
 
-> SGLang **同时是计算层参考**:spec decode(drafter 共置串行、DSPARK/DFLASH/MTP/EAGLE、`PoolName.DRAFT`)、DP/TP/PP 控制面(每 GPU 一 Scheduler + 请求广播 / PP proxy;对照 vLLM 一 Scheduler + Executor 扇出)。research 专文见 [`sglang/model-runner.md`](sglang/model-runner.md);lake 落点见 [`../architecture/compute-layer.md`](../architecture/compute-layer.md) "投机解码"。
+> SGLang **同时是计算层参考**:spec decode(drafter 共置串行、DSPARK/DFLASH/MTP/EAGLE、`PoolName.DRAFT`)、DP/TP/PP 控制面(每 GPU 一 Scheduler + 请求广播 / PP proxy;对照 vLLM 一 Scheduler + Executor 扇出)。research 专文见 [`sglang/model-runner.md`](sglang/model-runner.md);lake 落点见 [`../architecture/compute-layer.md`](../architecture/compute-layer.md) "投机解码"。  
+> **Agentic 分布式 KV 总路线**([#21846](https://github.com/sgl-project/sglang/issues/21846)：增量 PD、Host 直传、UnifiedRadix、router hint)见 [`sglang/agentic-kv-roadmap.md`](sglang/agentic-kv-roadmap.md)。
 
 ### 借鉴点
 
