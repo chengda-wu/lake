@@ -13,3 +13,6 @@
 [submodule "3rdparty/dynamo"]
 	path = 3rdparty/dynamo
 	url = https://github.com/ai-dynamo/dynamo
+[submodule "3rdparty/ucm"]
+	path = 3rdparty/ucm
+	url = https://github.com/modelengine-group/unified-cache-management.git
