@@ -49,3 +49,23 @@ def test_engine_capacity_signal() -> None:
     finally:
         eng.stop()
     assert eng.lifecycle.state == WorkerState.TERMINATE
+
+
+def test_stop_fails_orphaned_inflight() -> None:
+    """stop 后必须唤醒仍卡在 done.wait 的 inflight（审出：哨兵抢先会孤儿化）。"""
+    import threading
+
+    from runtime.node_scheduler import build_req_from_generate
+    from runtime.worker_engine import _Inbound
+
+    pool = FakePool()
+    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    eng.start()
+    req = build_req_from_generate("orphan", "m", list(range(4)), 2, "n0")
+    item = _Inbound(req=req, hint=None, done=threading.Event(), error=[], result=[])
+    eng._inflight[req.req_id] = item  # noqa: SLF001
+    eng.scheduler.add_request(req)
+    eng.stop(timeout=2.0)
+    assert item.done.is_set()
+    assert item.error and "stopped" in str(item.error[0]).lower()

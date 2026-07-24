@@ -105,6 +105,9 @@ class WorkerEngine:
         self._stop.set()
         self._inbound.put(None)
         self._thread.join(timeout=timeout)
+        # 环退出后仍可能有未 drain 的 inbound / 未完成的 inflight（哨兵抢先）
+        self._drain_inbound()
+        self._fail_inflight(RuntimeError("WorkerEngine stopped"))
         self._life.advance(WorkerState.TERMINATE)
         self._started = False
 
@@ -162,7 +165,12 @@ class WorkerEngine:
             items = list(self._inflight.values())
             self._inflight.clear()
         for inn in items:
-            self._sched.abandon_req(inn.req.req_id)
+            # 故障/停机：尽量打 agent 收尾，避免池侧 ref/槽泄漏
+            req = self._sched.abandon_req(inn.req.req_id) or inn.req
+            try:
+                self._pool.on_request_finished(req)
+            except Exception:  # noqa: BLE001
+                LOG.exception("on_request_finished during fail req=%s", req.req_id)
             if not inn.done.is_set():
                 inn.error.append(exc)
                 inn.done.set()
@@ -176,7 +184,9 @@ class WorkerEngine:
                 except queue.Empty:
                     continue
                 if item is None:
-                    if self._stop.is_set():
+                    # 哨兵：先抽干其后真实请求，再退出（避免 submit 永久 wait）
+                    self._drain_inbound()
+                    if self._stop.is_set() and not self._sched.has_work():
                         break
                     continue
                 self._inbound.put(item)
@@ -192,3 +202,7 @@ class WorkerEngine:
             except Exception as e:  # noqa: BLE001
                 LOG.exception("WorkerEngine step loop failed: %s", e)
                 self._fail_inflight(e)
+        # 正常停机：唤醒仍卡在 done.wait 的调用方
+        self._drain_inbound()
+        if self._inflight:
+            self._fail_inflight(RuntimeError("WorkerEngine stopped"))
