@@ -13,3 +13,6 @@
 [submodule "3rdparty/dynamo"]
 	path = 3rdparty/dynamo
 	url = https://github.com/ai-dynamo/dynamo
+[submodule "3rdparty/memcache"]
+	path = 3rdparty/memcache
+	url = https://github.com/Ascend/memcache.git
