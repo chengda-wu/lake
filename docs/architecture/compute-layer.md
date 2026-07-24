@@ -43,10 +43,10 @@ Go Router                         # 模式选择 + 副本选路
         │ Dispatch / Generate
         ▼
 python/runtime/                   # 进程边界
-  worker.py                       # Warm→Ready→Serving→Drain;角色配置入口
+  worker.py                       # WorkerService gRPC 门面;Warm→Ready→Serving→Drain
+  worker_engine.py                # ★ C6 长期单环（入队 + step 线程;无 gRPC 依赖）
   node_scheduler.py               # ★ Req 权威 + continuous batching + overlap 主循环
                                   #   → SchedulerOutput;请求结束 → agent.on_request_finished
-  service.py                      # WorkerService 等 RPC
         │ SchedulerOutput（无长期 Req）
         ▼
 python/engine/                    # ★ 对齐 vLLM gpu/ 形态(唯一实现树;无 RequestState 表)
@@ -574,8 +574,29 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C3** | TinyLM（纯 Python）+ `kernels/attn_*`（triton 可选回退 ref）+ `sample/greedy`；`model_backend=tiny_lm`；旧三包废止为实现树（保留空壳兼容） | **done 2026-07-22** |
 | **C4** | `drafter/TinyMTPDrafter` post/pre_forward；`TARGET_VERIFY` + chain reject；`DRAFT_EXTEND` 骨架 | **done 2026-07-22** |
 | **C5** | vLLM 调度几何 + `mode_select`/`PrefixHint`（D-direct/混部/PD）；整段本地命中→computed=prompt_len；Generate 回填 `exec_mode`；Go Router 权威选路仍后续 | **done 2026-07-22** |
+| **C6** | **Worker 长期单环**：一份 `NodeScheduler`+`ModelRunner`；`Generate` 只入队等待；step 环独立线程；每 step 前 drain 入队以真正 continuous batching；`RoleConfig.from_env`（D3 最小） | **done 2026-07-24** |
+| **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | pending |
+| **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | pending |
+| **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | pending |
+| **C10** | Warm/容量信号/角色 PD 联调（挂 P4/P5 后半；Go Router 权威选路） | pending |
 
 硬约束不变：引擎零分层 / 零引擎驱动 intra-step `wait_event`；失败→F4；过载 shedding 不进 worker。
+
+### C6–C10 填充计划（vLLM 为主）
+
+> 对照：[`../research/vllm/compute.md`](../research/vllm/compute.md)、[`../research/scheduler-worker-interface.md`](../research/scheduler-worker-interface.md)。  
+> **参考**：vLLM `Scheduler.schedule` / `SchedulerOutput` / `GPUModelRunner.execute_model` / EngineCore 单环；overlap/Req 权威仍借 SGLang Scheduler 层。  
+> **关键差异**：无 runner 内 `RequestState`/`BlockPool`；KV 经 `pool_iface` 必经 fence；不设 PREBUILT 分相。
+
+| 序 | 里程碑 | 主改 | 阻塞设计 | 验收 |
+|----|--------|------|----------|------|
+| 1 | **C6** Worker 单环 ✅ | `runtime/worker_engine.py` + `worker.py`、`node_scheduler.py`（`has_work` / `before_schedule` / `on_req_finished`）、`role.py` | 无 | 两并发 submit 同 scheduler；同 step 多 `req_id`；单测绿 |
+| 2 | **C7** budget/chunk | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget 单测 |
+| 3 | **C8** InputBatch/attn | `input_batch.py`、`model_runner.py`、`attn/`、`kernels/` | **先钉 D4** | tiny_lm 同批两请求；命中后只算残差 |
+| 4 | **C9** D10+D6 | `agents/memory.py`、`future_map.py`、`model_runner.py` | D10 | overlap 多步槽位不回缩；dummy warmup |
+| 5 | **C10** 联调 | worker + pool + router | P4 进度 | 见 P5 未勾项 |
+
+**本轮不做**：runner 内 BlockPool / `finished_req_ids` 清态；SGLang 分相状态机；TP `collective_rpc`（D8）；真 CUDA graph / 真权重；gateway shedding。
 
 ## D2 — `pool_iface` / StorageAgent FFI 草签（已定 2026-07-22）
 

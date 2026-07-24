@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
 from engine.pool_iface import PoolIface
@@ -47,10 +47,17 @@ class _BatchResult:
 
 
 class NodeScheduler:
-    def __init__(self, pool: PoolIface, runner: ModelRunner, role: Optional[RoleConfig] = None) -> None:
+    def __init__(
+        self,
+        pool: PoolIface,
+        runner: ModelRunner,
+        role: Optional[RoleConfig] = None,
+        on_req_finished: Optional[Callable[[Req], None]] = None,
+    ) -> None:
         self._pool = pool
         self._runner = runner
         self._role = role or RoleConfig()
+        self._on_req_finished = on_req_finished
         self._reqs: Dict[str, Req] = {}
         self._waiting: List[str] = []
         self._running: List[str] = []
@@ -96,15 +103,45 @@ class NodeScheduler:
         else:
             self._mock_remaining[req.req_id] = []
 
-    def run_until_idle(self) -> None:
-        """主循环：默认 overlap（对齐 SGLang event_loop_overlap）。"""
-        if self._role.enable_overlap:
-            self._event_loop_overlap()
-        else:
-            self._event_loop_normal()
+    def has_work(self) -> bool:
+        """是否仍有 waiting / running / 未 process 的结果。"""
+        return bool(self._waiting or self._running or self._result_queue)
 
-    def _event_loop_normal(self) -> None:
-        while self._waiting or self._running or self._result_queue:
+    def has_req(self, req_id: str) -> bool:
+        return req_id in self._reqs
+
+    def release_req(self, req_id: str) -> Optional[Req]:
+        """Generate 返回后丢弃 Host Req（防长期 worker 泄漏）。"""
+        return self._reqs.pop(req_id, None)
+
+    def abandon_req(self, req_id: str) -> Optional[Req]:
+        """故障路径：从 waiting/running 摘掉并释放 Host Req（不打 on_request_finished）。"""
+        if req_id in self._waiting:
+            self._waiting.remove(req_id)
+        if req_id in self._running:
+            self._running.remove(req_id)
+        self._inflight_decode.pop(req_id, None)
+        self._pending_drafts.pop(req_id, None)
+        self._mock_remaining.pop(req_id, None)
+        self._future_map.clear(req_id)
+        self._runner.clear_drafter(req_id)
+        return self._reqs.pop(req_id, None)
+
+    def run_until_idle(self, before_schedule: Optional[Callable[[], None]] = None) -> None:
+        """主循环：默认 overlap（对齐 SGLang event_loop_overlap）。
+
+        `before_schedule`：每轮 schedule 前回调（C6 WorkerEngine drain 入队，
+        使并发 Generate 能在同环内组进 continuous batch）。
+        """
+        if self._role.enable_overlap:
+            self._event_loop_overlap(before_schedule)
+        else:
+            self._event_loop_normal(before_schedule)
+
+    def _event_loop_normal(self, before_schedule: Optional[Callable[[], None]] = None) -> None:
+        while self.has_work():
+            if before_schedule is not None:
+                before_schedule()
             output = self.schedule()
             if output.total_num_scheduled_tokens == 0:
                 self._drain_results()
@@ -114,15 +151,18 @@ class NodeScheduler:
             self._run_batch(output)
             self._pop_and_process()
 
-    def _event_loop_overlap(self) -> None:
+    def _event_loop_overlap(self, before_schedule: Optional[Callable[[], None]] = None) -> None:
         """
         while True:
+          [before_schedule drain]
           schedule
           if disable_overlap: drain
           run_batch → result_queue
           process 上批（与本批 forward 重叠）
         """
         while True:
+            if before_schedule is not None:
+                before_schedule()
             disable = self._should_disable_overlap()
             if disable:
                 self._drain_results()
@@ -130,7 +170,7 @@ class NodeScheduler:
             output = self.schedule()
             if output.total_num_scheduled_tokens == 0:
                 self._drain_results()
-                if not self._waiting and not self._running and not self._result_queue:
+                if not self.has_work():
                     break
                 continue
 
@@ -453,6 +493,8 @@ class NodeScheduler:
         self._runner.clear_drafter(rid)
         self._pool.on_request_finished(req)
         LOG.info("finished req_id=%s reason=%s out=%d", rid, req.finish_reason, req.num_output_tokens)
+        if self._on_req_finished is not None:
+            self._on_req_finished(req)
 
     def get_req(self, req_id: str) -> Req:
         return self._reqs[req_id]
