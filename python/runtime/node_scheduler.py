@@ -116,6 +116,14 @@ class NodeScheduler:
         """是否仍有 waiting / running / 未 process 的结果。"""
         return bool(self._waiting or self._running or self._result_queue)
 
+    @property
+    def num_waiting(self) -> int:
+        return len(self._waiting)
+
+    @property
+    def num_running(self) -> int:
+        return len(self._running)
+
     def has_req(self, req_id: str) -> bool:
         return req_id in self._reqs
 

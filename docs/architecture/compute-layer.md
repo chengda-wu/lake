@@ -578,7 +578,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | **done 2026-07-24** |
 | **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | **done 2026-07-24** |
 | **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | **done 2026-07-24** |
-| **C10** | Warm/容量信号/角色 PD 联调（挂 P4/P5 后半；Go Router 权威选路） | pending |
+| **C10** | Warm/容量信号骨架（生命周期状态机 + `CapacitySignal` 上报；真权重 pin / Router 联调仍后置） | **done 2026-07-24** |
 
 硬约束不变：引擎零分层 / 零引擎驱动 intra-step `wait_event`；失败→F4；过载 shedding 不进 worker。
 
@@ -594,7 +594,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | 2 | **C7** budget/chunk ✅ | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget + decode 优先 + admission 单测 |
 | 3 | **C8** InputBatch/attn ✅ | `input_batch.py`、`model_runner.py`、`attn/metadata.py`、`kernels/attn_ref.py` | D4 初版已钉 | tiny_lm 同批两请求；`forward_query_logits` 残差 |
 | 4 | **C9** D10+D6 ✅ | `agents/memory.py`（prepare 代数防 shrink）、`model_runner.dummy_run` | D10 | 新 prepare 后旧 commit 不压 HWM；dummy 不触 pool |
-| 5 | **C10** 联调 | worker + pool + router | P4 进度 | 见 P5 未勾项 |
+| 5 | **C10** 联调骨架 ✅ | `runtime/lifecycle.py` + `WorkerEngine.capacity_signal` | 真 pin/Router 后置 | Serving 态上报 waiting/running；Drain 拒新请求 |
 
 **本轮不做**：runner 内 BlockPool / `finished_req_ids` 清态；SGLang 分相状态机；TP `collective_rpc`（D8）；真 CUDA graph / 真权重；gateway shedding。
 

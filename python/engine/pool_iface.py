@@ -103,8 +103,8 @@ class PoolIface:
     def commit_write_extent(self, req_id: str, token_end: int) -> None:
         """回收写槽高水位（verify 未接受 / 实际产出短于预留）。
 
-        D10：仅 InMemory 实现；绝对值 min 与默认 overlap 不兼容（见 compute-layer D10）。
-        生产应对齐 vLLM V2 device 侧会计；GrpcSkeleton 为 no-op。
+        D10：InMemory 已用 prepare 代数防 overlap 误 shrink（见 compute-layer D10）；
+        生产仍应对齐 vLLM V2 device 侧会计；GrpcSkeleton 为 no-op。
         """
         if isinstance(self._agent, InMemoryAgent):
             self._agent.commit_write_extent(req_id, token_end)

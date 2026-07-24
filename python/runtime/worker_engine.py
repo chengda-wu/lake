@@ -14,6 +14,7 @@ from typing import Dict, Optional
 
 from engine.model_runner import ModelRunner
 from engine.pool_iface import PoolIface
+from runtime.lifecycle import CapacitySignal, WorkerLifecycle, WorkerState
 from runtime.node_scheduler import NodeScheduler
 from runtime.prefix_hint import PrefixHint
 from runtime.req import Req
@@ -49,6 +50,7 @@ class WorkerEngine:
         self._pool = pool
         self._runner = runner
         self._coalesce_s = max(0.0, coalesce_s)
+        self._life = WorkerLifecycle(WorkerState.IDLE)
         self._sched = NodeScheduler(
             pool, runner, self._role, on_req_finished=self._on_req_finished
         )
@@ -67,24 +69,51 @@ class WorkerEngine:
     def role(self) -> RoleConfig:
         return self._role
 
+    @property
+    def lifecycle(self) -> WorkerLifecycle:
+        return self._life
+
+    def capacity_signal(self) -> CapacitySignal:
+        """上报用快照（不限流）。"""
+        with self._lock:
+            inflight = len(self._inflight)
+        return CapacitySignal(
+            waiting=self._sched.num_waiting,
+            running=self._sched.num_running,
+            inflight_steps=inflight,
+            max_running_reqs=self._role.max_running_reqs,
+            state=self._life.state,
+            role=self._role.role.value,
+            model_backend=self._role.model_backend,
+        )
+
     def start(self) -> None:
         if self._started:
             return
+        # C10：Boot→Warm→Ready→Serving（权重 pin / 池放置挂点，骨架仅状态）
+        self._life.advance(WorkerState.BOOT)
+        self._life.warm()
+        self._life.ready()
+        self._life.serve()
         self._started = True
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
         if not self._started:
             return
+        self._life.drain()
         self._stop.set()
         self._inbound.put(None)
         self._thread.join(timeout=timeout)
+        self._life.advance(WorkerState.TERMINATE)
         self._started = False
 
     def submit(self, req: Req, hint: Optional[PrefixHint] = None) -> Req:
         """阻塞直到该请求 finished（或引擎故障）。返回完成后的 Host Req。"""
         if self._stop.is_set() or not self._started:
             raise RuntimeError("WorkerEngine is not running")
+        if not self._life.accepts_new_requests():
+            raise RuntimeError(f"worker not accepting requests in state={self._life.state.value}")
         item = _Inbound(req=req, hint=hint, done=threading.Event(), error=[], result=[])
         self._inbound.put(item)
         item.done.wait()
