@@ -4,7 +4,7 @@
 
 ## 源码深度参考(3rdparty submodule)
 
-五个项目源码已引入 `3rdparty/`(submodule),各有分目录的深度分析文档:
+下列项目源码已引入 `3rdparty/`(submodule),各有分目录的深度分析文档:
 
 - **SGLang HiCache** → [`sglang/`](sglang/):[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md) · [block 生命周期](sglang/block-lifecycle.md) · [thinking 控制](sglang/thinking-control.md) · [上游痛点](sglang/pain-points.md)
   - L1/L2/L3 三层(L1/L2 私有、L3 共享)、HiRadixTree、prefetch/write-back 策略;block 何时释放/彻底放弃见 block-lifecycle;issue/roadmap 痛点与 lake 对照见 pain-points。
@@ -17,6 +17,8 @@
   - **KV 大规模管理演进**(Q3 2026 roadmap):原生多层 KV offload(`vllm/v1/kv_offload/`)+ KV Events 已落地;`session_id`/`continuation_id`、layerwise offload 仍是 RFC。
 - **Dynamo** → [`dynamo/`](dynamo/):[总览](dynamo/overview.md)
   - **编排层/控制面参考**(NVIDIA,Rust):推理引擎之上的编排层,KV-aware router + KVBM(GPU→CPU→SSD→远端 三层 offload)+ 多后端通信(etcd/nats/tcp/zmq)。Rust 写控制面/编排,是 lake Rust 存储控制面的直接参照系。
+- **UCM** → [`ucm/`](ucm/):[总览](ucm/overview.md) · [架构](ucm/architecture.md) · [痛点与 lake 对照](ucm/pain-points.md)
+  - ModelEngine 统一缓存框架:可插拔 KVStore、vLLM connector、稀疏插件、**PD-via-pool**；与 LMCache 同属引擎插件层。
 - **Guided / structured decoding** → [`guided-decoding.md`](guided-decoding.md)
   - SGLang × vLLM:xgrammar/llguidance 仅 GPU apply、FSM 仍在 CPU;overlap/async 近零 vs spec+grammar / pending token 的同步气泡;与 lake 重叠契约及抢占时 FSM 游标交接。
 - **Sampling 参数** → [`sampling-params.md`](sampling-params.md)
@@ -24,7 +26,7 @@
 - **Scheduler→Worker 接口** → [`scheduler-worker-interface.md`](scheduler-worker-interface.md)
   - vLLM `SchedulerOutput` 与 SGLang `ScheduleBatch`/`ForwardBatch` 字段全集、差异与架构根因;供 lake `SchedulerOutput` D1 对照。
 
-五者与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
+与本系统逐层对应、借鉴点、关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
 
 ---
 
@@ -36,6 +38,7 @@
 
 ## KV Cache 复用与传输
 
+- **UCM** (ModelEngine): 统一缓存管理——可插拔 KVStore、vLLM connector、PD-via-pool。**源码已引入** `3rdparty/ucm`，见 [`ucm/`](ucm/)。
 - **vLLM / PagedAttention** (SOSP'23): 块状 KV 内存管理，本系统 block 粒度的原型。
 - **CacheGen** / **CacheBlend**: KV cache 的压缩与复用。
 - **AttentionStore** (Meta): 把 KV cache 当作可复用的缓存层。
@@ -56,4 +59,4 @@
 
 - **DeepSpeed-Inference**, **TensorRT-LLM**, **Orca** (continuous batching): 推理引擎基线，本系统在其上做存算分离的解耦。
 
-> 注：以上为方向性参考。SGLang/Mooncake/LMCache/vLLM/Dynamo 五者源码已引入 `3rdparty/`(submodule),与本项目设计的逐层对应、借鉴点与关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。
+> 注：以上为方向性参考。SGLang/Mooncake/LMCache/vLLM/Dynamo/UCM 等源码已引入 `3rdparty/`(submodule),与本项目设计的逐层对应、借鉴点与关键差异见 [`3rdparty-reference.md`](3rdparty-reference.md)。

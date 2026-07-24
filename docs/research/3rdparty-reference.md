@@ -1,12 +1,13 @@
 # 3rdparty 源码参考
 
-本仓库在 `3rdparty/` 以 git submodule 引入五个项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
+本仓库在 `3rdparty/` 以 git submodule 引入项目源码,作为设计与实现的直接参考。本文是**汇总对比**;各项目的深度分析见分目录:
 
 - [`sglang/`](sglang/) — SGLang HiCache:[总览](sglang/overview.md) · [分层机制](sglang/hicache.md) · [存储后端](sglang/storage-backends.md) · [block 生命周期](sglang/block-lifecycle.md) · [thinking 控制](sglang/thinking-control.md) · [上游痛点](sglang/pain-points.md)
 - [`lmcache/`](lmcache/) — LMCache:[总览](lmcache/overview.md) · [跨实例复用与后端](lmcache/sharing-and-backends.md)
 - [`mooncake/`](mooncake/) — Mooncake:[总览](mooncake/overview.md) · [传输引擎](mooncake/transfer-engine.md) · [KV 存储与池化](mooncake/kv-store.md)
 - [`vllm/`](vllm/) — vLLM:[总览](vllm/overview.md) · [计算层抽象与存算分离接入点](vllm/compute.md) · [block 生命周期](vllm/block-lifecycle.md) · [上游痛点与 lake 对照](vllm/pain-points.md)
 - [`dynamo/`](dynamo/) — Dynamo(NVIDIA):[总览](dynamo/overview.md) · 数据中心级推理编排(KV-aware router + KVBM 三层 + Rust 控制面)
+- [`ucm/`](ucm/) — UCM(ModelEngine):[总览](ucm/overview.md) · [架构](ucm/architecture.md) · [痛点与 lake 对照](ucm/pain-points.md)
 - [guided-decoding.md](guided-decoding.md) — **Guided / structured decoding**(SGLang × vLLM):xgrammar/llguidance 库边界、overlap/async 下能否消同步、spec+grammar 硬缺口
 - [sampling-params.md](sampling-params.md) — **Sampling 参数对照**(SGLang × vLLM):核心/独有字段、`n`≠beam、spec 禁 min_p/logit_bias；penalty 空泡与 V2；采样状态归属 / Spec 兼容矩阵 / `n` 与前缀 KV 共享
 - [scheduler-worker-interface.md](scheduler-worker-interface.md) — **Scheduler→Worker 字段全集**(SGLang × vLLM):`SchedulerOutput` vs `ScheduleBatch`/`ForwardBatch`、差异表、架构根因、对 lake D1 含义
@@ -22,8 +23,9 @@
 | `3rdparty/mooncake` | [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake) | main HEAD | 传输引擎 + 对象级 KV 池 |
 | `3rdparty/vllm` | [vllm-project/vllm](https://github.com/vllm-project/vllm) | main HEAD (ab132ee98) | **计算层**(PagedAttention/worker/connector/spec decode) |
 | `3rdparty/dynamo` | [ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo) | main HEAD | **编排层/控制面**:KV-aware router + KVBM 三层 offload + Rust 编排 + 多后端通信 |
+| `3rdparty/ucm` | [ModelEngine-Group/unified-cache-management](https://github.com/modelengine-group/unified-cache-management) | main HEAD (`37af15e`) | **统一缓存框架** store+connector+PD-via-pool;见 [ucm/](ucm/) |
 
-> 五者本就生态相连:vLLM 是计算引擎,其 `KVConnectorBase_V1` 接口被 LMCache/Mooncake/NIXL/FlexKV 实现为 connector;SGLang HiCache 把 Mooncake 作为 L3 后端之一;Dynamo 把 vLLM/SGLang 作为可插拔 worker,在其上做 KV-aware 编排。vLLM 提供计算面,SGLang/LMCache/Mooncake 提供存储/传输面,Dynamo 提供编排面——我们站在五者之上做更彻底的存算分离:把 vLLM 的状态面(KV/调度/元数据)剥离给存储池与控制面,把 connector 接口从可选插件升为存储池必经路径。
+> 生态相连:vLLM `KVConnectorBase_V1` 被 LMCache/Mooncake/NIXL/**UCM** 等实现;SGLang HiCache 把 Mooncake 作 L3;Dynamo 编排 vLLM/SGLang;UCM 再在引擎上叠可插拔 store 与稀疏插件,并主推经统一池做 PD。我们站在其上做更彻底的存算分离:状态面剥离给存储池与控制面,connector 从可选插件升为必经路径。
 
 ---
 
@@ -101,7 +103,7 @@
 
 源码入口:`3rdparty/vllm/vllm/v1/`、`vllm/distributed/kv_transfer/kv_connector/`、`vllm/model_executor/`。
 
-vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目(SGLang/LMCache/Mooncake)提供存储/传输面,vLLM 提供计算面,Dynamo 提供编排面——五者恰好覆盖我们三语言子项目的参考来源(计算层 Python / 存储层 Rust / 控制面 Rust+Go / 传输与池化)。详见 [`vllm/`](vllm/)。
+vLLM 是本系统**计算层(Python + Triton)**的直接参考。SGLang/LMCache/Mooncake/UCM 提供存储/传输与引擎侧缓存框架,vLLM 提供计算面,Dynamo 提供编排面。详见 [`vllm/`](vllm/)。
 
 ### 借鉴点
 
@@ -154,16 +156,40 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。前三个项目
 
 ---
 
-## 设计取舍:站在五者之上
+## 6. UCM → 引擎侧统一缓存框架（PD-via-pool）
+
+源码入口:`3rdparty/ucm/`。深度分析见 [`ucm/`](ucm/)。
+
+UCM 与 **LMCache 同层**：挂在 vLLM 等引擎上的 **KVStore + connector + 可选稀疏**；PD 文档主推经统一存储池中转。可消费 Mooncake store。lake 借鉴其 store 原语、工厂与 PD-via-pool 叙事；不照搬「引擎补丁中心 + 可选插件」权威模型。
+
+### 借鉴点
+
+| UCM 设计 | 我们对应 | 说明 |
+|----------|----------|------|
+| **`UcmKVStoreBaseV1`** lookup/prefetch/load/dump | kv-pool / Transfer Bus 客户端原语 | API 边界清晰；键语义仍换成内容寻址 |
+| **`UcmConnectorFactoryV1`** 多后端 | L2/L3 后端注册 | 工厂懒加载对照 |
+| **`UCMConnector` / LayerWise / PD** | worker↔池、P5 流水线 | vLLM connector 工业集成样板 |
+| **PD via unified storage pool** | 存算分离 + PD/混部 | 叙事同向；lake 另补 D-direct 与方案 Z |
+| **`UcmSparseBase`** | （Could）长上下文 | 算法与存储解耦可记；非 P0–P4 必做 |
+
+### 关键差异
+
+- UCM 是**引擎插件框架**；lake 是**池权威 + 无状态 worker**。  
+- UCM 前缀靠 block hash + store probe；lake 靠控制面 radix + 位置视图一跳。  
+- UCM 无三模式 Router / D-direct；稀疏/Blend 范围大于 lake 近期范围。
+
+---
+
+## 设计取舍:站在参考项目之上
 
 | 我们的设计层 | 主要参考 | 我们多做的(更彻底) |
 |--------------|----------|---------------------|
 | **计算层**(worker/attention/runner) | **vLLM**(PagedAttention/`GPUModelRunner`/spec decode) | worker 无状态化(模型/KV 从存储池读写);attention 核用 Triton |
-| **worker↔存储池接入** | **vLLM `KVConnectorBase_V1`**(scheduler/worker 双侧 + layer-wise mixin) | connector 从可选插件升为存储池必经路径;集群级权威。注:`SupportsHMA`(HMA,多 KV group)≠ 方案 Z,方案 Z 为本系统增量 |
+| **worker↔存储池接入** | **vLLM `KVConnectorBase_V1`** + **UCM connector** 集成样板 | connector 从可选插件升为存储池必经路径;集群级权威。注:`SupportsHMA`(HMA,多 KV group)≠ 方案 Z,方案 Z 为本系统增量 |
 | L0-L3 分层 | SGLang HiCache | L1/L2 也归存储池(非实例私有);统一冷热/生命周期 |
 | KV Pool 数据面 | Mooncake transfer-engine + store | 内容寻址 + radix + 多模型配额/GC/碎片整理 |
 | 前缀复用 | SGLang RadixAttention + LMCache | radix 归存储池 + 位置视图一跳 + 反向回传生长 |
-| 执行模式 | DistServe/Splitwise + HiCache PD | 三模式逐请求选路 + D-direct(本地命中直跳) |
+| 执行模式 | DistServe/Splitwise + HiCache PD + **UCM PD-via-pool** | 三模式逐请求选路 + D-direct(本地命中直跳) |
 | 放置/调度边界 | (我们的方案 Z,原创) | 存储池主动放置 + 调度器单向消费 |
 | **编排层/控制面** | **Dynamo**(KVBM logical/physical/engine + KV-aware router) | 位置视图权威在存储控制面进程内存、etcd 降频 checkpoint(Dynamo 走 NATS 事件流);HBM 归池而非 engine offload;Rust 存储控制面 + Go 调度控制面分工(Dynamo 单一 Rust 编排) |
 
@@ -201,10 +227,11 @@ P4(KV Pool 原型,Rust)时按此顺序；**1 与「Dynamo KVBM」分属上表 A/
 1. **Mooncake transfer-engine**（代码复用 A）：RDMA 零拷贝 → `rust/transfer` Transfer Bus。
 2. **Dynamo kvbm-logical**（代码复用 B，fork 抽 crate）：radix + `BlockManager`/`presence_markers` → `kv-pool` / controlplane；补 L0 + promote。
 3. **Mooncake store + LMCache storage_backends**：KV store 分片/后端 → L3 + L2/NVMe（字节层；寻址仍归 B）。
-4. **SGLang HiCache HiRadixTree + page_first_direct**：节点记位置 + 布局策略 → `locations` 元数据 + 分块流水线（对照 B，非第二套树）。
-5. **SGLang HiCache prefetch/write-back 策略**：迁移触发与写回频率 → 冷热迁移 + decode 写回 N。
-6. **LMCache rust/ + 跨实例复用**：Rust 存储层工程模式 + 复用场景验证。
-7. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**（偏 P5）：worker ↔ 存储池 client 形态 + layer-wise 流水线。
+4. **UCM `UcmKVStoreBaseV1` + connector**（对照，偏 P5）：store 原语/工厂、PD-via-pool 叙事、layer-wise connector → worker↔池形态；不替代 A/B，不引入稀疏必选项。
+5. **SGLang HiCache HiRadixTree + page_first_direct**：节点记位置 + 布局策略 → `locations` 元数据 + 分块流水线（对照 B，非第二套树）。
+6. **SGLang HiCache prefetch/write-back 策略**：迁移触发与写回频率 → 冷热迁移 + decode 写回 N。
+7. **LMCache rust/ + 跨实例复用**：Rust 存储层工程模式 + 复用场景验证。
+8. **vLLM `KVConnectorBase_V1` + `GPUModelRunner`**（偏 P5）：worker ↔ 存储池 client 形态 + layer-wise 流水线。
 
 ### Dynamo 参考补充(编排层/控制面,跨阶段)
 
