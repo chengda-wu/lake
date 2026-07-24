@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -41,10 +42,13 @@ class WorkerEngine:
         pool: PoolIface,
         runner: ModelRunner,
         role: Optional[RoleConfig] = None,
+        *,
+        coalesce_s: float = 0.005,
     ) -> None:
         self._role = role or RoleConfig()
         self._pool = pool
         self._runner = runner
+        self._coalesce_s = max(0.0, coalesce_s)
         self._sched = NodeScheduler(
             pool, runner, self._role, on_req_finished=self._on_req_finished
         )
@@ -148,6 +152,12 @@ class WorkerEngine:
                     continue
                 self._inbound.put(item)
                 continue
+            # 空闲→忙碌时短窗 coalesce，吞掉几乎同时到达的并发 submit（C6）
+            if self._coalesce_s > 0:
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < self._coalesce_s:
+                    self._drain_inbound()
+                    time.sleep(min(0.001, self._coalesce_s))
             try:
                 self._sched.run_until_idle(before_schedule=self._drain_inbound)
             except Exception as e:  # noqa: BLE001

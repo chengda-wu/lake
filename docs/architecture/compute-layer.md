@@ -575,7 +575,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C4** | `drafter/TinyMTPDrafter` post/pre_forward；`TARGET_VERIFY` + chain reject；`DRAFT_EXTEND` 骨架 | **done 2026-07-22** |
 | **C5** | vLLM 调度几何 + `mode_select`/`PrefixHint`（D-direct/混部/PD）；整段本地命中→computed=prompt_len；Generate 回填 `exec_mode`；Go Router 权威选路仍后续 | **done 2026-07-22** |
 | **C6** | **Worker 长期单环**：一份 `NodeScheduler`+`ModelRunner`；`Generate` 只入队等待；step 环独立线程；每 step 前 drain 入队以真正 continuous batching；`RoleConfig.from_env`（D3 最小） | **done 2026-07-24** |
-| **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | pending |
+| **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | **done 2026-07-24** |
 | **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | pending |
 | **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | pending |
 | **C10** | Warm/容量信号/角色 PD 联调（挂 P4/P5 后半；Go Router 权威选路） | pending |
@@ -591,7 +591,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | 序 | 里程碑 | 主改 | 阻塞设计 | 验收 |
 |----|--------|------|----------|------|
 | 1 | **C6** Worker 单环 ✅ | `runtime/worker_engine.py` + `worker.py`、`node_scheduler.py`（`has_work` / `before_schedule` / `on_req_finished`）、`role.py` | 无 | 两并发 submit 同 scheduler；同 step 多 `req_id`；单测绿 |
-| 2 | **C7** budget/chunk | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget 单测 |
+| 2 | **C7** budget/chunk ✅ | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget + decode 优先 + admission 单测 |
 | 3 | **C8** InputBatch/attn | `input_batch.py`、`model_runner.py`、`attn/`、`kernels/` | **先钉 D4** | tiny_lm 同批两请求；命中后只算残差 |
 | 4 | **C9** D10+D6 | `agents/memory.py`、`future_map.py`、`model_runner.py` | D10 | overlap 多步槽位不回缩；dummy warmup |
 | 5 | **C10** 联调 | worker + pool + router | P4 进度 | 见 P5 未勾项 |

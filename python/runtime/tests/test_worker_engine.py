@@ -43,11 +43,11 @@ class FakePool:
         return None
 
 
-def _make_engine(max_running: int = 8) -> Tuple[WorkerEngine, FakePool]:
+def _make_engine(max_running: int = 8, coalesce_s: float = 0.005) -> Tuple[WorkerEngine, FakePool]:
     pool = FakePool()
     runner = ModelRunner(pool)  # type: ignore[arg-type]
     role = RoleConfig(enable_overlap=True, max_running_reqs=max_running, model_backend="mock")
-    eng = WorkerEngine(pool, runner, role)  # type: ignore[arg-type]
+    eng = WorkerEngine(pool, runner, role, coalesce_s=coalesce_s)  # type: ignore[arg-type]
     eng.start()
     return eng, pool
 
@@ -67,7 +67,8 @@ def test_submit_single_request() -> None:
 
 def test_concurrent_submit_shared_scheduler() -> None:
     """两并发 submit 进同一 Scheduler；至少一步同批多 req。"""
-    eng, pool = _make_engine(max_running=4)
+    # 加长 coalesce，避免 mock 过快在第二请求入队前跑完第一请求
+    eng, pool = _make_engine(max_running=4, coalesce_s=0.05)
     barrier = threading.Barrier(2)
 
     def _one(rid: str, prompt: List[int]):
@@ -89,17 +90,30 @@ def test_concurrent_submit_shared_scheduler() -> None:
         eng.stop()
 
 
-def test_role_config_from_env(monkeypatch) -> None:
-    monkeypatch.setenv("LAKE_WORKER_ROLE", "prefill")
-    monkeypatch.setenv("LAKE_MODEL_BACKEND", "tiny_lm")
-    monkeypatch.setenv("LAKE_ENABLE_DRAFTER", "1")
-    monkeypatch.setenv("LAKE_MAX_RUNNING_REQS", "3")
-    monkeypatch.setenv("LAKE_ENABLE_OVERLAP", "0")
-    cfg = RoleConfig.from_env()
-    assert cfg.role == WorkerRole.PREFILL
-    assert cfg.model_backend == "tiny_lm"
-    assert cfg.enable_drafter is True
-    assert cfg.max_running_reqs == 3
-    assert cfg.enable_overlap is False
-    # 清掉以免污染其它测试（monkeypatch 会自动还原）
-    assert "LAKE_WORKER_ROLE" in os.environ
+def test_role_config_from_env() -> None:
+    keys = [
+        "LAKE_WORKER_ROLE",
+        "LAKE_MODEL_BACKEND",
+        "LAKE_ENABLE_DRAFTER",
+        "LAKE_MAX_RUNNING_REQS",
+        "LAKE_ENABLE_OVERLAP",
+    ]
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["LAKE_WORKER_ROLE"] = "prefill"
+        os.environ["LAKE_MODEL_BACKEND"] = "tiny_lm"
+        os.environ["LAKE_ENABLE_DRAFTER"] = "1"
+        os.environ["LAKE_MAX_RUNNING_REQS"] = "3"
+        os.environ["LAKE_ENABLE_OVERLAP"] = "0"
+        cfg = RoleConfig.from_env()
+        assert cfg.role == WorkerRole.PREFILL
+        assert cfg.model_backend == "tiny_lm"
+        assert cfg.enable_drafter is True
+        assert cfg.max_running_reqs == 3
+        assert cfg.enable_overlap is False
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

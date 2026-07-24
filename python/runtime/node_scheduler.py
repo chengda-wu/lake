@@ -87,6 +87,15 @@ class NodeScheduler:
     def add_request(self, req: Req, hint: Optional[PrefixHint] = None) -> None:
         if req.req_id in self._reqs:
             raise ValueError(f"duplicate req_id={req.req_id}")
+        # C7 admission：对外 max_model_length（gateway/scheduler 守）；runner headroom 另计
+        mml = self._role.max_model_length
+        if mml > 0:
+            total = len(req.prompt_token_ids) + req.sampling_params.max_new_tokens
+            if total > mml:
+                raise ValueError(
+                    f"request length {total} exceeds max_model_length={mml} "
+                    f"(prompt={len(req.prompt_token_ids)} max_new={req.sampling_params.max_new_tokens})"
+                )
         if hint is not None:
             req.apply_prefix_hint(hint)
             req.exec_mode = select_exec_mode(
@@ -300,10 +309,15 @@ class NodeScheduler:
             self._pop_and_process()
 
     def schedule(self) -> SchedulerOutput:
+        """组本步 SchedulerOutput。
+
+        对齐 vLLM `Scheduler.schedule`：`token_budget` + running 优先（先 decode/verify
+        再 chunked extend）+ 可选 `long_prefill_token_threshold`；无本地 BlockPool。
+        """
         self._step_id += 1
         step = self._step_id
 
-        # continuous batching：填满 running 槽
+        # continuous batching：填满 running 槽（admission 已在 add_request）
         while self._waiting and len(self._running) < self._role.max_running_reqs:
             self._running.append(self._waiting.pop(0))
 
@@ -322,41 +336,20 @@ class NodeScheduler:
         req_modes: Dict[str, ForwardMode] = {}
         computed_at: Dict[str, int] = {}
         spec_tokens: Dict[str, List[int]] = {}
+        budget = max(0, int(self._role.max_num_scheduled_tokens))
 
+        # Pass A：生成相（decode / target_verify）— running 优先占预算
         for rid in list(self._running):
+            if budget <= 0:
+                break
             req = self._reqs[rid]
             if req.finished:
                 continue
             prompt_len = len(req.prompt_token_ids)
             computed = req.num_computed_tokens
-            computed_at[rid] = computed
-
             if computed < prompt_len:
-                # prompt 残差不可重叠重入（Host computed 未推进会双写）
-                if self._has_unprocessed_prompt(rid, prompt_len):
-                    continue
-                n = prompt_len - computed
-                num_tokens[rid] = n
-                if computed > 0:
-                    read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=computed))
-                write_set.append(ReqIoSet(req_id=rid, token_start=computed, token_end=prompt_len))
-                if computed == 0 and req.num_output_tokens == 0:
-                    new_reqs.append(
-                        NewRequestData(
-                            req_id=rid,
-                            prompt_token_ids=list(req.prompt_token_ids),
-                            sampling_params=req.sampling_params,
-                            num_computed_tokens=computed,
-                        )
-                    )
-                else:
-                    cached.req_ids.append(rid)
-                    cached.num_computed_tokens.append(computed)
-                    cached.num_output_tokens.append(req.num_output_tokens)
-                req_modes[rid] = ForwardMode.EXTEND  # 派生标签：prompt 相
                 continue
 
-            # 生成相：允许 overlap；用 _inflight_decode 预留，不因 result_queue 挡 schedule
             inflight = self._inflight_decode.get(rid, 0)
             if self._use_runner_tokens:
                 left = req.sampling_params.max_new_tokens - req.num_output_tokens - inflight
@@ -366,29 +359,94 @@ class NodeScheduler:
                 remain = self._mock_remaining.get(rid) or []
                 if len(remain) <= inflight:
                     continue
+                left = len(remain) - inflight
 
             pending = self._pending_drafts.get(rid) or []
             _ = self._future_map.resolve(rid)
             end = len(req.all_token_ids) + inflight
-            read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
-            cached.req_ids.append(rid)
-            cached.num_computed_tokens.append(computed + inflight)
-            cached.num_output_tokens.append(req.num_output_tokens + inflight)
+            # 守 max_model_length（生成不得越过）
+            mml = self._role.max_model_length
+            if mml > 0:
+                room = mml - (computed + inflight)
+                if room <= 0:
+                    continue
+            else:
+                room = budget + left
 
             if self._spec_enabled and pending:
-                max_accept = min(
-                    len(pending) + 1, left if self._use_runner_tokens else len(pending) + 1
-                )
+                max_accept = min(len(pending) + 1, left, budget, room)
+                if max_accept <= 0:
+                    continue
                 num_tokens[rid] = max_accept
                 write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + max_accept))
                 req_modes[rid] = ForwardMode.TARGET_VERIFY
                 spec_tokens[rid] = list(pending)
                 self._inflight_decode[rid] = inflight + max_accept
+                budget -= max_accept
             else:
-                num_tokens[rid] = 1
-                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + 1))
+                n = min(1, left, budget, room)
+                if n <= 0:
+                    continue
+                num_tokens[rid] = n
+                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + n))
                 req_modes[rid] = ForwardMode.DECODE
-                self._inflight_decode[rid] = inflight + 1
+                self._inflight_decode[rid] = inflight + n
+                budget -= n
+
+            computed_at[rid] = computed
+            read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
+            cached.req_ids.append(rid)
+            cached.num_computed_tokens.append(computed + inflight)
+            cached.num_output_tokens.append(req.num_output_tokens + inflight)
+
+        # Pass B：prompt 残差 EXTEND（chunked）
+        chunk_cap = int(self._role.long_prefill_token_threshold)
+        for rid in list(self._running):
+            if budget <= 0:
+                break
+            if rid in num_tokens:
+                continue
+            req = self._reqs[rid]
+            if req.finished:
+                continue
+            prompt_len = len(req.prompt_token_ids)
+            computed = req.num_computed_tokens
+            if computed >= prompt_len:
+                continue
+            # prompt 残差不可重叠重入（Host computed 未推进会双写）
+            if self._has_unprocessed_prompt(rid, prompt_len):
+                continue
+
+            residual = prompt_len - computed
+            n = min(residual, budget)
+            if chunk_cap > 0:
+                n = min(n, chunk_cap)
+            mml = self._role.max_model_length
+            if mml > 0:
+                n = min(n, mml - computed)
+            if n <= 0:
+                continue
+
+            num_tokens[rid] = n
+            computed_at[rid] = computed
+            if computed > 0:
+                read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=computed))
+            write_set.append(ReqIoSet(req_id=rid, token_start=computed, token_end=computed + n))
+            if computed == 0 and req.num_output_tokens == 0:
+                new_reqs.append(
+                    NewRequestData(
+                        req_id=rid,
+                        prompt_token_ids=list(req.prompt_token_ids),
+                        sampling_params=req.sampling_params,
+                        num_computed_tokens=computed,
+                    )
+                )
+            else:
+                cached.req_ids.append(rid)
+                cached.num_computed_tokens.append(computed)
+                cached.num_output_tokens.append(req.num_output_tokens)
+            req_modes[rid] = ForwardMode.EXTEND
+            budget -= n
 
         if not num_tokens:
             return SchedulerOutput(step_id=step, forward_mode=ForwardMode.IDLE, total_num_scheduled_tokens=0)
@@ -441,11 +499,13 @@ class NodeScheduler:
             spec = (output.scheduled_spec_decode_tokens or {}).get(rid)
 
             if computed_before < prompt_len:
-                # prompt 残差步：推进 computed；不产出 user-facing token
-                req.num_computed_tokens = prompt_len
-                drafts = runner_out.next_draft_tokens.get(rid) or []
-                if drafts:
-                    self._pending_drafts[rid] = drafts
+                # C7 chunked extend：按本步 scheduled_n 推进，勿一次跳到 prompt_len
+                req.num_computed_tokens = min(prompt_len, computed_before + scheduled_n)
+                # 仅整段 prompt 算完后才挂 draft（投机种子）
+                if req.num_computed_tokens >= prompt_len:
+                    drafts = runner_out.next_draft_tokens.get(rid) or []
+                    if drafts:
+                        self._pending_drafts[rid] = drafts
                 continue
 
             # 生成步

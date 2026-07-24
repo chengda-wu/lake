@@ -34,6 +34,12 @@ class RoleConfig:
     num_draft_tokens: int = 2  # C4：MTP 宽度
     enable_overlap: bool = True  # 默认开；对齐 SGLang event_loop_overlap
     max_running_reqs: int = 8  # continuous batching 上限（C1）
+    # C7：对齐 vLLM Scheduler.token_budget / long_prefill_token_threshold
+    max_num_scheduled_tokens: int = 8192  # 本步总 token 上限
+    # >0 时 prompt 残差按此切块；0=只受 max_num_scheduled_tokens 约束
+    long_prefill_token_threshold: int = 0
+    # >0 时 admission：len(prompt)+max_new 不得超过；0=不限制（骨架默认）
+    max_model_length: int = 0
     # D5：prepare 补拉预算；0=同步等到齐（P3 mock）
     pull_budget_ms: int = 0
     allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
@@ -43,12 +49,14 @@ class RoleConfig:
 
     @classmethod
     def from_env(cls) -> "RoleConfig":
-        """C6/D3 最小：从环境变量读启动配置。
+        """C6/D3 + C7：从环境变量读启动配置。
 
         LAKE_WORKER_ROLE=prefill|decode|hybrid
         LAKE_MODEL_BACKEND=mock|tiny_lm
         LAKE_ENABLE_DRAFTER / LAKE_ENABLE_OVERLAP / LAKE_ALLOW_PARTIAL_HIT
         LAKE_NUM_DRAFT_TOKENS / LAKE_MAX_RUNNING_REQS / LAKE_PULL_BUDGET_MS
+        LAKE_MAX_NUM_SCHEDULED_TOKENS / LAKE_LONG_PREFILL_TOKEN_THRESHOLD
+        LAKE_MAX_MODEL_LENGTH
         """
         role_raw = os.environ.get("LAKE_WORKER_ROLE", "hybrid").strip().lower()
         try:
@@ -64,5 +72,8 @@ class RoleConfig:
             allow_partial_hit=_env_bool("LAKE_ALLOW_PARTIAL_HIT", False),
             num_draft_tokens=_env_int("LAKE_NUM_DRAFT_TOKENS", 2),
             max_running_reqs=_env_int("LAKE_MAX_RUNNING_REQS", 8),
+            max_num_scheduled_tokens=_env_int("LAKE_MAX_NUM_SCHEDULED_TOKENS", 8192),
+            long_prefill_token_threshold=_env_int("LAKE_LONG_PREFILL_TOKEN_THRESHOLD", 0),
+            max_model_length=_env_int("LAKE_MAX_MODEL_LENGTH", 0),
             pull_budget_ms=_env_int("LAKE_PULL_BUDGET_MS", 0),
         )
