@@ -189,7 +189,7 @@ MemCache 与 **Mooncake store 同层**：分布式 **exact-key** KV 对象池 + 
 
 源码入口:`3rdparty/ucm/`。深度分析见 [`ucm/`](ucm/)。
 
-UCM 与 **LMCache 同层**：挂在 vLLM 等引擎上的 **KVStore + connector + 可选稀疏**；PD 文档列出直传 / DRAM 中介 / 统一池，**统一池是首选而非唯一**，叙事主推经池中转。可消费 Mooncake store。lake 借鉴其 store 原语、工厂与 PD-via-pool 叙事；不照搬「引擎补丁中心 + 可选插件」权威模型。
+UCM 与 **LMCache 同层**：挂在 vLLM 等引擎上的 **KVStore + connector + 可选稀疏**；PD 文档列出直传 / DRAM 中介 / 统一池，**统一池是首选而非唯一**，叙事主推经池中转（三种路径释义见 [`ucm/architecture.md`](ucm/architecture.md) §4）。可消费 Mooncake store。lake 借鉴其 store 原语、工厂与 PD-via-pool 叙事；不照搬「引擎补丁中心 + 可选插件」权威模型。
 
 ### 借鉴点
 

@@ -6,7 +6,7 @@
 
 ## 一句话定位
 
-UCM（华为 ModelEngine）是挂在 **vLLM / vLLM-Ascend / SGLang / MindIE** 上的**统一缓存框架**：用可插拔 **KVStore** 持久化/复用 KV（前缀缓存），并用 **UcmSparse*** 插件稀疏注意力与卸载。PD 文档同时列出 HBM 直传、经 DRAM 中介与经统一存储池三种拓扑——**统一池是首选而非唯一**；产品叙事主推池中转以换解耦与无状态。
+UCM（华为 ModelEngine）是挂在 **vLLM / vLLM-Ascend / SGLang / MindIE** 上的**统一缓存框架**：用可插拔 **KVStore** 持久化/复用 KV（前缀缓存），并用 **UcmSparse*** 插件稀疏注意力与卸载。PD 文档同时列出 HBM 直传、经 DRAM 中介与经统一存储池三种拓扑——**统一池是首选而非唯一**；产品叙事主推池中转以换解耦与无状态。三种路径的语义与 lake 对照见 [architecture.md](architecture.md) §4。
 
 ## 与本系统的关系
 
