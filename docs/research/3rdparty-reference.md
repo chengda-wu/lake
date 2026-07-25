@@ -163,7 +163,7 @@ vLLM 是本系统**计算层(Python + Triton)**的直接参考。SGLang/LMCache/
 
 ## 6. Ascend MemCache → KV 对象池异构对照（昇腾）
 
-源码入口:`3rdparty/memcache/`（嵌套 `memfabric_hybrid` 默认可不拉）。深度分析见 [`memcache/`](memcache/)。
+源码入口:`3rdparty/memcache/`（嵌套 `memfabric_hybrid`：recursive init 会拉下；非 recursive 时才不拉，审计 OneCopy 需确认已 init）。深度分析见 [`memcache/`](memcache/)。
 
 MemCache 与 **Mooncake store 同层**：分布式 **exact-key** KV 对象池 + 异构传输（MemFabric OneCopy），**不是** radix/控制面参考。昇腾 / vLLM-Ascend 路径上对照 Meta/Local 拆分与多层介质；lake 生产数据面仍以 Mooncake TE（复用 A）为主。
 

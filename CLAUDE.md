@@ -85,7 +85,7 @@ docs/
 约定:
 - `3rdparty/` **只读**,不修改 submodule 内代码。要改造先 fork 换 URL。
 - submodule 自带 `.claude/` 规则——改它们自身代码的约束,与本项目无关,**忽略**。
-- clone 本仓库需 `git submodule update --init --recursive`。体积较大时可用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(浅克隆后无法在 submodule 内随意 `checkout` 切 ref)。Ascend MemCache 的传输底座 `memfabric_hybrid` 为**嵌套** submodule,默认可不拉;深研 OneCopy 时再 `git submodule update --init` 其路径。TileRT 公开树相对较小。
+- clone 本仓库需 `git submodule update --init --recursive`。体积较大时可用浅克隆:`git clone --recurse-submodules --depth 1 --shallow-submodules <repo>`(浅克隆后无法在 submodule 内随意 `checkout` 切 ref)。Ascend MemCache 的传输底座 `memfabric_hybrid` 为**嵌套** submodule——文档推荐的 recursive clone/update **会**一并拉下;仅非 recursive 初始化时才不拉。审计 OneCopy 时需确认该路径已 init。TileRT 公开树相对较小。
 - 设计/实现遇到分层、传输、复用、放置等问题,先查对应 submodule 源码再动手。
 
 ## reference 强制查阅规则（硬性，每次都做）
