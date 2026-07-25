@@ -70,7 +70,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 - **decode 增量写回双重目的**：容错 + 前缀生长。频率 N 策略留开放。
 - **HBM 池化下的入图与 KV 管理（Q1/Q2，本轮定）**：
   - **Q1 入图**：固定基址 KV arena（不上 VA，分配给模型后不扩缩容/不跨模型回收物理页）；入图三约束（静态输入 buffer / 固定 KV 基址 / 固定地址 block table）；decode 走 graph、prefill 走 eager；block table 由**本地 agent（in-process，持本地视图镜像）组装**，非全局池每步 RPC 推表（守 5ms）；**ready/done 双 fence 一步契约**（池发 ready→引擎 replay→引擎发 done→池解冻/写回/注册 radix/驱逐），引擎零分层逻辑；正确性地基 = in-flight 跨层冻结（ref>0 的 block step 期间物理映射冻结）。详见 [`architecture/compute-layer.md`](architecture/compute-layer.md) "HBM 池化下的入图与 KV 管理"。
-  - **Q2 KV 管理**：block 对引擎**纯寻址单位**（连 block table 索引填充都归池，引擎只 replay 读，不感知满块）；写回两路——**满块路**（填满→池算哈希→注册 radix→写回 L2，NVMe F4 恢复点）+ **尾块路**（请求结束时未满尾块写一次，纯容错不进 radix）；**ref 池权威维护**（多引擎共享前缀 block 的分布式一致性，引擎不持计数），请求结束且无续推引用才减（F4 续推 ref 转移），含在途传输引用（源端冻结）。
+  - **Q2 KV 管理**：block 对引擎**纯寻址单位**（连 block table 索引填充都归池，引擎只 replay 读，不感知满块）；写回两路——**满块路**（填满→池算哈希→写回 L2 durable→注册 radix，NVMe F4 恢复点）+ **尾块路**（请求结束时未满尾块写一次，纯容错不进 radix）；**ref 池权威维护**（多引擎共享前缀 block 的分布式一致性，引擎不持计数），请求结束且无续推引用才减（F4 续推 ref 转移），含在途传输引用（源端冻结）。
   - **跨实例/PD 传输**：engine-to-engine 控制链**切断**，池的本地 agent 发起传输，引擎降到 `publish`/`pull`+fence、不知地址、不组装 block table；数据线仍直连 RDMA（wire 效率不变）。默认**直传**（A→B L0，PD 时序重叠主场景）+ **Drain 推 L2**（节点下线前把还被远端引用的 block 落 L2 NVMe）。详见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md) "跨实例 KV 传输"。
   - **重叠语义**：拒绝**引擎驱动** intra-step 重叠（SGLang `get_key_buffer` 每层 `wait_event`，绑死引擎、破坏 graph）；保留**池驱动**异步重叠——消费侧 step 间重叠 + 生产侧 prefill 层级重叠（`page_first_direct` 子块传输/"分块流水线"，支撑 PD 分离 TTFT）。引擎无感、graph 安全。
   - **持久语义**：层=介质，L0/L1 易失缓存、L2(NVMe)= F4 恢复点（NVMe 持久 + NPU 故障不烧 NVMe，恢复能力与位置无关，worker 崩溃后从 L2 续推）、L3(对象存储)= SSOT 永久权威（抗整机级/池级失败，L3 缺失才视为 block 不存在）。风险窗口分两级：NPU/进程级故障（常见）丢"最后一次写回 L2 之后的少量 token"；整机级故障（罕见）退 L3 SSOT，丢"自上次冷下沉 L3 之后的增量"。
