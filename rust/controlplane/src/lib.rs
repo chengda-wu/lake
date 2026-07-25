@@ -458,6 +458,9 @@ mod tests {
         assert_eq!(auth.inactive_len("m"), 0);
         // At least the earliest cold leaves were pressure-evicted during insert.
         let (_, early_hit, _) = auth.lookup_prefix("m", &prefix(&[flats[0].as_slice()]), "n0");
-        assert_eq!(early_hit, 0, "over-cap insert must have dropped an early leaf");
+        assert_eq!(
+            early_hit, 0,
+            "over-cap insert must have dropped an early leaf"
+        );
     }
 }
