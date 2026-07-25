@@ -9,6 +9,12 @@
 //! 6. `ReportRef(WRITEBACK,-1)` 解冻（barrier 之后才解冻）
 //!
 //! L3：仅 L2→L3 demote / L2 cap 压力（稳态 XOR），不在 PutEnd 双写。
+//!
+//! **缺口（→ P4.7 GC）**：无孤儿会话 TTL。若 WRITEBACK+1 上报 CP 后、barrier 完成前
+//! agent 崩溃，CP 侧 ref 永不归零，该 prefix radix 永久冻结驱逐。Mooncake 有
+//! `put_start_discard_timeout`（master_service.cpp:237/3150，PutStart 后超时未 PutEnd
+//! 的 PROCESSING replica 自动 discard）做兜底；lake 等价物（会话超时/lease 回收 +
+//! 崩溃 reconcile）defer 到 P4.7。
 
 use lake_proto::lake::*;
 use lake_tiered_store::LocalTierEngine;
