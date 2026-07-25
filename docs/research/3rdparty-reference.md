@@ -262,7 +262,7 @@ UCM 与 **LMCache 同层**：挂在 vLLM 等引擎上的 **KVStore + connector +
 - Dynamo `kvbm-physical::TransferManager` 是**抽象**，生产数据面仍优先接 A（Mooncake TE），避免两套传输栈。
 - 其余（SGLang HiCache 策略、LMCache 后端思路、vLLM `KVConnectorBase_V1`、Dynamo kv-router 选路公式）继续以**借鉴/对照**为主，默认不链进依赖树；计算层（P5）再评估 vLLM/SGLang 引擎经 connector 接入。
 
-**现状（P4.2 合入 / P4.3）**：复用 **B** vendor + controlplane radix/驱逐。**P4.3**：`lake-tiered-store`=`LocalTierEngine`（L0–L3 内存站位）+ `TierPipeline`/`BandwidthPool` + `HitStats`；agent `PutEndSession`/`ControlPlanePort`（WRITEBACK + barrier + publish L0）；CP `publish_location`/`RequestBarrier`。对齐 Mooncake PutEnd、SGLang write_back、Dynamo Pipeline（补 promote）。真 NVMe/对象/跨机 defer P5。`kv-pool` 仍 dumb。复用 **A** 待传输切片。
+**现状（P4.2 合入 / P4.3）**：复用 **B** vendor + controlplane radix/驱逐。**P4.3**：`LocalTierEngine`（L0–L3 站位 + `pin`≈`lock_ref` + `TierSideEffects`）+ `TierPipeline`（collateral `LocationEvent`）+ `BandwidthPool`；agent durable-first PutEnd（Mooncake COMPLETE）+ `apply_location_events`；CP 拒绝发明 L2、`lookup` 按 meta 修 presence。参考：`hiradix_cache.py::_evict_write_back`/`lock_ref`；`kvbm-engine` `offload/pipeline.rs` settlement；Mooncake `PutEnd`。真 NVMe/跨机/async PendingTracker defer P5。
 
 锚点（复用时回溯）：
 

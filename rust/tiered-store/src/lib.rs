@@ -12,7 +12,7 @@ mod pipeline;
 mod stats;
 
 pub use bandwidth::BandwidthPool;
-pub use engine::{LocalTier, LocalTierEngine, TierCaps};
+pub use engine::{LocalTier, LocalTierEngine, TierCaps, TierSideEffects};
 pub use pipeline::{LocationEvent, PipelineAction, TierPipeline};
 pub use stats::{AccessKind, HitStats, TierCost};
 

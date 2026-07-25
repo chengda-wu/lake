@@ -1,9 +1,8 @@
 //! 存储池 agent。
 //!
-//! P3:边10 Dispatch 占位。P4.3:`putend` 会话（PutEnd + writeback + barrier）。
-//! 生产:Dispatch → 组 batch → FFI 引擎;真 gRPC 调 CP 后续接线。
-//! 单 crate 双角色 feature:计算侧 / KV Node(见 kv-cache-pool.md)。
-//! 参考:SGLang agent_hints / `_evict_write_back`;Mooncake PutStart/PutEnd。
+//! P3:Dispatch 占位。P4.3:PutEnd COMPLETE + `TierPipeline`/`apply_location_events`。
+//! 参考:Mooncake PutEnd;`hiradix_cache.py::_evict_write_back`/`lock_ref`;
+//! Dynamo `offload/pipeline.rs` settlement→presence。
 
 mod cp_port;
 mod putend;

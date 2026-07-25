@@ -1,32 +1,47 @@
 //! Promote / demote 流水线（抄 Dynamo `Pipeline` 骨架，补 lake promote）。
 //!
-//! 上游 demote-only；lake：按动作消费 [`BandwidthPool`]。
-//! **P4.3 缺口**：本 crate 不持 CP 句柄；`tick` 返回 [`LocationEvent`]，
-//! 由 agent/`AuthorityPort` 调 `publish_location`（见 storage-agent 接线）。
+//! 参考：`kvbm-engine` `offload/pipeline.rs::Pipeline`（transfer 后 settlement /
+//! presence）；lake 同步版：`tick` 返回完整 [`LocationEvent`] 列表（含 collateral）。
+//! 关键差异：无 async PendingTracker；失败 requeue 一次窗口尾，不 silent-drop。
 
 use crate::bandwidth::BandwidthPool;
-use crate::engine::{LocalTier, LocalTierEngine};
+use crate::engine::{LocalTier, LocalTierEngine, TierSideEffects};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineAction {
-    /// Hot block → L0.
     Promote { hash: Vec<u8> },
-    /// Cold L0 replica drop (needs L2|L3).
     DemoteL0 { hash: Vec<u8> },
-    /// Cold L2 → L3, drop L2.
     DemoteL2 { hash: Vec<u8> },
-    /// Read miss fill to L0.
     FillMiss { hash: Vec<u8> },
 }
 
-/// View-sync hints for controlplane after a successful step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocationEvent {
     Present { hash: Vec<u8>, tier: LocalTier },
     Absent { hash: Vec<u8>, tier: LocalTier },
 }
 
-/// Minimal async-less pipeline: drain a queue under bandwidth budget.
+fn events_from_effects(fx: &TierSideEffects) -> Vec<LocationEvent> {
+    let mut ev = Vec::new();
+    for h in &fx.l0_demoted {
+        ev.push(LocationEvent::Absent {
+            hash: h.clone(),
+            tier: LocalTier::L0,
+        });
+    }
+    for h in &fx.l2_demoted_to_l3 {
+        ev.push(LocationEvent::Absent {
+            hash: h.clone(),
+            tier: LocalTier::L2,
+        });
+        ev.push(LocationEvent::Present {
+            hash: h.clone(),
+            tier: LocalTier::L3,
+        });
+    }
+    ev
+}
+
 pub struct TierPipeline {
     pub engine: LocalTierEngine,
     pub bandwidth: BandwidthPool,
@@ -53,23 +68,22 @@ impl TierPipeline {
     fn estimate_cost(&self, action: &PipelineAction) -> u64 {
         match action {
             PipelineAction::Promote { hash } | PipelineAction::FillMiss { hash } => {
-                if self.engine.local_tier(hash) == Some(LocalTier::L0) {
-                    0
-                } else {
-                    self.engine.get(hash).map(|b| b.len() as u64).unwrap_or(0)
-                }
+                self.engine.estimate_promote_cost(hash)
             }
             PipelineAction::DemoteL0 { hash } => self.engine.l0_nbytes(hash),
             PipelineAction::DemoteL2 { hash } => self.engine.l2_nbytes(hash),
         }
     }
 
-    /// Run up to `max_steps` **attempts**. Returns `(successes, location_events)`.
-    /// Failed actions are dropped (refund bandwidth) and do **not** count as successes.
+    /// Run up to `max_steps` attempts. Returns `(successes, location_events)`.
+    /// Failed actions are **requeued at the back** (Dynamo PendingTracker spirit);
+    /// bandwidth exhaustion stops the window without dropping the head.
     pub fn tick(&mut self, max_steps: usize) -> (usize, Vec<LocationEvent>) {
         let mut done = 0;
         let mut events = Vec::new();
         let mut attempts = 0;
+        let mut consecutive_fail = 0usize;
+        let q0 = self.queue.len().max(1);
         while attempts < max_steps {
             let Some(action) = self.queue.pop_front() else {
                 break;
@@ -82,17 +96,28 @@ impl TierPipeline {
             }
             let result = match &action {
                 PipelineAction::Promote { hash } => self.engine.promote_to_l0(hash),
-                PipelineAction::DemoteL0 { hash } => self.engine.demote_l0(hash),
-                PipelineAction::DemoteL2 { hash } => self.engine.demote_l2_to_l3(hash),
                 PipelineAction::FillMiss { hash } => self.engine.fill_read_miss(hash),
+                PipelineAction::DemoteL0 { hash } => self
+                    .engine
+                    .demote_l0(hash)
+                    .map(|n| (n, TierSideEffects::default())),
+                PipelineAction::DemoteL2 { hash } => self
+                    .engine
+                    .demote_l2_to_l3(hash)
+                    .map(|n| (n, TierSideEffects::default())),
             };
             match (&action, result) {
-                (PipelineAction::Promote { hash }, Ok(_)) => {
-                    events.push(LocationEvent::Present {
-                        hash: hash.clone(),
-                        tier: LocalTier::L0,
-                    });
+                (PipelineAction::Promote { hash }, Ok((_n, fx)))
+                | (PipelineAction::FillMiss { hash }, Ok((_n, fx))) => {
+                    events.extend(events_from_effects(&fx));
+                    if self.engine.local_tier(hash) == Some(LocalTier::L0) {
+                        events.push(LocationEvent::Present {
+                            hash: hash.clone(),
+                            tier: LocalTier::L0,
+                        });
+                    }
                     done += 1;
+                    consecutive_fail = 0;
                 }
                 (PipelineAction::DemoteL0 { hash }, Ok(_)) => {
                     events.push(LocationEvent::Absent {
@@ -100,6 +125,7 @@ impl TierPipeline {
                         tier: LocalTier::L0,
                     });
                     done += 1;
+                    consecutive_fail = 0;
                 }
                 (PipelineAction::DemoteL2 { hash }, Ok(_)) => {
                     events.push(LocationEvent::Absent {
@@ -111,21 +137,18 @@ impl TierPipeline {
                         tier: LocalTier::L3,
                     });
                     done += 1;
-                }
-                (PipelineAction::FillMiss { hash }, Ok(n)) => {
-                    if n > 0 {
-                        events.push(LocationEvent::Present {
-                            hash: hash.clone(),
-                            tier: LocalTier::L0,
-                        });
-                    }
-                    done += 1;
+                    consecutive_fail = 0;
                 }
                 (_, Err(_)) => {
                     if cost > 0 {
                         self.bandwidth.refund(cost);
                     }
-                    // Drop failed action; do not count as success.
+                    // Requeue at back; stop if we rotate the whole queue without progress.
+                    self.queue.push_back(action);
+                    consecutive_fail += 1;
+                    if consecutive_fail >= q0 {
+                        break;
+                    }
                 }
             }
         }
@@ -136,54 +159,63 @@ impl TierPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{LocalTier, TierCaps};
+    use crate::engine::TierCaps;
 
     #[test]
-    fn pipeline_promote_under_budget() {
-        let eng = LocalTierEngine::with_caps(TierCaps::default());
-        let mut p = TierPipeline::new(eng, BandwidthPool::new(1024));
-        p.engine.put_durable(b"h", b"hello", false).unwrap();
+    fn pipeline_promote_emits_collateral_l0_absent() {
+        let eng = LocalTierEngine::with_caps(TierCaps {
+            l0: 1,
+            l1: 8,
+            l2: 8,
+        });
+        let mut p = TierPipeline::new(eng, BandwidthPool::new(1 << 20));
+        p.engine.put_durable(b"a", b"A", false).unwrap();
+        p.engine.put_durable(b"b", b"B", false).unwrap();
         p.enqueue(PipelineAction::Promote {
-            hash: b"h".to_vec(),
+            hash: b"a".to_vec(),
         });
         let (n, ev) = p.tick(1);
         assert_eq!(n, 1);
-        assert_eq!(p.engine.local_tier(b"h"), Some(LocalTier::L0));
-        assert!(ev.iter().any(|e| matches!(
-            e,
-            LocationEvent::Present {
-                tier: LocalTier::L0,
-                ..
-            }
-        )));
+        p.enqueue(PipelineAction::Promote {
+            hash: b"b".to_vec(),
+        });
+        let (n2, ev2) = p.tick(1);
+        assert_eq!(n2, 1);
+        assert!(
+            ev2.iter().any(|e| matches!(
+                e,
+                LocationEvent::Absent {
+                    hash,
+                    tier: LocalTier::L0
+                } if hash == b"a"
+            )),
+            "collateral demote must emit Absent L0; got {ev2:?} (first tick {ev:?})"
+        );
     }
 
     #[test]
     fn pipeline_stops_when_budget_exhausted() {
         let eng = LocalTierEngine::with_caps(TierCaps::default());
         let mut p = TierPipeline::new(eng, BandwidthPool::new(3));
-        p.engine.put_durable(b"a", b"abcd", false).unwrap(); // 4 bytes
+        p.engine.put_durable(b"a", b"abcd", false).unwrap();
         p.enqueue(PipelineAction::Promote {
             hash: b"a".to_vec(),
         });
         let (n, _) = p.tick(1);
         assert_eq!(n, 0);
         assert_eq!(p.pending(), 1);
-        // Bandwidth gate is before mutate — must not half-apply.
         assert_ne!(p.engine.local_tier(b"a"), Some(LocalTier::L0));
     }
 
     #[test]
-    fn pipeline_err_does_not_count_as_done() {
+    fn pipeline_err_requeues() {
         let eng = LocalTierEngine::with_caps(TierCaps::default());
         let mut p = TierPipeline::new(eng, BandwidthPool::new(1024));
-        // Demote without durable backing → Err, dropped, done=0.
         p.enqueue(PipelineAction::DemoteL0 {
             hash: b"missing".to_vec(),
         });
-        let (n, ev) = p.tick(1);
+        let (n, _) = p.tick(1);
         assert_eq!(n, 0);
-        assert!(ev.is_empty());
-        assert_eq!(p.pending(), 0);
+        assert_eq!(p.pending(), 1, "failed action requeued");
     }
 }

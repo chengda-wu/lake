@@ -152,7 +152,13 @@ mod tests {
                 scope: "public".into(),
             }),
             block_kind: BlockKind::TType as i32,
-            locations: vec![],
+            // Explicit L2 — register no longer invents COMPLETE locations.
+            locations: vec![Location {
+                tier: Tier::L2 as i32,
+                node_id: "n0".into(),
+                segment_id: 1,
+                offset: 0,
+            }],
             l3_present: false,
             ref_count: 1,
         }
@@ -573,6 +579,15 @@ mod tests {
         let mut auth = Authority::default();
         assert!(auth.complete_barrier("", "n0").is_err());
         assert!(auth.complete_barrier("r", "").is_err());
+    }
+
+    #[test]
+    fn register_rejects_invented_l2() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"bare"]);
+        let mut m = meta("m", b"bare");
+        m.locations.clear();
+        assert!(auth.register("n0", &full, vec![m]).is_err());
     }
 
     #[test]

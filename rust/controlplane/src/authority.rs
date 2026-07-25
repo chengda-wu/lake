@@ -203,15 +203,17 @@ impl Authority {
             let pos = *index_of.get(flat.as_slice()).expect("checked");
             let seq = lineage[pos];
 
-            // Default L2 only when caller omitted locations **and** is not L3-only.
-            // PutEnd must pass settle-accurate locations / l3_present (durable-first).
+            // Refuse invented COMPLETE (Mooncake Get-only-COMPLETE): no empty
+            // locations unless l3_present. Callers must pass settle-accurate metas.
             if meta.locations.is_empty() && !meta.l3_present {
-                meta.locations.push(Location {
-                    tier: Tier::L2 as i32,
-                    node_id: node_id.to_string(),
-                    segment_id: 1,
-                    offset: 0,
-                });
+                return Err(
+                    "RegisterBlocks: need L2 location or l3_present (durable first)".into(),
+                );
+            }
+            for loc in &mut meta.locations {
+                if loc.node_id.is_empty() {
+                    loc.node_id = node_id.to_string();
+                }
             }
 
             let handle = ns.registry.register_sequence_hash(seq);
@@ -276,16 +278,25 @@ impl Authority {
                 all_local = false;
                 break;
             }
-            // Ensure radix + presence (lazy repair if handle was lost).
+            // Lazy repair: presence markers **only** from meta.locations —
+            // never invent TierL2 for L3-only blocks.
+            let meta = entry.meta.clone();
             if !ns.handles.contains_key(&seq) {
                 let handle = ns.registry.register_sequence_hash(seq);
-                handle.mark_present::<TierL2>();
+                for loc in &meta.locations {
+                    if loc.tier == Tier::L0 as i32 {
+                        handle.mark_present::<TierL0>();
+                    } else if loc.tier == Tier::L1 as i32 {
+                        handle.mark_present::<TierL1>();
+                    } else if loc.tier == Tier::L2 as i32 {
+                        handle.mark_present::<TierL2>();
+                    }
+                }
                 ns.handles.insert(seq, handle);
             } else {
                 let _ = ns.registry.match_sequence_hash(seq, true);
             }
 
-            let meta = entry.meta.clone();
             let local = meta
                 .locations
                 .iter()
