@@ -382,12 +382,12 @@ impl FrequencyPolicy {
             "FrequencyPolicy: leaf {idx} added while already in a tier"
         );
         // Align with MultiLruBackend::insert: never silently drop a leaf.
-        // lake Authority must allocate before insert when inactive is full
-        // (no BlockStore fixed pool to reclaim slots).
+        // lake Authority gates at report_ref (skip insert when inactive is full);
+        // this assert is a misuse fuse if a caller bypasses that gate.
         debug_assert!(
             self.tiers[level].len() < self.tiers[level].cap().get(),
             "FrequencyPolicy tier {level} insert would cause eviction! len={}, cap={}. \
-             Caller must allocate before insert when inactive is at capacity.",
+             Caller must skip insert (or free a slot) when inactive is at capacity.",
             self.tiers[level].len(),
             self.tiers[level].cap().get()
         );
