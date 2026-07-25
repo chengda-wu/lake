@@ -416,4 +416,48 @@ mod tests {
         let (_, chain_hit, _) = auth.lookup_prefix("m", &chain, "n0");
         assert_eq!(chain_hit, 1, "leaf gone → gap after parent");
     }
+
+    /// Cold single-block roots past inactive_cap must still be allocatable:
+    /// Authority allocates before insert so Frequency tiers never silently drop leaves
+    /// (`len` large but `next_victim` empty → view zombies).
+    #[test]
+    fn inactive_cap_allocate_before_insert_no_zombie() {
+        let cap = 4;
+        let mut auth = Authority::with_inactive_cap(cap);
+        let n = cap * 2;
+        let mut flats: Vec<Vec<u8>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let flat = format!("leaf{i:02}").into_bytes();
+            let full = prefix(&[flat.as_slice()]);
+            auth.register("n0", &full, vec![meta("m", &flat)]).unwrap();
+            let d = RefDelta {
+                id: Some(KvBlockId {
+                    model_id: "m".into(),
+                    block_hash: flat.clone(),
+                    pool_kind: PoolKind::Target as i32,
+                    scope: "public".into(),
+                }),
+                kind: RefKind::Request as i32,
+                delta: 1,
+                node_id: "n0".into(),
+            };
+            auth.report_ref(&d).unwrap();
+            let mut d0 = d;
+            d0.delta = -1;
+            auth.report_ref(&d0).unwrap();
+            flats.push(flat);
+            assert!(
+                auth.inactive_len("m") <= cap,
+                "inactive must stay ≤ cap after insert #{i}"
+            );
+        }
+        assert_eq!(auth.inactive_len("m"), cap);
+        // Remaining inactive must all be allocatable (no zombie leaves).
+        let removed = auth.evict_n("m", cap);
+        assert_eq!(removed, cap, "allocate must clear all inactive at cap");
+        assert_eq!(auth.inactive_len("m"), 0);
+        // At least the earliest cold leaves were pressure-evicted during insert.
+        let (_, early_hit, _) = auth.lookup_prefix("m", &prefix(&[flats[0].as_slice()]), "n0");
+        assert_eq!(early_hit, 0, "over-cap insert must have dropped an early leaf");
+    }
 }

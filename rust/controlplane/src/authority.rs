@@ -2,7 +2,8 @@
 //!
 //! 参考:Dynamo `BlockRegistry` / `InactiveIndex`；驱逐主路径 =
 //! `LineageBackend::with_frequency`（只驱叶子 ≈ 前缀亲和 + TinyLFU 冷叶优先 ≈ LFU-Aging）。
-//! 不用 `BlockManager`/`BlockStore`。EventsManager 不接线。
+//! 不用 `BlockManager`/`BlockStore`——因此必须自己守 inactive 上界（见 `ensure_inactive_room`）。
+//! EventsManager 不接线。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,9 +31,15 @@ struct Namespace {
     registry: BlockRegistry,
     /// Keep strong refs so Weak entries in the radix tree stay alive.
     handles: HashMap<SequenceHash, BlockRegistrationHandle>,
+    /// Flat (content) hash → entry. Same `model_id` + same flat in different
+    /// lineages would overwrite; agent chained SHA256 is assumed globally unique
+    /// within a model namespace.
     by_flat: HashMap<Vec<u8>, Entry>,
     seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
     inactive: Box<dyn InactiveIndex>,
+    /// Hard cap on inactive Real nodes (passed to `LineageBackend::with_frequency`
+    /// as slab/`LruCache` capacity **and** enforced before `insert`).
+    inactive_cap: usize,
     /// Aggregate global refs (P4.2 skeleton: all `RefKind` summed into one
     /// counter; `kind` on the wire is ignored). Agent local L1 + per-kind → later.
     global_refs: HashMap<SequenceHash, i64>,
@@ -40,13 +47,14 @@ struct Namespace {
 }
 
 impl Namespace {
-    fn new() -> Self {
+    fn new(inactive_cap: usize) -> Self {
+        let cap = inactive_cap.max(1);
         let tracker = FrequencyTrackingCapacity::Small.create_tracker();
         let registry = BlockRegistry::builder()
             .frequency_tracker(Arc::clone(&tracker) as _)
             .build();
         let inactive = Box::new(
-            LineageBackend::with_frequency(INACTIVE_CAP, FREQ_THRESHOLDS, tracker)
+            LineageBackend::with_frequency(cap, FREQ_THRESHOLDS, tracker)
                 .expect("Lineage+Frequency thresholds"),
         );
         Self {
@@ -55,6 +63,7 @@ impl Namespace {
             by_flat: HashMap::new(),
             seq_to_flat: HashMap::new(),
             inactive,
+            inactive_cap: cap,
             global_refs: HashMap::new(),
             next_block_id: 1,
         }
@@ -65,19 +74,63 @@ impl Namespace {
         self.next_block_id = self.next_block_id.saturating_add(1);
         id
     }
+
+    /// Drop up to `n` inactive victims from the location view.
+    fn drop_inactive_victims(&mut self, n: usize) -> usize {
+        let victims = self.inactive.allocate(n);
+        let mut removed = 0;
+        for (seq, _bid) in victims {
+            if self.global_refs.get(&seq).copied().unwrap_or(0) > 0 {
+                continue;
+            }
+            self.handles.remove(&seq);
+            self.global_refs.remove(&seq);
+            if let Some(flat) = self.seq_to_flat.remove(&seq) {
+                self.by_flat.remove(&flat);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Make room so a new inactive insert cannot overflow Frequency tiers
+    /// (silent `LruCache` kick → leaf still Real but never `allocate`-able).
+    fn ensure_inactive_room(&mut self) {
+        while self.inactive.len() >= self.inactive_cap {
+            if self.drop_inactive_victims(1) == 0 {
+                // Cannot reclaim (should not happen if Frequency assert holds).
+                break;
+            }
+        }
+    }
 }
 
 /// Process-local authority state.
-#[derive(Default)]
 pub struct Authority {
     namespaces: HashMap<String, Namespace>,
+    inactive_cap: usize,
+}
+
+impl Default for Authority {
+    fn default() -> Self {
+        Self::with_inactive_cap(INACTIVE_CAP)
+    }
 }
 
 impl Authority {
+    /// Construct with a custom inactive hard cap (tests use a small value).
+    pub fn with_inactive_cap(inactive_cap: usize) -> Self {
+        Self {
+            namespaces: HashMap::new(),
+            inactive_cap: inactive_cap.max(1),
+        }
+    }
+
     fn ns_mut(&mut self, model_id: &str) -> &mut Namespace {
+        let cap = self.inactive_cap;
         self.namespaces
             .entry(model_id.to_string())
-            .or_insert_with(Namespace::new)
+            .or_insert_with(|| Namespace::new(cap))
     }
 
     fn ns(&self, model_id: &str) -> Option<&Namespace> {
@@ -296,7 +349,12 @@ impl Authority {
         if before > 0 && after == 0 {
             // Candidate for eviction — do not delete.
             if !ns.inactive.has(seq) {
-                ns.inactive.insert(seq, block_id);
+                ns.ensure_inactive_room();
+                if ns.inactive.len() < ns.inactive_cap {
+                    ns.inactive.insert(seq, block_id);
+                }
+                // else: allocate failed to reclaim; skip insert rather than
+                // overflow Frequency tiers (silent leaf drop → view zombie).
             }
         } else if before == 0 && after > 0 {
             // Frozen again — leave inactive index (take if present).
@@ -321,25 +379,13 @@ impl Authority {
 
     /// Test / pressure hook: evict up to `n` inactive (ref==0) blocks.
     /// Returns number of blocks removed from the location view.
+    ///
+    /// Production pressure-driven `allocate` (and agent `ReportRef` feeding) → later slice.
     pub fn evict_n(&mut self, model_id: &str, n: usize) -> usize {
         let Some(ns) = self.namespaces.get_mut(model_id) else {
             return 0;
         };
-        let victims = ns.inactive.allocate(n);
-        let mut removed = 0;
-        for (seq, _bid) in victims {
-            if ns.global_refs.get(&seq).copied().unwrap_or(0) > 0 {
-                // Should not happen; skip.
-                continue;
-            }
-            ns.handles.remove(&seq);
-            ns.global_refs.remove(&seq);
-            if let Some(flat) = ns.seq_to_flat.remove(&seq) {
-                ns.by_flat.remove(&flat);
-                removed += 1;
-            }
-        }
-        removed
+        ns.drop_inactive_victims(n)
     }
 
     /// Inactive index size (tests).

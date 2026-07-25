@@ -381,6 +381,16 @@ impl FrequencyPolicy {
             self.tier_of[idx as usize].is_none(),
             "FrequencyPolicy: leaf {idx} added while already in a tier"
         );
+        // Align with MultiLruBackend::insert: never silently drop a leaf.
+        // lake Authority must allocate before insert when inactive is full
+        // (no BlockStore fixed pool to reclaim slots).
+        debug_assert!(
+            self.tiers[level].len() < self.tiers[level].cap().get(),
+            "FrequencyPolicy tier {level} insert would cause eviction! len={}, cap={}. \
+             Caller must allocate before insert when inactive is at capacity.",
+            self.tiers[level].len(),
+            self.tiers[level].cap().get()
+        );
         self.tiers[level].put(idx, ());
         self.tier_of[idx as usize] = Some(level as u8);
     }
@@ -495,5 +505,20 @@ mod tests {
         p.on_node_inserted(1, hot);
         p.on_leaf_added(1);
         assert_eq!(p.next_victim(), Some(0), "cold leaf must precede hot");
+    }
+
+    /// Per-tier LruCache must not silently kick a leaf (debug builds).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "would cause eviction")]
+    fn frequency_over_tier_cap_panics_in_debug() {
+        let tracker: Arc<dyn FrequencyTracker<u128>> = Arc::new(TinyLFUTracker::new(1024));
+        let cap = 2;
+        let mut p = FrequencyPolicy::new(cap, [3, 8, 15], Arc::clone(&tracker)).unwrap();
+        for i in 0..=cap as u32 {
+            let seq = PositionalLineageHash::root(0x1000 + u64::from(i));
+            p.on_node_inserted(i, seq);
+            p.on_leaf_added(i);
+        }
     }
 }
