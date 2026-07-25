@@ -284,6 +284,108 @@ mod tests {
             .any(|l| l.tier == Tier::L2 as i32 && l.node_id == "n0"));
     }
 
+    /// durable-first 不变量：commit 成功 ⇒ radix 已发布 block 恒有 L2 后盾，无悬空。
+    /// (plan PR3 验证项；Ref: consistency.md §2/§8.3, Mooncake PROCESSING→COMPLETE)
+    #[test]
+    fn commit_published_block_always_has_l2_backing() {
+        let mut store = LocalTierEngine::new();
+        let mut auth = Authority::default();
+        let mut sess = PutEndSession::new("r-df", "n0", "m");
+        sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            sess.commit_through(&mut store, &mut port).unwrap();
+        }
+        let (metas, _hit, _all) = auth.lookup_prefix("m", &[b"h0".to_vec()], "n0");
+        let meta = metas
+            .into_iter()
+            .next()
+            .and_then(|r| r.meta)
+            .expect("block registered");
+        assert!(
+            meta.locations.iter().any(|l| l.tier == Tier::L2 as i32),
+            "durable-first: published block must have L2 backing, got {:?}",
+            meta.locations
+        );
+    }
+
+    /// M1(B) 时序不变量：WRITEBACK −1 解冻必须发生在 RequestBarrier 之后。
+    /// 单进程同步无并发窗口，故用 recording mock 锁调用序（防 −1 被改回 barrier 之前）。
+    /// (Ref: consistency.md §3, SGLang `_evict_write_back` 持锁到 flush+ack)
+    #[test]
+    fn writeback_minus_one_after_barrier() {
+        struct RecordingPort {
+            auth: Authority,
+            calls: Vec<&'static str>,
+        }
+        impl ControlPlanePort for RecordingPort {
+            fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
+                self.calls.push("register");
+                self.auth
+                    .register(&req.node_id, &req.prefix_hashes, req.blocks)
+            }
+            fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
+                let tag = if deltas.first().map(|d| d.delta >= 0).unwrap_or(true) {
+                    "wb+1"
+                } else {
+                    "wb-1"
+                };
+                self.calls.push(tag);
+                self.auth.report_refs(deltas)
+            }
+            fn request_barrier(&mut self, req: RequestBarrierRequest) -> Result<(), String> {
+                self.calls.push("barrier");
+                self.auth.complete_barrier(&req.request_id, &req.node_id)
+            }
+            fn publish_location(
+                &mut self,
+                model_id: &str,
+                flat: &[u8],
+                tier: Tier,
+                node_id: &str,
+                present: bool,
+            ) -> Result<(), String> {
+                self.calls.push("publish");
+                self.auth
+                    .publish_location(model_id, flat, tier, node_id, present)
+            }
+            fn set_l3_present(
+                &mut self,
+                model_id: &str,
+                flat: &[u8],
+                present: bool,
+            ) -> Result<(), String> {
+                self.calls.push("l3");
+                self.auth.set_l3_present(model_id, flat, present)
+            }
+        }
+
+        let mut store = LocalTierEngine::new();
+        let mut port = RecordingPort {
+            auth: Authority::default(),
+            calls: Vec::new(),
+        };
+        let mut sess = PutEndSession::new("r-m1b", "n0", "m");
+        sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
+        sess.commit_through(&mut store, &mut port).unwrap();
+
+        let barrier_idx = port
+            .calls
+            .iter()
+            .rposition(|c| *c == "barrier")
+            .expect("barrier called");
+        let minus_idx = port
+            .calls
+            .iter()
+            .rposition(|c| *c == "wb-1")
+            .expect("WRITEBACK -1 called");
+        assert!(
+            barrier_idx < minus_idx,
+            "WRITEBACK -1 必须在 barrier 之后 (M1(B))，got {:?}",
+            port.calls
+        );
+    }
+
     #[test]
     fn pipeline_tick_apply_drops_victim_l0_on_cp() {
         let mut store = LocalTierEngine::with_caps(TierCaps {
