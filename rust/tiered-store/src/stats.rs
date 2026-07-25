@@ -83,11 +83,11 @@ mod tests {
     #[test]
     fn hit_rate_and_cost_curve() {
         let mut e = LocalTierEngine::with_caps(TierCaps::default());
-        e.put_durable(b"hot", b"H", true).unwrap();
+        e.put_durable(b"hot", b"H").unwrap();
         let _ = e.promote_to_l0(b"hot").unwrap();
-        e.put_durable(b"warm", b"W", false).unwrap();
-        e.put_durable(b"cold", b"C", true).unwrap();
-        e.demote_l2_to_l3(b"cold").unwrap();
+        e.put_durable(b"warm", b"W").unwrap();
+        e.put_durable(b"cold", b"C").unwrap();
+        e.demote_l2_to_l3(b"cold").unwrap(); // L3 only via cold demote
 
         assert_eq!(e.probe(b"hot").cost(), TierCost::L0 as u64);
         assert_eq!(e.probe(b"warm").cost(), TierCost::L2 as u64);

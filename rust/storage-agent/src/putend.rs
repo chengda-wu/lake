@@ -1,15 +1,13 @@
 //! PutEnd 两阶段（P4.3）。
 //!
-//! **COMPLETE 语义**（Mooncake `PutEnd` → `mark_complete`；#20）：
+//! **COMPLETE 语义**（Mooncake `PutEnd` → `mark_complete`；#20；`storage-layer.md`）：
 //! 1. PutStart 本地记账
-//! 2. `put_durable` 落稳 L2|L3（先有字节）
-//! 3. `RegisterBlocks`（按真实 settle 标 L2 / `l3_present`）= COMPLETE
-//! 4. 本地 `pin`（≈ SGLang `lock_ref`）覆盖提交窗口；CP `ReportRef(WRITEBACK)`
-//!    仍喂 `global_refs` 冻 radix 驱逐（P4.2 骨架忽略 RefKind）
+//! 2. `put_durable` **只落 L2**（F4；不写 L1、不写 L3）
+//! 3. `RegisterBlocks`（按真实 settle：通常 L2 location）= COMPLETE
+//! 4. 本地 `pin`（≈ SGLang `lock_ref`）+ CP `ReportRef(WRITEBACK)` 冻 radix 驱逐
 //! 5. WRITEBACK−1 + `RequestBarrier` ledger
 //!
-//! 中途 register-before-durable 的 writeback 窗口已不走；勿与 consistency.md
-//! 旧「先注册再写回」叙述混读——以 durable-first COMPLETE 为准。
+//! L3：仅 L2→L3 demote / L2 cap 压力（稳态 XOR），不在 PutEnd 双写。
 
 use lake_proto::lake::*;
 use lake_tiered_store::LocalTierEngine;
@@ -106,14 +104,11 @@ impl PutEndSession {
             .collect()
     }
 
-    pub fn flush_durable(
-        &mut self,
-        store: &mut LocalTierEngine,
-        also_l3: bool,
-    ) -> Result<Vec<Vec<u8>>, String> {
+    /// Flush to L2 only. Returns hashes demoted L2→L3 under L2 cap (collateral).
+    pub fn flush_durable(&mut self, store: &mut LocalTierEngine) -> Result<Vec<Vec<u8>>, String> {
         let mut demoted_all = Vec::new();
         for b in &mut self.blocks {
-            let (_tier, fx) = store.put_durable(&b.id.block_hash, &b.bytes, also_l3)?;
+            let (_tier, fx) = store.put_durable(&b.id.block_hash, &b.bytes)?;
             demoted_all.extend(fx.l2_demoted_to_l3);
             b.durable = store.is_settled(&b.id.block_hash);
             if !b.durable {
@@ -134,14 +129,12 @@ impl PutEndSession {
         &mut self,
         store: &mut LocalTierEngine,
         cp: &mut P,
-        also_l3: bool,
     ) -> Result<(), String> {
-        // Local freeze during commit (SGLang lock_ref shape).
         for b in &self.blocks {
             store.pin(&b.id.block_hash);
         }
 
-        let demoted = self.flush_durable(store, also_l3)?;
+        let demoted = self.flush_durable(store)?;
         if !self.all_durable() {
             for b in &self.blocks {
                 let _ = store.unpin(&b.id.block_hash);
@@ -149,6 +142,7 @@ impl PutEndSession {
             return Err("commit: not settled on L2|L3".into());
         }
 
+        // Cap demotions of prior blocks: L2→L3 XOR sync on CP.
         for h in &demoted {
             if !self.blocks.iter().any(|b| b.id.block_hash == *h) {
                 let _ = cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false);
@@ -160,6 +154,7 @@ impl PutEndSession {
         cp.register_blocks(reg)?;
         for b in &self.blocks {
             let h = b.id.block_hash.as_slice();
+            // Self may have been cap-demoted to L3-only during flush.
             if store.l3_present(h) {
                 cp.set_l3_present(&self.model_id, h, true)?;
             }
@@ -168,7 +163,6 @@ impl PutEndSession {
             }
         }
 
-        // CP global_refs freeze (radix evict); engine already pinned.
         cp.report_refs(&self.writeback_deltas(1))?;
         self.writeback_open = true;
         cp.report_refs(&self.writeback_deltas(-1))?;
@@ -195,7 +189,7 @@ mod tests {
     };
 
     #[test]
-    fn commit_through_writeback_then_evictable() {
+    fn commit_through_l2_only_no_l3() {
         let mut store = LocalTierEngine::with_caps(TierCaps::default());
         let mut auth = Authority::default();
         let mut sess = PutEndSession::new("r1", "n0", "m");
@@ -203,10 +197,10 @@ mod tests {
 
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            sess.commit_through(&mut store, &mut port, true).unwrap();
+            sess.commit_through(&mut store, &mut port).unwrap();
         }
         assert!(store.is_l2_durable(b"h0"));
-        assert!(store.l3_present(b"h0"));
+        assert!(!store.l3_present(b"h0"), "PutEnd must not write L3");
         assert!(auth.barrier_completed("r1"));
         let d = RefDelta {
             id: Some(KvBlockId {
@@ -234,7 +228,7 @@ mod tests {
         sess.put_start(b"p".to_vec(), b"P".to_vec());
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            sess.commit_through(&mut store, &mut port, false).unwrap();
+            sess.commit_through(&mut store, &mut port).unwrap();
             store.promote_to_l0(b"p").unwrap();
             port.publish_location("m", b"p", Tier::L0, "n0", true)
                 .unwrap();
@@ -244,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_flush_before_register_l2_cap_syncs_l3() {
+    fn l2_cap_demote_syncs_l3_xor_on_cp() {
         let mut store = LocalTierEngine::with_caps(TierCaps {
             l0: 4,
             l1: 8,
@@ -255,16 +249,23 @@ mod tests {
         s0.put_start(b"x".to_vec(), b"X".to_vec());
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            s0.commit_through(&mut store, &mut port, false).unwrap();
+            s0.commit_through(&mut store, &mut port).unwrap();
         }
+        assert!(store.is_l2_durable(b"x"));
+        assert!(!store.l3_present(b"x"));
+
         let mut s1 = PutEndSession::new("r-b", "n0", "m");
         s1.put_start(b"y".to_vec(), b"Y".to_vec());
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            s1.commit_through(&mut store, &mut port, false).unwrap();
+            s1.commit_through(&mut store, &mut port).unwrap();
         }
+        // Cap pressure: x moved L2→L3 (XOR), y on L2.
         assert!(!store.is_l2_durable(b"x"));
         assert!(store.l3_present(b"x"));
+        assert!(store.is_l2_durable(b"y"));
+        assert!(!store.l3_present(b"y"));
+
         let meta_x = auth
             .lookup_prefix("m", &[b"x".to_vec()], "n0")
             .0
@@ -281,7 +282,6 @@ mod tests {
 
     #[test]
     fn pipeline_tick_apply_drops_victim_l0_on_cp() {
-        // Audit HIGH#1: promote under L0 cap must clear victim L0 on CP.
         let mut store = LocalTierEngine::with_caps(TierCaps {
             l0: 1,
             l1: 8,
@@ -292,7 +292,7 @@ mod tests {
             let mut s = PutEndSession::new(id, "n0", "m");
             s.put_start(h.to_vec(), bytes.to_vec());
             let mut port = AuthorityPort { auth: &mut auth };
-            s.commit_through(&mut store, &mut port, false).unwrap();
+            s.commit_through(&mut store, &mut port).unwrap();
         }
         let mut pipe = TierPipeline::new(store, BandwidthPool::new(1 << 20));
         pipe.enqueue(PipelineAction::Promote {
@@ -316,11 +316,8 @@ mod tests {
             apply_location_events(&mut port, "m", "n0", &ev2).unwrap();
         }
         assert!(auth.has_l0_on("m", b"b", "n0"));
-        assert!(
-            !auth.has_l0_on("m", b"a", "n0"),
-            "victim L0 must be cleared on CP after collateral demote"
-        );
+        assert!(!auth.has_l0_on("m", b"a", "n0"));
         let (_, _, all_local_a) = auth.lookup_prefix("m", &[b"a".to_vec()], "n0");
-        assert!(!all_local_a, "must not false D-direct on demoted a");
+        assert!(!all_local_a);
     }
 }

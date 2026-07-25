@@ -169,8 +169,8 @@ mod tests {
             l2: 8,
         });
         let mut p = TierPipeline::new(eng, BandwidthPool::new(1 << 20));
-        p.engine.put_durable(b"a", b"A", false).unwrap();
-        p.engine.put_durable(b"b", b"B", false).unwrap();
+        p.engine.put_durable(b"a", b"A").unwrap();
+        p.engine.put_durable(b"b", b"B").unwrap();
         p.enqueue(PipelineAction::Promote {
             hash: b"a".to_vec(),
         });
@@ -197,7 +197,7 @@ mod tests {
     fn pipeline_stops_when_budget_exhausted() {
         let eng = LocalTierEngine::with_caps(TierCaps::default());
         let mut p = TierPipeline::new(eng, BandwidthPool::new(3));
-        p.engine.put_durable(b"a", b"abcd", false).unwrap();
+        p.engine.put_durable(b"a", b"abcd").unwrap();
         p.enqueue(PipelineAction::Promote {
             hash: b"a".to_vec(),
         });

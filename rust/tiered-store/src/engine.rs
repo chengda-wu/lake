@@ -179,19 +179,18 @@ impl LocalTierEngine {
         order.push_back(h.to_vec());
     }
 
-    /// PutEnd: land on L2 (F4). `also_l3` also writes L3 SSOT (migration window;
-    /// steady L2/L3 XOR via later [`demote_l2_to_l3`] / L2 cap pressure).
+    /// PutEnd / 满块写回：只落 L2（F4 恢复点）。
+    ///
+    /// 对齐 `storage-layer.md`：写回不写 L1、不写 L3。L3 仅经 [`demote_l2_to_l3`]
+    /// 或 L2 容量压力（迁移窗后稳态 XOR）。参考：SGLang 满块不写 host；
+    /// Mooncake PutEnd 完成当前副本；Dynamo offload 链式 demote 而非 Put 双写。
     pub fn put_durable(
         &mut self,
         h: &[u8],
         bytes: &[u8],
-        also_l3: bool,
     ) -> Result<(LocalTier, TierSideEffects), String> {
         self.l2.insert(h.to_vec(), bytes.to_vec());
         Self::touch(&mut self.l2_order, h);
-        if also_l3 {
-            self.l3.insert(h.to_vec(), bytes.to_vec());
-        }
         let l2_demoted_to_l3 = self.ensure_l2_cap();
         let effects = TierSideEffects {
             l0_demoted: Vec::new(),
@@ -200,6 +199,7 @@ impl LocalTierEngine {
         if self.l2.contains_key(h) {
             Ok((LocalTier::L2, effects))
         } else if self.l3.contains_key(h) {
+            // This hash itself was immediately demoted under L2 cap → L3 only.
             Ok((LocalTier::L3, effects))
         } else {
             Err("put_durable: block lost after L2 cap demote".into())
@@ -399,7 +399,8 @@ mod tests {
             l1: 4,
             l2: 8,
         });
-        e.put_durable(b"a", b"A", true).unwrap();
+        e.put_durable(b"a", b"A").unwrap();
+        assert!(!e.l3_present(b"a"), "PutEnd must not dual-write L3");
         e.promote_to_l0(b"a").unwrap();
         assert_eq!(e.local_tier(b"a"), Some(LocalTier::L0));
         e.demote_l0(b"a").unwrap();
@@ -413,8 +414,8 @@ mod tests {
             l1: 8,
             l2: 8,
         });
-        e.put_durable(b"c0", b"0", false).unwrap();
-        e.put_durable(b"c1", b"1", false).unwrap();
+        e.put_durable(b"c0", b"0").unwrap();
+        e.put_durable(b"c1", b"1").unwrap();
         e.promote_to_l0(b"c0").unwrap();
         let (_, fx) = e.promote_to_l0(b"c1").unwrap();
         assert_eq!(fx.l0_demoted, vec![b"c0".to_vec()]);
@@ -437,10 +438,11 @@ mod tests {
             l1: 8,
             l2: 8,
         });
-        e.put_durable(b"p", b"P", true).unwrap();
+        e.put_durable(b"p", b"P").unwrap();
         e.promote_to_l0(b"p").unwrap();
         e.demote_l2_to_l3(b"p").unwrap();
-        e.put_durable(b"q", b"Q", false).unwrap();
+        assert!(!e.is_l2_durable(b"p") && e.l3_present(b"p"));
+        e.put_durable(b"q", b"Q").unwrap();
         let (_, fx) = e.promote_to_l0(b"q").unwrap();
         assert_eq!(fx.l0_demoted, vec![b"p".to_vec()]);
         assert_eq!(e.l0_len(), 1);
@@ -453,10 +455,10 @@ mod tests {
             l1: 8,
             l2: 8,
         });
-        e.put_durable(b"p", b"P", false).unwrap();
+        e.put_durable(b"p", b"P").unwrap();
         e.promote_to_l0(b"p").unwrap();
         e.pin(b"p");
-        e.put_durable(b"q", b"Q", false).unwrap();
+        e.put_durable(b"q", b"Q").unwrap();
         assert!(e.promote_to_l0(b"q").is_err());
         e.unpin(b"p").unwrap();
         let (_, fx) = e.promote_to_l0(b"q").unwrap();
@@ -464,17 +466,21 @@ mod tests {
     }
 
     #[test]
-    fn put_durable_l2_cap_settles_on_l3() {
+    fn put_durable_l2_only_l3_via_cap_xor() {
         let mut e = LocalTierEngine::with_caps(TierCaps {
             l0: 4,
             l1: 8,
             l2: 1,
         });
-        let (tx, d0) = e.put_durable(b"x", b"X", false).unwrap();
+        let (tx, d0) = e.put_durable(b"x", b"X").unwrap();
         assert_eq!(tx, LocalTier::L2);
+        assert!(!e.l3_present(b"x"));
         assert!(d0.is_empty());
-        let (ty, demoted) = e.put_durable(b"y", b"Y", false).unwrap();
+        // Cap pressure moves cold x L2→L3 (XOR), not PutEnd dual-write.
+        let (ty, demoted) = e.put_durable(b"y", b"Y").unwrap();
         assert_eq!(ty, LocalTier::L2);
         assert_eq!(demoted.l2_demoted_to_l3, vec![b"x".to_vec()]);
+        assert!(!e.is_l2_durable(b"x") && e.l3_present(b"x"));
+        assert!(e.is_l2_durable(b"y") && !e.l3_present(b"y"));
     }
 }
