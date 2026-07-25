@@ -520,6 +520,8 @@ mod tests {
         auth.report_refs(&[held_minus, cand_plus]).unwrap();
         assert_eq!(auth.global_ref("m", b"held"), 0);
         assert_eq!(auth.global_ref("m", b"cand"), 1);
+        // held:-1 skipped insert (cap full); cand:+1 took itself out → empty.
+        assert_eq!(auth.inactive_len("m"), 0);
         let (_, cand_hit, _) = auth.lookup_prefix("m", &cand, "n0");
         assert_eq!(cand_hit, 1, "peer must not be pressure-evicted mid-batch");
     }

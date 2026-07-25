@@ -343,8 +343,9 @@ impl Authority {
             // Candidate for eviction — do not delete the view (Dynamo
             // `release_primary` → `inactive.insert` only; allocate is separate).
             // At cap: skip insert so Frequency tiers never silently drop leaves.
-            // Block stays at ref=0 out of inactive until a later 0→正→0, or until
-            // an explicit pressure path (`evict_n` / future allocate) frees a slot.
+            // Skipped block stays at ref=0 out of inactive until a later
+            // 0→正→0 cycle retries insert — `evict_n` freeing a slot does
+            // **not** auto-requeue it.
             if !ns.inactive.has(seq) && ns.inactive.len() < ns.inactive_cap {
                 ns.inactive.insert(seq, block_id);
             }
