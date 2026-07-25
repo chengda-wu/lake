@@ -49,7 +49,8 @@ use crate::tinylfu::FrequencyTracker;
 pub(crate) enum LeafPolicy {
     Fifo(FifoPolicy),
     Tick(TickPolicy),
-    Frequency(FrequencyPolicy),
+    /// Boxed: FrequencyPolicy holds 4× LruCache and dwarfs Fifo/Tick.
+    Frequency(Box<FrequencyPolicy>),
 }
 
 impl LeafPolicy {
@@ -70,11 +71,11 @@ impl LeafPolicy {
         thresholds: [u8; 3],
         frequency_tracker: Arc<dyn FrequencyTracker<u128>>,
     ) -> Result<Self> {
-        Ok(Self::Frequency(FrequencyPolicy::new(
+        Ok(Self::Frequency(Box::new(FrequencyPolicy::new(
             capacity,
             thresholds,
             frequency_tracker,
-        )?))
+        )?)))
     }
 
     /// A slot just became a `Real` node (fresh insert or ghost promotion).

@@ -21,7 +21,8 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// --- 全局 ref 上报(P4.2 合账骨架；完整两级见 architecture) ---
+// --- 全局 ref 上报(P4.2 合账骨架；完整两级见 architecture/kv-cache-pool.md) ---
+// RefKind：wire 预留三类本地子计数；P4.2 控制面尚未分账（见 ReportRef 注释）。
 type RefKind int32
 
 const (
@@ -791,8 +792,8 @@ func (x *RegisterBlocksRequest) GetPrefixHashes() [][]byte {
 type RefDelta struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            *KVBlockID             `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Kind          RefKind                `protobuf:"varint,2,opt,name=kind,proto3,enum=lake.RefKind" json:"kind,omitempty"`
-	Delta         int32                  `protobuf:"varint,3,opt,name=delta,proto3" json:"delta,omitempty"` // +1 / -1(允许多)
+	Kind          RefKind                `protobuf:"varint,2,opt,name=kind,proto3,enum=lake.RefKind" json:"kind,omitempty"` // P4.2 可填但 CP 忽略；后续分账用
+	Delta         int32                  `protobuf:"varint,3,opt,name=delta,proto3" json:"delta,omitempty"`                 // +1 / -1(允许多)
 	NodeId        string                 `protobuf:"bytes,4,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
