@@ -35,7 +35,7 @@ class RoleConfig:
     enable_overlap: bool = True  # 默认开；对齐 SGLang event_loop_overlap
     max_running_reqs: int = 8  # continuous batching 上限（C1）
     # C7：对齐 vLLM Scheduler.token_budget / long_prefill_token_threshold
-    max_num_scheduled_tokens: int = 8192  # 本步总 token 上限
+    max_num_scheduled_tokens: int = 8192  # 本步总 token 上限；必须 >0
     # >0 时 prompt 残差按此切块；0=只受 max_num_scheduled_tokens 约束
     long_prefill_token_threshold: int = 0
     # >0 时 admission：len(prompt)+max_new 不得超过；0=不限制（骨架默认）
@@ -46,6 +46,14 @@ class RoleConfig:
     # C3：mock=P3 可复现递推；tiny_lm=纯 Python 最小因果 LM
     model_backend: str = "mock"  # mock | tiny_lm
     # arena / TP / 指标标签等留 D3
+
+    def __post_init__(self) -> None:
+        if self.max_num_scheduled_tokens <= 0:
+            raise ValueError(
+                f"max_num_scheduled_tokens must be > 0, got {self.max_num_scheduled_tokens}"
+            )
+        if self.max_running_reqs <= 0:
+            raise ValueError(f"max_running_reqs must be > 0, got {self.max_running_reqs}")
 
     @classmethod
     def from_env(cls) -> "RoleConfig":

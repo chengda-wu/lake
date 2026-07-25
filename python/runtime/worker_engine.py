@@ -36,6 +36,10 @@ class WorkerEngine:
     """长期 EngineCore 式进程内核：入队 + 单 step 环。
 
     对齐 vLLM 单 EngineCore：禁止每请求新建 Scheduler / 并行 prepare。
+
+    停机契约：`stop` 只设 flag + sentinel；**由 loop 线程** `_fail_inflight`
+    后退出。调用方 `join`；若超时则只打日志，**不得**再碰 scheduler / inflight
+    （timeout 后勿再 submit，进程应退出）。
     """
 
     def __init__(
@@ -80,7 +84,7 @@ class WorkerEngine:
         return CapacitySignal(
             waiting=self._sched.num_waiting,
             running=self._sched.num_running,
-            inflight_steps=inflight,
+            inflight_reqs=inflight,
             max_running_reqs=self._role.max_running_reqs,
             state=self._life.state,
             role=self._role.role.value,
@@ -88,37 +92,53 @@ class WorkerEngine:
         )
 
     def start(self) -> None:
-        if self._started:
-            return
-        # C10：Boot→Warm→Ready→Serving（权重 pin / 池放置挂点，骨架仅状态）
-        self._life.advance(WorkerState.BOOT)
-        self._life.warm()
-        self._life.ready()
-        self._life.serve()
-        self._started = True
+        with self._lock:
+            if self._started or self._thread.is_alive():
+                return
+            # C10：Boot→Warm→Ready→Serving（权重 pin / 池放置挂点，骨架仅状态）
+            self._life.advance(WorkerState.BOOT)
+            self._life.warm()
+            self._life.ready()
+            self._life.serve()
+            self._started = True
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
-        if not self._started:
-            return
-        self._life.drain()
-        self._stop.set()
-        self._inbound.put(None)
+        """请求停机并等待 loop 自行收尾。
+
+        超时后不清理 scheduler/inflight（避免与仍存活的 step 线程竞态）。
+        """
+        with self._lock:
+            if self._life.state == WorkerState.TERMINATE:
+                return
+            first = not self._stop.is_set()
+            if first:
+                self._life.drain()
+                self._stop.set()
+                self._started = False
+                self._inbound.put(None)
         self._thread.join(timeout=timeout)
-        # 环退出后仍可能有未 drain 的 inbound / 未完成的 inflight（哨兵抢先）
-        self._drain_inbound()
-        self._fail_inflight(RuntimeError("WorkerEngine stopped"))
+        if self._thread.is_alive():
+            LOG.error(
+                "WorkerEngine.stop timed out after %.3fs; step thread still alive. "
+                "Do not submit; process should exit. "
+                "Caller will not clear scheduler/inflight.",
+                timeout,
+            )
+            return
         self._life.advance(WorkerState.TERMINATE)
-        self._started = False
 
     def submit(self, req: Req, hint: Optional[PrefixHint] = None) -> Req:
         """阻塞直到该请求 finished（或引擎故障）。返回完成后的 Host Req。"""
-        if self._stop.is_set() or not self._started:
-            raise RuntimeError("WorkerEngine is not running")
-        if not self._life.accepts_new_requests():
-            raise RuntimeError(f"worker not accepting requests in state={self._life.state.value}")
         item = _Inbound(req=req, hint=hint, done=threading.Event(), error=[], result=[])
-        self._inbound.put(item)
+        with self._lock:
+            if self._stop.is_set() or not self._started:
+                raise RuntimeError("WorkerEngine is not running")
+            if not self._life.accepts_new_requests():
+                raise RuntimeError(
+                    f"worker not accepting requests in state={self._life.state.value}"
+                )
+            self._inbound.put(item)
         item.done.wait()
         if item.error:
             raise item.error[0]
@@ -175,6 +195,19 @@ class WorkerEngine:
                 inn.error.append(exc)
                 inn.done.set()
 
+    def _reject_inbound(self, exc: BaseException) -> None:
+        """停机时丢弃队列中尚未登记的 inbound，避免调用方永久 wait。"""
+        while True:
+            try:
+                item = self._inbound.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                continue
+            if not item.done.is_set():
+                item.error.append(exc)
+                item.done.set()
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             self._drain_inbound()
@@ -198,11 +231,15 @@ class WorkerEngine:
                     self._drain_inbound()
                     time.sleep(min(0.001, self._coalesce_s))
             try:
-                self._sched.run_until_idle(before_schedule=self._drain_inbound)
+                self._sched.run_until_idle(
+                    before_schedule=self._drain_inbound,
+                    should_stop=self._stop.is_set,
+                )
             except Exception as e:  # noqa: BLE001
                 LOG.exception("WorkerEngine step loop failed: %s", e)
                 self._fail_inflight(e)
-        # 正常停机：唤醒仍卡在 done.wait 的调用方
-        self._drain_inbound()
+        # 正常停机：由 loop 自己收尾（调用方 stop 不得再碰 scheduler）
+        stopped = RuntimeError("WorkerEngine stopped")
+        self._reject_inbound(stopped)
         if self._inflight:
-            self._fail_inflight(RuntimeError("WorkerEngine stopped"))
+            self._fail_inflight(stopped)

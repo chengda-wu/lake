@@ -8,6 +8,7 @@ lake：结束 → `pool_iface.on_request_finished`；DP sync 落本层（单卡�
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional, Tuple
@@ -144,19 +145,30 @@ class NodeScheduler:
         self._runner.clear_drafter(req_id)
         return self._reqs.pop(req_id, None)
 
-    def run_until_idle(self, before_schedule: Optional[Callable[[], None]] = None) -> None:
+    def run_until_idle(
+        self,
+        before_schedule: Optional[Callable[[], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """主循环：默认 overlap（对齐 SGLang event_loop_overlap）。
 
         `before_schedule`：每轮 schedule 前回调（C6 WorkerEngine drain 入队，
         使并发 Generate 能在同环内组进 continuous batch）。
+        `should_stop`：为真时尽快退出（停机）；调用方负责唤醒孤儿 inflight。
         """
         if self._role.enable_overlap:
-            self._event_loop_overlap(before_schedule)
+            self._event_loop_overlap(before_schedule, should_stop)
         else:
-            self._event_loop_normal(before_schedule)
+            self._event_loop_normal(before_schedule, should_stop)
 
-    def _event_loop_normal(self, before_schedule: Optional[Callable[[], None]] = None) -> None:
+    def _event_loop_normal(
+        self,
+        before_schedule: Optional[Callable[[], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> None:
         while self.has_work():
+            if should_stop is not None and should_stop():
+                break
             if before_schedule is not None:
                 before_schedule()
             output = self.schedule()
@@ -164,11 +176,19 @@ class NodeScheduler:
                 self._drain_results()
                 if not self._waiting and not self._running:
                     break
+                if should_stop is not None and should_stop():
+                    break
+                # 无可调度但仍有 work（例如误配 budget）时避免忙等
+                time.sleep(0.001)
                 continue
             self._run_batch(output)
             self._pop_and_process()
 
-    def _event_loop_overlap(self, before_schedule: Optional[Callable[[], None]] = None) -> None:
+    def _event_loop_overlap(
+        self,
+        before_schedule: Optional[Callable[[], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> None:
         """
         while True:
           [before_schedule drain]
@@ -178,6 +198,8 @@ class NodeScheduler:
           process 上批（与本批 forward 重叠）
         """
         while True:
+            if should_stop is not None and should_stop():
+                break
             if before_schedule is not None:
                 before_schedule()
             disable = self._should_disable_overlap()
@@ -189,6 +211,10 @@ class NodeScheduler:
                 self._drain_results()
                 if not self.has_work():
                     break
+                if should_stop is not None and should_stop():
+                    break
+                # 无可调度但仍有 work 时避免忙等
+                time.sleep(0.001)
                 continue
 
             self._run_batch(output)
@@ -344,7 +370,11 @@ class NodeScheduler:
         req_modes: Dict[str, ForwardMode] = {}
         computed_at: Dict[str, int] = {}
         spec_tokens: Dict[str, List[int]] = {}
-        budget = max(0, int(self._role.max_num_scheduled_tokens))
+        budget = int(self._role.max_num_scheduled_tokens)
+        if budget <= 0:
+            # RoleConfig 已校验；防御误改 role 后的忙等
+            LOG.error("max_num_scheduled_tokens=%s <= 0; schedule idle", budget)
+            budget = 0
 
         # Pass A：生成相（decode / target_verify）— running 优先占预算
         for rid in list(self._running):

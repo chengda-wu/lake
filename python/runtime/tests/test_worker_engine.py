@@ -117,3 +117,11 @@ def test_role_config_from_env() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_role_config_rejects_non_positive_budget() -> None:
+    try:
+        RoleConfig(max_num_scheduled_tokens=0)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "max_num_scheduled_tokens" in str(e)

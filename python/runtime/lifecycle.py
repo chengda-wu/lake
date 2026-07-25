@@ -29,7 +29,8 @@ class CapacitySignal:
 
     waiting: int
     running: int
-    inflight_steps: int
+    # Engine 侧已 submit、尚未 finished 的请求数（非 in-flight step 数）
+    inflight_reqs: int
     max_running_reqs: int
     state: WorkerState
     role: str
@@ -37,6 +38,7 @@ class CapacitySignal:
 
     @property
     def remaining_slots(self) -> int:
+        """相对 max_running_reqs 的 running 余量（与 inflight_reqs 独立）。"""
         return max(0, self.max_running_reqs - self.running)
 
 
