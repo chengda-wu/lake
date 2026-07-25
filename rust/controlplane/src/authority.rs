@@ -84,7 +84,8 @@ impl Authority {
     }
 
     /// Register durable blocks. `prefix_hashes` must be the full ordered chain;
-    /// `metas` may be a miss suffix (hashes ⊆ prefix_hashes).
+    /// `metas` must be a **contiguous segment** of that chain (miss suffix or
+    /// initial prefix — not an arbitrary subset).
     pub fn register(
         &mut self,
         node_id: &str,
@@ -109,6 +110,7 @@ impl Authority {
             .map(|(i, h)| (h.as_slice(), i))
             .collect();
 
+        let mut positions: Vec<usize> = Vec::with_capacity(metas.len());
         for meta in &metas {
             let Some(id) = meta.id.as_ref() else {
                 continue;
@@ -119,11 +121,24 @@ impl Authority {
                     model_id, id.model_id
                 ));
             }
-            if !index_of.contains_key(id.block_hash.as_slice()) {
+            let Some(&pos) = index_of.get(id.block_hash.as_slice()) else {
                 return Err(format!(
                     "RegisterBlocks: block hash not in prefix_hashes (len={})",
                     id.block_hash.len()
                 ));
+            };
+            positions.push(pos);
+        }
+        if positions.is_empty() {
+            return Err("RegisterBlocks: no KVBlockID".into());
+        }
+        positions.sort_unstable();
+        positions.dedup();
+        for w in positions.windows(2) {
+            if w[1] != w[0] + 1 {
+                return Err(
+                    "RegisterBlocks: blocks must be a contiguous segment of prefix_hashes".into(),
+                );
             }
         }
 
@@ -194,6 +209,11 @@ impl Authority {
                 all_local = false;
                 break;
             };
+            // Wrong-chain registration must not silently hit (same flat, different lineage).
+            if entry.seq_hash != seq {
+                all_local = false;
+                break;
+            }
             // Ensure radix + presence (lazy repair if handle was lost).
             if !ns.handles.contains_key(&seq) {
                 let handle = ns.registry.register_sequence_hash(seq);

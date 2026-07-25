@@ -222,6 +222,28 @@ mod tests {
     }
 
     #[test]
+    fn register_rejects_non_contiguous_subset() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"h0", b"h1", b"h2"]);
+        let err = auth
+            .register("n0", &full, vec![meta("m", b"h0"), meta("m", b"h2")])
+            .unwrap_err();
+        assert!(err.contains("contiguous"));
+    }
+
+    #[test]
+    fn lookup_stops_on_lineage_mismatch() {
+        let mut auth = Authority::default();
+        let chain = prefix(&[b"A", b"B"]);
+        auth.register("n0", &chain, vec![meta("m", b"A"), meta("m", b"B")])
+            .unwrap();
+        // Same flat "B" but as a root → different PositionalLineageHash; must not hit.
+        let (blocks, hit, _) = auth.lookup_prefix("m", &prefix(&[b"B"]), "n0");
+        assert_eq!(hit, 0);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
     fn ref_freeze_and_evict() {
         let mut auth = Authority::default();
         let full = prefix(&[b"x"]);
