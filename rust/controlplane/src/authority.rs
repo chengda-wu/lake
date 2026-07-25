@@ -257,23 +257,30 @@ impl Authority {
         blocks
     }
 
-    /// Apply one ref delta (sum into `global_refs`). Returns error if block unknown.
-    ///
-    /// P4.2: `delta.kind` is intentionally ignored (合账骨架). Per-kind buckets
-    /// and agent `ReportRef` producers land in a later slice.
-    pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
+    /// Validate a ref delta can be applied (block known). Does not mutate.
+    pub fn check_report_ref(&self, delta: &RefDelta) -> Result<(), String> {
         let id = delta
             .id
             .as_ref()
             .ok_or_else(|| "RefDelta missing id".to_string())?;
         let ns = self
-            .namespaces
-            .get_mut(&id.model_id)
+            .ns(&id.model_id)
             .ok_or_else(|| format!("unknown model_id {}", id.model_id))?;
-        let entry = ns
-            .by_flat
-            .get(&id.block_hash)
-            .ok_or_else(|| "RefDelta: unknown block_hash".to_string())?;
+        if !ns.by_flat.contains_key(&id.block_hash) {
+            return Err("RefDelta: unknown block_hash".to_string());
+        }
+        Ok(())
+    }
+
+    /// Apply one ref delta (sum into `global_refs`). Returns error if block unknown.
+    ///
+    /// P4.2: `delta.kind` is intentionally ignored (合账骨架). Per-kind buckets
+    /// and agent `ReportRef` producers land in a later slice.
+    pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
+        self.check_report_ref(delta)?;
+        let id = delta.id.as_ref().expect("checked");
+        let ns = self.namespaces.get_mut(&id.model_id).expect("checked");
+        let entry = ns.by_flat.get(&id.block_hash).expect("checked");
         let seq = entry.seq_hash;
         let block_id = entry.block_id;
         let _kind = delta.kind; // reserved; not booked separately in P4.2
@@ -294,6 +301,20 @@ impl Authority {
         } else if before == 0 && after > 0 {
             // Frozen again — leave inactive index (take if present).
             let _ = ns.inactive.take(seq, block_id);
+        }
+        Ok(())
+    }
+
+    /// Apply a batch atomically: validate all, then apply all.
+    /// On validation failure, state is unchanged (`ok: false` ⇒ safe to retry whole batch).
+    pub fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
+        for (i, d) in deltas.iter().enumerate() {
+            self.check_report_ref(d)
+                .map_err(|e| format!("ReportRef batch[{i}]: {e}"))?;
+        }
+        for d in deltas {
+            self.report_ref(d)
+                .expect("report_ref after successful check_report_ref");
         }
         Ok(())
     }

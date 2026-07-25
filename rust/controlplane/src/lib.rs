@@ -91,15 +91,13 @@ impl ControlPlaneService for ControlPlane {
             deltas.push(delta);
         }
         let mut auth = self.inner.lock().unwrap();
-        for delta in &deltas {
-            if let Err(e) = auth.report_ref(delta) {
-                return Ok(Response::new(Ack { ok: false, err: e }));
-            }
+        match auth.report_refs(&deltas) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+            })),
+            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
         }
-        Ok(Response::new(Ack {
-            ok: true,
-            err: String::new(),
-        }))
     }
 
     async fn request_barrier(
@@ -282,6 +280,47 @@ mod tests {
         assert_eq!(n, 1);
         let (_, hit, _) = auth.lookup_prefix("m", &full, "n0");
         assert_eq!(hit, 0);
+    }
+
+    #[test]
+    fn report_ref_batch_all_or_nothing() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"p"]);
+        auth.register("n0", &full, vec![meta("m", b"p")]).unwrap();
+        let plus = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"p".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        };
+        auth.report_ref(&plus).unwrap();
+        assert_eq!(auth.global_ref("m", b"p"), 1);
+
+        let mut minus = plus.clone();
+        minus.delta = -1;
+        let unknown = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"missing".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: -1,
+            node_id: "n0".into(),
+        };
+        let err = auth.report_refs(&[minus, unknown]).unwrap_err();
+        assert!(err.contains("unknown block_hash") || err.contains("batch"));
+        assert_eq!(
+            auth.global_ref("m", b"p"),
+            1,
+            "failed batch must not apply prefix deltas"
+        );
     }
 
     #[test]
