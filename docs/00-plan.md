@@ -217,7 +217,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 > - **B** Dynamo kvbm-logical → **P4.1** vendor（[PR #21](https://github.com/chengda-wu/lake/pull/21)）；**P4.2** 起 `lake-controlplane` 链依赖 + `BlockRegistry`/`InactiveIndex` 薄驱动（见 #20）  
 > 切片命名用 **P4.1–P4.9**（勿与 GitHub PR 号混淆）；详见 #20 与「代码级复用策略」。
 
-- [x] 内容寻址 block 存储 + 引用计数 + LFU-Aging / 前缀亲和驱逐（复用 B 起步；P4.2：`ReportRef` + 仅 pub `MultiLruBackend`≈LFU-Aging / `LineageBackend`≈前缀亲和；不 pub 纯 Lru/Fifo，见 `rust/vendor/UPSTREAM.md`）
+- [x] 内容寻址 block 存储 + 引用计数 + LFU-Aging / 前缀亲和驱逐（复用 B 起步；P4.2：`ReportRef` + Authority 主路径 `LineageBackend::with_frequency`＝叶子约束≈前缀亲和 + TinyLFU 冷叶≈LFU-Aging；`MultiLruBackend` 仍 pub 对照；不 pub 纯 Lru/Fifo，见 `rust/vendor/UPSTREAM.md`）
 - [x] radix tree 前缀索引（前缀复用查询）（复用 B；P4.2：`RegisterBlocks.prefix_hashes` + `LookupPrefix`）
 - [ ] 分层缓存引擎（RAM/NVMe，对象存储回填）
 - [ ] gRPC 接口 + RDMA 数据平面（先 TCP 后 RDMA）（传输面复用 A）

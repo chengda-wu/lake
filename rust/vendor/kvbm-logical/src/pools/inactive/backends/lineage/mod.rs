@@ -32,7 +32,9 @@
 //! per-node insertion tick, the historical behavior, where a node that
 //! *re-becomes* a leaf returns to its original position. The `Fifo`
 //! variant is O(1) and allocation-free but appends a re-leafed node at the
-//! tail instead; it is opt-in via `with_lineage_backend_eviction`.
+//! tail instead; it is opt-in via `with_lineage_backend_eviction`. The
+//! `Frequency` variant buckets leaves by TinyLFU (same thresholds as
+//! MultiLru) — lake Authority uses [`Self::with_frequency`].
 
 mod eviction;
 
@@ -40,12 +42,15 @@ pub(crate) use eviction::LeafPolicy;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 
+use anyhow::Result;
 use dynamo_tokens::PositionalLineageHash;
 
 use crate::BlockId;
 use crate::blocks::SequenceHash;
 use crate::pools::store::InactiveIndex;
+use crate::tinylfu::FrequencyTracker;
 
 // ---------------------------------------------------------------------------
 // `(position, fragment)` index hasher
@@ -164,6 +169,22 @@ impl LineageBackend {
         Self::with_policy(capacity, LeafPolicy::tick(capacity))
     }
 
+    /// Create pre-sized for `capacity` real blocks with TinyLFU-tiered leaf
+    /// eviction (cold leaves first). Thresholds follow MultiLru rules.
+    ///
+    /// lake P4.2 Authority default: Lineage (prefix / leaf-only) + Frequency
+    /// (LFU-Aging among leaves).
+    pub fn with_frequency(
+        capacity: usize,
+        thresholds: [u8; 3],
+        frequency_tracker: Arc<dyn FrequencyTracker<u128>>,
+    ) -> Result<Self> {
+        Ok(Self::with_policy(
+            capacity,
+            LeafPolicy::frequency(capacity, thresholds, frequency_tracker)?,
+        ))
+    }
+
     /// Create pre-sized for `capacity` real blocks with an explicit leaf
     /// eviction policy. The inactive pool is bounded by the store's
     /// `total_blocks`, so sizing the slab, index, and policy to that bound
@@ -261,7 +282,7 @@ impl LineageBackend {
                     SlotData::Ghost => {
                         self.slots[idx as usize].data = SlotData::Real { block_id, seq_hash };
                         self.count += 1;
-                        self.leaves.on_node_inserted(idx);
+                        self.leaves.on_node_inserted(idx, seq_hash);
                     }
                     SlotData::Real {
                         seq_hash: existing, ..
@@ -300,7 +321,7 @@ impl LineageBackend {
                 });
                 self.index.insert((position, fragment), idx);
                 self.count += 1;
-                self.leaves.on_node_inserted(idx);
+                self.leaves.on_node_inserted(idx, seq_hash);
                 idx
             }
         };

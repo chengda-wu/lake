@@ -1,15 +1,15 @@
 //! 位置视图权威：每 model_id 一个 `BlockRegistry` + 强句柄 + InactiveIndex。
 //!
-//! 参考:Dynamo `BlockRegistry` / `InactiveIndex`+`MultiLruBackend`；
+//! 参考:Dynamo `BlockRegistry` / `InactiveIndex`；驱逐主路径 =
+//! `LineageBackend::with_frequency`（只驱叶子 ≈ 前缀亲和 + TinyLFU 冷叶优先 ≈ LFU-Aging）。
 //! 不用 `BlockManager`/`BlockStore`。EventsManager 不接线。
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use kvbm_logical::registry::BlockRegistrationHandle;
 use kvbm_logical::{
-    BlockId, BlockRegistry, FrequencyTrackingCapacity, InactiveIndex, MultiLruBackend, SequenceHash,
+    BlockId, BlockRegistry, FrequencyTrackingCapacity, InactiveIndex, LineageBackend, SequenceHash,
 };
 
 use crate::hash_chain::lineage_from_prefix;
@@ -17,7 +17,8 @@ use crate::tier::TierL2;
 use lake_proto::lake::*;
 
 const INACTIVE_CAP: usize = 4096;
-const MULTI_LRU_THRESHOLDS: [u8; 3] = [3, 8, 15];
+/// Same threshold shape as `MultiLruBackend` / Frequency LeafPolicy.
+const FREQ_THRESHOLDS: [u8; 3] = [3, 8, 15];
 
 struct Entry {
     seq_hash: SequenceHash,
@@ -43,10 +44,9 @@ impl Namespace {
         let registry = BlockRegistry::builder()
             .frequency_tracker(Arc::clone(&tracker) as _)
             .build();
-        let cap = NonZeroUsize::new(INACTIVE_CAP).expect("INACTIVE_CAP > 0");
         let inactive = Box::new(
-            MultiLruBackend::new_with_thresholds(cap, &MULTI_LRU_THRESHOLDS, tracker)
-                .expect("MultiLru thresholds"),
+            LineageBackend::with_frequency(INACTIVE_CAP, FREQ_THRESHOLDS, tracker)
+                .expect("Lineage+Frequency thresholds"),
         );
         Self {
             registry,

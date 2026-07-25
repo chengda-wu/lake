@@ -2,7 +2,7 @@
 //!
 //! P4.2:Dynamo `BlockRegistry` + `PositionalRadixTree` + `InactiveIndex` 薄驱动。
 //! 参考:`registry/mod.rs::register_sequence_hash` / `match_sequence_hash`；
-//! `pools/store.rs::InactiveIndex` + `MultiLruBackend`。
+//! `InactiveIndex` + `LineageBackend::with_frequency`（叶子 + TinyLFU）。
 //! 关键差异:不用 BlockManager/BlockStore；EventsManager 不接线；
 //! presence 与 Authority 同锁 → 进程内线性一致。
 
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_lru_evicts_colder_first() {
+    fn frequency_evicts_colder_leaf_first() {
         let mut auth = Authority::default();
         let cold = prefix(&[b"cold"]);
         let hot = prefix(&[b"hot"]);
@@ -340,27 +340,41 @@ mod tests {
         assert_eq!(auth.evict_n("m", 1), 1);
         let (_, cold_hit, _) = auth.lookup_prefix("m", &cold, "n0");
         let (_, hot_hit, _) = auth.lookup_prefix("m", &hot, "n0");
-        assert_eq!(cold_hit, 0, "colder block should be MultiLru victim");
-        assert_eq!(
-            hot_hit, 1,
-            "touched hot block should survive first allocate"
-        );
+        assert_eq!(cold_hit, 0, "colder leaf should be Frequency victim");
+        assert_eq!(hot_hit, 1, "touched hot leaf should survive first allocate");
     }
 
     #[test]
-    fn lineage_backend_evicts_leaf_before_parent() {
-        use crate::hash_chain::lineage_from_prefix;
-        use kvbm_logical::{InactiveIndex, LineageBackend};
-
-        let mut idx = LineageBackend::new();
-        let chain = lineage_from_prefix(&[b"parent".to_vec(), b"child".to_vec()]);
-        idx.insert(chain[0], 10);
-        idx.insert(chain[1], 11);
-        let victims = idx.allocate(1);
-        assert_eq!(victims.len(), 1);
-        assert_eq!(
-            victims[0].0, chain[1],
-            "LineageBackend must protect prefix parent until leaf gone"
-        );
+    fn authority_evicts_leaf_before_prefix_parent() {
+        let mut auth = Authority::default();
+        let chain = prefix(&[b"parent", b"child"]);
+        auth.register(
+            "n0",
+            &chain,
+            vec![meta("m", b"parent"), meta("m", b"child")],
+        )
+        .unwrap();
+        for flat in [b"parent".as_slice(), b"child".as_slice()] {
+            let d = RefDelta {
+                id: Some(KvBlockId {
+                    model_id: "m".into(),
+                    block_hash: flat.to_vec(),
+                    pool_kind: PoolKind::Target as i32,
+                    scope: "public".into(),
+                }),
+                kind: RefKind::Request as i32,
+                delta: 1,
+                node_id: "n0".into(),
+            };
+            auth.report_ref(&d).unwrap();
+            let mut d0 = d;
+            d0.delta = -1;
+            auth.report_ref(&d0).unwrap();
+        }
+        assert_eq!(auth.evict_n("m", 1), 1);
+        let (_, parent_only, _) = auth.lookup_prefix("m", &prefix(&[b"parent"]), "n0");
+        assert_eq!(parent_only, 1, "prefix parent must survive first evict");
+        let (_, chain_hit, _) = auth.lookup_prefix("m", &chain, "n0");
+        assert_eq!(chain_hit, 1, "leaf gone → gap after parent");
     }
 }

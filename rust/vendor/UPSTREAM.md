@@ -40,6 +40,8 @@
 | 项 | 上游 | vendor | 说明 |
 |----|------|--------|------|
 | `InactiveIndex` + `MultiLruBackend` + `LineageBackend` | `pub(crate)` | `pub` + crate root re-export | **仅** lake controlplane 所需（见下「为何不 pub Lru/Fifo」） |
+| `LeafPolicy::Frequency` + `LineageBackend::with_frequency` | 注释中的 planned third arm | **已实现** | TinyLFU 分档驱叶子；Authority 主路径 |
+| `on_node_inserted(idx, seq_hash)` | 仅 `idx` | 增 `SequenceHash` | Frequency 需要；Fifo/Tick 忽略 |
 | `mark_present` / `mark_absent` | `pub(crate)` | `pub` | 无 BlockStore 时由 CP 标 presence |
 | `LogicalLayoutHandle` | `G1..G4` | `L0..L3` | lake 统一编址；vendor 内原无引用 |
 | `EventsManager` | 可选挂 registry | **仍保留模块**；lake **不接线** | 物理删除字段留后续小 PR |
@@ -47,16 +49,25 @@
 
 其余 `src/` 业务逻辑与上游 pin 一致（除上表）。
 
+#### Authority 驱逐主路径（组合，非互斥二选一）
+
+上游 `InactiveBackendConfig` 里 MultiLru **与** Lineage 互斥（单槽 `Box<dyn InactiveIndex>`）。lake 要 `ref>0` 冻结 + LFU-Aging + 前缀亲和，故走上游预留扩展点：
+
+- **主路径**：`LineageBackend::with_frequency` = 只驱叶子（≈前缀亲和强形式）+ `LeafPolicy::Frequency`（TinyLFU 冷叶优先 ≈ LFU-Aging）
+- **`MultiLruBackend`**：仍 **pub**，作对照/单测；Authority **不再单独挂**它
+- 加权软亲和（非叶子也可驱但权重极高）defer；P4.2 用结构约束近似
+
 #### 为何不 pub `LruBackend` / `FifoReusePolicy` / `HashMapBackend`
 
 lake 冷热策略已定（见 `docs/architecture/kv-cache-pool.md`）：`ref>0` 冻结 + **LFU-Aging** + **前缀亲和**。
 
 | vendor backend | 语义 | lake P4.2 |
 |----------------|------|-----------|
-| `MultiLruBackend` | TinyLFU 分档 + 档内 LRU ≈ LFU-Aging | **pub**，主路径 |
-| `LineageBackend` | 只从叶子驱逐 ≈ 前缀亲和 | **pub**，前缀保护 |
-| `LruBackend` | 纯 LRU | 保持 `pub(crate)`——被 MultiLru 覆盖，不单独做策略 |
-| `FifoReusePolicy` / `HashMapBackend` | FIFO + HashMap 槽位复用 | 保持 `pub(crate)`——绑 `BlockStore` 字节池；lake 不用 BlockStore，薄驱动只吃 `(seq, block_id)` |
+| `LineageBackend` + `Frequency` | 叶子约束 + TinyLFU 分档 | **主路径**（`with_frequency`） |
+| `MultiLruBackend` | TinyLFU 分档 + 档内 LRU（无树约束） | **pub**，对照；非 Authority 默认 |
+| `LineageBackend` + Tick/Fifo | 只驱叶子 + 简单序 | BlockManager 默认仍 Tick |
+| `LruBackend` | 纯 LRU | 保持 `pub(crate)` |
+| `FifoReusePolicy` / `HashMapBackend` | FIFO + HashMap 槽位复用 | 保持 `pub(crate)`——绑 `BlockStore`；lake 薄驱动不用 |
 
 不是 LRU/FIFO「没用」，而是当前策略不需要它们当一等公民；crate 内仍供 Dynamo `BlockManager` 使用。以后若另开策略再按需提 `pub`。连带少改动，也避开 `InactiveBlock` 等经 public API 泄漏触发的 `private_interfaces`（CI `-D warnings`）。
 
