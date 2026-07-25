@@ -203,7 +203,9 @@ impl Authority {
             let pos = *index_of.get(flat.as_slice()).expect("checked");
             let seq = lineage[pos];
 
-            if meta.locations.is_empty() {
+            // Default L2 only when caller omitted locations **and** is not L3-only.
+            // PutEnd must pass settle-accurate locations / l3_present (durable-first).
+            if meta.locations.is_empty() && !meta.l3_present {
                 meta.locations.push(Location {
                     tier: Tier::L2 as i32,
                     node_id: node_id.to_string(),
@@ -213,7 +215,15 @@ impl Authority {
             }
 
             let handle = ns.registry.register_sequence_hash(seq);
-            handle.mark_present::<TierL2>();
+            for loc in &meta.locations {
+                if loc.tier == Tier::L0 as i32 {
+                    handle.mark_present::<TierL0>();
+                } else if loc.tier == Tier::L1 as i32 {
+                    handle.mark_present::<TierL1>();
+                } else if loc.tier == Tier::L2 as i32 {
+                    handle.mark_present::<TierL2>();
+                }
+            }
             ns.handles.insert(seq, handle);
 
             let block_id = if let Some(prev) = ns.by_flat.get(&flat) {

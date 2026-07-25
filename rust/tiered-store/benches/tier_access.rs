@@ -14,7 +14,8 @@ fn bench_put_and_promote(c: &mut Criterion) {
             });
             for i in 0..64u32 {
                 let h = i.to_le_bytes();
-                e.put_durable(black_box(&h), black_box(b"0123456789abcdef"), false);
+                e.put_durable(black_box(&h), black_box(b"0123456789abcdef"), false)
+                    .unwrap();
                 e.promote_to_l0(black_box(&h)).unwrap();
             }
         })
@@ -25,7 +26,7 @@ fn bench_probe_mix(c: &mut Criterion) {
     let mut e = LocalTierEngine::with_caps(TierCaps::default());
     for i in 0..32u32 {
         let h = i.to_le_bytes();
-        e.put_durable(&h, b"x", true);
+        e.put_durable(&h, b"x", true).unwrap();
         if i % 2 == 0 {
             e.promote_to_l0(&h).unwrap();
         }

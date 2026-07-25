@@ -532,10 +532,12 @@ mod tests {
         assert_eq!(cand_hit, 1, "peer must not be pressure-evicted mid-batch");
     }
 
-    /// PutEnd invariant: WRITEBACK holds freeze until barrier release.
-    /// Ref: consistency.md §3 writeback ref; SGLang `_evict_write_back`.
+    /// WRITEBACK ±1 on CP `global_refs` freezes eviction (P4.2 skeleton ignores
+    /// `RefKind`; agent-local writeback sub-counter still future work).
+    /// `RequestBarrier` only records completion — unfreeze is WRITEBACK −1.
+    /// Ref: consistency.md §3; SGLang `_evict_write_back`.
     #[test]
-    fn writeback_ref_blocks_evict_until_barrier() {
+    fn writeback_ref_blocks_evict_until_cleared() {
         let mut auth = Authority::default();
         let full = prefix(&[b"wb0"]);
         auth.register("n0", &full, vec![meta("m", b"wb0")]).unwrap();
@@ -557,6 +559,7 @@ mod tests {
         let mut minus = plus.clone();
         minus.delta = -1;
         auth.report_ref(&minus).unwrap();
+        // Barrier is a ledger; eviction unlock is the WRITEBACK −1 above.
         auth.complete_barrier("req-wb", "n0").unwrap();
         assert!(auth.barrier_completed("req-wb"));
         // 0→正→0 entered inactive; now evictable.

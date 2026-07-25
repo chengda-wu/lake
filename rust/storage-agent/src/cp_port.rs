@@ -1,9 +1,12 @@
 //! Agent → ControlPlane 端口（P4.3）。
 //!
 //! 进程内 [`AuthorityPort`] 供单测 / 同进程联调；真 tonic 客户端可另实现本 trait。
+//! `TierPipeline::tick` 返回的 [`lake_tiered_store::LocationEvent`] 经
+//! [`apply_location_events`] 刷到 CP（pipeline 本身不持 CP 句柄）。
 
 use lake_controlplane::Authority;
 use lake_proto::lake::*;
+use lake_tiered_store::{LocalTier, LocationEvent};
 
 /// Subset of ControlPlane RPCs used by PutEnd / tier publish.
 pub trait ControlPlanePort {
@@ -55,4 +58,30 @@ impl ControlPlanePort for AuthorityPort<'_> {
     fn set_l3_present(&mut self, model_id: &str, flat: &[u8], present: bool) -> Result<(), String> {
         self.auth.set_l3_present(model_id, flat, present)
     }
+}
+
+/// Apply pipeline location hints to the controlplane view.
+pub fn apply_location_events<P: ControlPlanePort>(
+    cp: &mut P,
+    model_id: &str,
+    node_id: &str,
+    events: &[LocationEvent],
+) -> Result<(), String> {
+    for ev in events {
+        match ev {
+            LocationEvent::Present { hash, tier } => match tier {
+                LocalTier::L0 => cp.publish_location(model_id, hash, Tier::L0, node_id, true)?,
+                LocalTier::L1 => cp.publish_location(model_id, hash, Tier::L1, node_id, true)?,
+                LocalTier::L2 => cp.publish_location(model_id, hash, Tier::L2, node_id, true)?,
+                LocalTier::L3 => cp.set_l3_present(model_id, hash, true)?,
+            },
+            LocationEvent::Absent { hash, tier } => match tier {
+                LocalTier::L0 => cp.publish_location(model_id, hash, Tier::L0, node_id, false)?,
+                LocalTier::L1 => cp.publish_location(model_id, hash, Tier::L1, node_id, false)?,
+                LocalTier::L2 => cp.publish_location(model_id, hash, Tier::L2, node_id, false)?,
+                LocalTier::L3 => cp.set_l3_present(model_id, hash, false)?,
+            },
+        }
+    }
+    Ok(())
 }

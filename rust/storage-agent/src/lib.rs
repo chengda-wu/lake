@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub use cp_port::{AuthorityPort, ControlPlanePort};
+pub use cp_port::{apply_location_events, AuthorityPort, ControlPlanePort};
 pub use lake_proto::lake::*;
 pub use putend::{PendingBlock, PutEndSession};
 

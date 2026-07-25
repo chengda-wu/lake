@@ -263,7 +263,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 ## P7 — 性能建模与验证
 
 - [ ] 成本模型：KV 传输带宽 vs prefill/decode 计算时间
-- [x] 分层缓存的命中率/成本曲线（P4.3：`HitStats` 单测 + `benches/tier_access` criterion；真 workload 曲线 defer）
+- [ ] 分层缓存的命中率/成本曲线（P4.3 仅有 `HitStats` 计数骨架 + criterion micro-bench；真 workload 曲线本项）
 - [ ] 弹性冷启动时延分解
 - [ ] 回填到 `docs/` 与 SLO，修正非目标与设计假设
 

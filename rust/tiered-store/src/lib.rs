@@ -4,6 +4,7 @@
 //! SGLang `hiradix_cache.py::_evict_write_back`；Mooncake PutEnd。
 //! 关键差异：无 `BlockStore`；位置视图权威在 controlplane；本 crate 持不透明字节。
 //! L2/L3 用进程内 HashMap 站位真 NVMe/对象存储（P4 单测判据；真介质 defer P5）。
+//! Pipeline 不直接改 CP：`tick` 产出 [`LocationEvent`]，agent `apply_location_events` 刷视图。
 
 mod bandwidth;
 mod engine;
@@ -12,7 +13,7 @@ mod stats;
 
 pub use bandwidth::BandwidthPool;
 pub use engine::{LocalTier, LocalTierEngine, TierCaps};
-pub use pipeline::{PipelineAction, TierPipeline};
+pub use pipeline::{LocationEvent, PipelineAction, TierPipeline};
 pub use stats::{AccessKind, HitStats, TierCost};
 
 pub use lake_proto::lake::*;

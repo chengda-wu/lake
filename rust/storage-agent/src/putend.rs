@@ -1,10 +1,10 @@
 //! PutEnd 两阶段 + writeback 会话（P4.3）。
 //!
-//! 时序（`kv-cache-pool.md` / `consistency.md` §3）：
+//! 时序（#20 / Mooncake PutEnd；对齐 `consistency.md`「注册即有后盾」）：
 //! 1. PutStart 本地记账
-//! 2. RegisterBlocks + `ReportRef(WRITEBACK,+1)`
-//! 3. `LocalTierEngine::put_durable`（L2，可选 L3）
-//! 4. Barrier：WRITEBACK-1 → CP `RequestBarrier`
+//! 2. `LocalTierEngine::put_durable`（先落稳 L2|L3）
+//! 3. RegisterBlocks（按真实 settle tier 标 L2 / `l3_present`）+ `ReportRef(WRITEBACK,+1)`
+//! 4. Barrier：WRITEBACK-1 → CP `RequestBarrier`（ledger；解冻靠 WRITEBACK−1）
 //!
 //! 经 [`ControlPlanePort`] 接线（进程内或未来 tonic）。
 
@@ -17,6 +17,7 @@ use crate::cp_port::ControlPlanePort;
 pub struct PendingBlock {
     pub id: KvBlockId,
     pub bytes: Vec<u8>,
+    /// True iff engine reports settled (L2|L3) after flush.
     pub durable: bool,
 }
 
@@ -60,21 +61,29 @@ impl PutEndSession {
         });
     }
 
-    pub fn register_request(&self) -> RegisterBlocksRequest {
+    /// Build Register from **engine** settle state (call after [`flush_durable`]).
+    pub fn register_request(&self, store: &LocalTierEngine) -> RegisterBlocksRequest {
         let blocks = self
             .blocks
             .iter()
-            .map(|b| BlockMeta {
-                id: Some(b.id.clone()),
-                block_kind: BlockKind::TType as i32,
-                locations: vec![Location {
-                    tier: Tier::L2 as i32,
-                    node_id: self.node_id.clone(),
-                    segment_id: 1,
-                    offset: 0,
-                }],
-                l3_present: false,
-                ref_count: 0,
+            .map(|b| {
+                let h = b.id.block_hash.as_slice();
+                let mut locations = Vec::new();
+                if store.is_l2_durable(h) {
+                    locations.push(Location {
+                        tier: Tier::L2 as i32,
+                        node_id: self.node_id.clone(),
+                        segment_id: 1,
+                        offset: 0,
+                    });
+                }
+                BlockMeta {
+                    id: Some(b.id.clone()),
+                    block_kind: BlockKind::TType as i32,
+                    locations,
+                    l3_present: store.l3_present(h),
+                    ref_count: 0,
+                }
             })
             .collect();
         RegisterBlocksRequest {
@@ -96,11 +105,26 @@ impl PutEndSession {
             .collect()
     }
 
-    pub fn flush_durable(&mut self, store: &mut LocalTierEngine, also_l3: bool) {
+    /// Flush bytes; returns hashes demoted L2→L3 under cap (for CP view sync).
+    pub fn flush_durable(
+        &mut self,
+        store: &mut LocalTierEngine,
+        also_l3: bool,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let mut demoted_all = Vec::new();
         for b in &mut self.blocks {
-            store.put_durable(&b.id.block_hash, &b.bytes, also_l3);
-            b.durable = true;
+            let (_tier, demoted) = store.put_durable(&b.id.block_hash, &b.bytes, also_l3)?;
+            demoted_all.extend(demoted);
+            // Durable = real settle, not a sticky flag.
+            b.durable = store.is_settled(&b.id.block_hash);
+            if !b.durable {
+                return Err(format!(
+                    "flush: block {:?} not settled on L2|L3",
+                    b.id.block_hash
+                ));
+            }
         }
+        Ok(demoted_all)
     }
 
     pub fn all_durable(&self) -> bool {
@@ -108,27 +132,44 @@ impl PutEndSession {
     }
 
     /// Full PutEnd → barrier against a [`ControlPlanePort`].
+    ///
+    /// Order: durable first → Register (COMPLETE-equivalent) → WRITEBACK freeze
+    /// until barrier ledger + WRITEBACK−1.
     pub fn commit_through<P: ControlPlanePort>(
         &mut self,
         store: &mut LocalTierEngine,
         cp: &mut P,
         also_l3: bool,
     ) -> Result<(), String> {
-        let reg = self.register_request();
-        cp.register_blocks(reg)?;
-        cp.report_refs(&self.writeback_deltas(1))?;
-        self.writeback_open = true;
+        let demoted = self.flush_durable(store, also_l3)?;
+        if !self.all_durable() {
+            return Err("commit: not settled on L2|L3".into());
+        }
 
-        self.flush_durable(store, also_l3);
-        for b in &self.blocks {
-            if also_l3 {
-                cp.set_l3_present(&self.model_id, &b.id.block_hash, true)?;
+        // Cap demotions of *prior* blocks: drop stale L2, mark L3 on the view.
+        for h in &demoted {
+            if !self.blocks.iter().any(|b| b.id.block_hash == *h) {
+                let _ = cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false);
+                let _ = cp.set_l3_present(&self.model_id, h, true);
             }
         }
 
-        if !self.all_durable() {
-            return Err("commit: L2 not durable".into());
+        let reg = self.register_request(store);
+        // Sync presence from register metas (L2 marker only if L2 location present).
+        cp.register_blocks(reg)?;
+        for b in &self.blocks {
+            let h = b.id.block_hash.as_slice();
+            if store.l3_present(h) {
+                cp.set_l3_present(&self.model_id, h, true)?;
+            }
+            // Self demoted under cap during flush: register already omitted L2.
+            if !store.is_l2_durable(h) {
+                let _ = cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false);
+            }
         }
+
+        cp.report_refs(&self.writeback_deltas(1))?;
+        self.writeback_open = true;
         cp.report_refs(&self.writeback_deltas(-1))?;
         self.writeback_open = false;
         cp.request_barrier(RequestBarrierRequest {
@@ -197,5 +238,48 @@ mod tests {
         assert!(auth.has_l0_on("m", b"p", "n0"));
         let (_, _, all_local) = auth.lookup_prefix("m", &[b"p".to_vec()], "n0");
         assert!(all_local);
+    }
+
+    #[test]
+    fn commit_flush_before_register_l2_cap_syncs_l3() {
+        let mut store = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 1,
+        });
+        let mut auth = Authority::default();
+        // First block fills L2.
+        let mut s0 = PutEndSession::new("r-a", "n0", "m");
+        s0.put_start(b"x".to_vec(), b"X".to_vec());
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            s0.commit_through(&mut store, &mut port, false).unwrap();
+        }
+        assert!(store.is_l2_durable(b"x"));
+
+        // Second PutEnd demotes x → L3; register must not claim L2 for x.
+        let mut s1 = PutEndSession::new("r-b", "n0", "m");
+        s1.put_start(b"y".to_vec(), b"Y".to_vec());
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            s1.commit_through(&mut store, &mut port, false).unwrap();
+        }
+        assert!(store.is_l2_durable(b"y"));
+        assert!(!store.is_l2_durable(b"x"));
+        assert!(store.l3_present(b"x"));
+
+        // View for x: no L2 location, l3_present.
+        let entry_l3 = auth
+            .lookup_prefix("m", &[b"x".to_vec()], "n0")
+            .0
+            .into_iter()
+            .next()
+            .and_then(|r| r.meta);
+        let meta_x = entry_l3.expect("x still in radix");
+        assert!(meta_x.l3_present);
+        assert!(!meta_x
+            .locations
+            .iter()
+            .any(|l| l.tier == Tier::L2 as i32 && l.node_id == "n0"));
     }
 }
