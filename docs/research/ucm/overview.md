@@ -6,7 +6,7 @@
 
 ## 一句话定位
 
-UCM（华为 ModelEngine）是挂在 **vLLM / vLLM-Ascend / SGLang / MindIE** 上的**统一缓存框架**：用可插拔 **KVStore** 持久化/复用 KV（前缀缓存），并用 **UcmSparse*** 插件稀疏注意力与卸载；PD 分离叙事明确走「**统一存储池中转**」而非 P→D 直传。
+UCM（华为 ModelEngine）是挂在 **vLLM / vLLM-Ascend / SGLang / MindIE** 上的**统一缓存框架**：用可插拔 **KVStore** 持久化/复用 KV（前缀缓存），并用 **UcmSparse*** 插件稀疏注意力与卸载。PD 文档同时列出 HBM 直传、经 DRAM 中介与经统一存储池三种拓扑——**统一池是首选而非唯一**；产品叙事主推池中转以换解耦与无状态。
 
 ## 与本系统的关系
 
@@ -25,7 +25,7 @@ UCM（华为 ModelEngine）是挂在 **vLLM / vLLM-Ascend / SGLang / MindIE** �
 
 - **KVCache-centric**：冗余计算用检索/命中替代；PC 与稀疏共用「block id + offset」寻址思路。
 - **算法与存储解耦**：`UcmSparse*` 不绑死某一种后端；`UcmKVStoreBaseV1` 可换 NFS/Mooncake/…。
-- **PD 选第三种传输**：P 写池、D 读池（复用 Prefix Cache），换解耦与异构部署，而非 HBM 直传。
+- **PD 首选经池传输**：在直传 / DRAM 中介 / 统一池三者中主推 P 写池、D 读池（复用 Prefix Cache），换解耦与异构部署；另两种拓扑仍在文档中保留。
 - **框架旁路**：以 patch/connector 切入推理引擎，而非自研完整 serving 引擎。
 
 ## 架构
@@ -38,7 +38,7 @@ vLLM / Ascend / SGLang / MindIE
   │         │                                └─ DS3FS / pipeline / …
   └─ UcmSparseBase (可选) ── hooks ──► SparseKV 分配 / load·dump
               │
-              └─ PD：P dump → 统一池 → D lookup/load（文档主推）
+              └─ PD：直传 / DRAM 中介 / 统一池（文档主推后者：P dump → 池 → D load）
 ```
 
 ## 技术栈

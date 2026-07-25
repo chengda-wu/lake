@@ -55,7 +55,7 @@ Worker 侧：`execute_*` / `attention_*` hooks，负责检索与 load/dump 稀�
 2. 经 DRAM 间接  
 3. **经统一存储池（复用 Prefix Cache）** ← UCM 主推  
 
-论据：P/D 解耦、异常简单、实例无状态、异构（新旧卡/精度）更易。示例代理：`ucm/pd/toy_proxy_server.py`。
+**统一池是首选而非唯一拓扑**——直传与 DRAM 中介仍在文档中列出；勿误读为 UCM 只支持经池 PD。论据（主推池时）：P/D 解耦、异常简单、实例无状态、异构（新旧卡/精度）更易。示例代理：`ucm/pd/toy_proxy_server.py`。
 
 **对 lake**：与「KV 归池、计算可弃」同向。差异：
 
