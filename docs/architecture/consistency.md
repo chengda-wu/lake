@@ -50,7 +50,7 @@ ref 是"正确性地基"——决定 step 期间冻结、可驱逐性、GC 真�
 
 ### 为什么驱逐不是问题
 
-L0/L1 是**副本**（见 [`storage-layer.md`](storage-layer.md) "层间副本 vs 移动"）：驱逐 L0 只丢自己这份缓存，别的节点读自己的副本不受影响，L2/L3 还在可回填。故不需要"谁还在用"来阻止驱逐——**全局 ref 只用于 tier/GC，不用于阻止 L0 副本驱逐**。这是与"每层强一致计数"的根本差异：副本可随便丢，权威不可丢。唯一例外是上面 §3 的 **writeback ref**：它是本地 ref（非全局 ref），且只在"L2 未 durable"时拦驱逐——拦的正是此处"L2/L3 还在可回填"前提尚未成立的那一刻；L2 一旦 durable，驱逐即恢复自由。故 writeback ref 与"全局 ref 不阻驱逐"不冲突。
+L0/L1 是**副本**（见 [`storage-layer.md`](storage-layer.md) "层间副本 vs 移动"）：驱逐 L0 只丢自己这份缓存，别的节点读自己的副本不受影响，L2/L3 还在可回填。故不需要"谁还在用"来阻止驱逐——**全局 ref 只用于 tier/GC，不用于阻止 L0 副本驱逐**。这是与"每层强一致计数"的根本差异：副本可随便丢，权威不可丢。§3 的 **writeback ref**（durable-first 下）拦的是 **register→barrier 窗口**内的驱逐，不是"L2 未落稳"（落稳已在 register 前完成）；与"全局 ref 不阻 L0 副本驱逐"不冲突。
 
 > **参考对照**：Mooncake per-object lease（TTL 5s，lease 期内免 Remove/Evict）是其"引用保护"机制，过期即失效（`ObjectMetadata::GrantLease`/`IsLeaseExpired`）。lake 用显式两级 ref 替代 lease：本地 ref 精确到请求级而非定时，无需续约、无过期误删风险；全局 ref 用于 GC 而非阻塞驱逐。
 

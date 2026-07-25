@@ -2,11 +2,10 @@
 //!
 //! **COMPLETE 语义**（Mooncake `PutEnd` → `mark_complete`；#20；`storage-layer.md`）：
 //! 1. PutStart 本地记账
-//! 2. `put_durable` **只落 L2**（F4；不写 L1、不写 L3）
-//! 3. `RegisterBlocks`（按真实 settle：通常 L2 location）= COMPLETE
-//! 4. 本地 `pin`（≈ SGLang `lock_ref`）+ CP `ReportRef(WRITEBACK,+1)` 冻 radix 驱逐
-//! 5. `RequestBarrier`（barrier 完成 = flush+ack 落定）
-//! 6. `ReportRef(WRITEBACK,-1)` 解冻（barrier 之后才解冻）
+//! 2. `put_durable` **只落 L2**（F4；不写 L1、不写 L3；**flush 在 pin 之前**以便 L2 cap XOR）
+//! 3. 本地 `pin`（≈ SGLang `lock_ref`）
+//! 4. `RegisterBlocks`（按真实 settle：L2 或 L3-only）= COMPLETE
+//! 5. CP `ReportRef(WRITEBACK,+1)` → `RequestBarrier` → `WRITEBACK,-1`（解冻晚于 barrier）
 //!
 //! L3：仅 L2→L3 demote / L2 cap 压力（稳态 XOR），不在 PutEnd 双写。
 
@@ -131,49 +130,85 @@ impl PutEndSession {
         store: &mut LocalTierEngine,
         cp: &mut P,
     ) -> Result<(), String> {
+        // Flush **before** pin: pinning blocks first would freeze them against
+        // L2→L3 cap demote (`ensure_l2_cap` skips pinned), leaving L2 over cap.
+        let demoted = self.flush_durable(store)?;
+        if !self.all_durable() {
+            return Err("commit: not settled on L2|L3".into());
+        }
+
+        // Pin after durable (≈ lock_ref for register→barrier window).
         for b in &self.blocks {
             store.pin(&b.id.block_hash);
         }
-
-        let demoted = self.flush_durable(store)?;
-        if !self.all_durable() {
-            for b in &self.blocks {
+        let unpin_all = |store: &mut LocalTierEngine, blocks: &[PendingBlock]| {
+            for b in blocks {
                 let _ = store.unpin(&b.id.block_hash);
             }
-            return Err("commit: not settled on L2|L3".into());
-        }
+        };
 
         // Cap demotions of prior blocks: L2→L3 XOR sync on CP.
         for h in &demoted {
             if !self.blocks.iter().any(|b| b.id.block_hash == *h) {
-                cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)?;
-                cp.set_l3_present(&self.model_id, h, true)?;
+                if let Err(e) =
+                    cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)
+                {
+                    unpin_all(store, &self.blocks);
+                    return Err(e);
+                }
+                if let Err(e) = cp.set_l3_present(&self.model_id, h, true) {
+                    unpin_all(store, &self.blocks);
+                    return Err(e);
+                }
             }
         }
 
         let reg = self.register_request(store);
-        cp.register_blocks(reg)?;
+        if let Err(e) = cp.register_blocks(reg) {
+            unpin_all(store, &self.blocks);
+            return Err(e);
+        }
         for b in &self.blocks {
             let h = b.id.block_hash.as_slice();
             // Self may have been cap-demoted to L3-only during flush.
             if store.l3_present(h) {
-                cp.set_l3_present(&self.model_id, h, true)?;
+                if let Err(e) = cp.set_l3_present(&self.model_id, h, true) {
+                    unpin_all(store, &self.blocks);
+                    return Err(e);
+                }
             }
             if !store.is_l2_durable(h) {
-                cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)?;
+                if let Err(e) =
+                    cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)
+                {
+                    unpin_all(store, &self.blocks);
+                    return Err(e);
+                }
             }
         }
 
         // WRITEBACK +1 冻 radix 驱逐：register 后、barrier 前期间 block 不可被驱逐。
         // -1 延迟到 barrier 之后——barrier 完成才解冻，语义对齐 SGLang `lock_ref`
         // （flush→ack 整段持有）。骨架单进程无并发，此窗口为异步场景占位。
-        cp.report_refs(&self.writeback_deltas(1))?;
+        if let Err(e) = cp.report_refs(&self.writeback_deltas(1)) {
+            unpin_all(store, &self.blocks);
+            return Err(e);
+        }
         self.writeback_open = true;
-        cp.request_barrier(RequestBarrierRequest {
+        if let Err(e) = cp.request_barrier(RequestBarrierRequest {
             request_id: self.request_id.clone(),
             node_id: self.node_id.clone(),
-        })?;
-        cp.report_refs(&self.writeback_deltas(-1))?;
+        }) {
+            let _ = cp.report_refs(&self.writeback_deltas(-1));
+            self.writeback_open = false;
+            unpin_all(store, &self.blocks);
+            return Err(e);
+        }
+        if let Err(e) = cp.report_refs(&self.writeback_deltas(-1)) {
+            self.writeback_open = false;
+            unpin_all(store, &self.blocks);
+            return Err(e);
+        }
         self.writeback_open = false;
 
         for b in &self.blocks {
@@ -284,10 +319,10 @@ mod tests {
             .any(|l| l.tier == Tier::L2 as i32 && l.node_id == "n0"));
     }
 
-    /// durable-first 不变量：commit 成功 ⇒ radix 已发布 block 恒有 L2 后盾，无悬空。
-    /// (plan PR3 验证项；Ref: consistency.md §2/§8.3, Mooncake PROCESSING→COMPLETE)
+    /// durable-first 不变量：commit 成功 ⇒ radix 已发布 block 已 settle（L2|L3），无悬空。
+    /// (Ref: consistency.md §2/§8.3, Mooncake PROCESSING→COMPLETE；cap 下可为 L3-only)
     #[test]
-    fn commit_published_block_always_has_l2_backing() {
+    fn commit_published_block_always_settled() {
         let mut store = LocalTierEngine::new();
         let mut auth = Authority::default();
         let mut sess = PutEndSession::new("r-df", "n0", "m");
@@ -302,11 +337,34 @@ mod tests {
             .next()
             .and_then(|r| r.meta)
             .expect("block registered");
+        let has_l2 = meta.locations.iter().any(|l| l.tier == Tier::L2 as i32);
         assert!(
-            meta.locations.iter().any(|l| l.tier == Tier::L2 as i32),
-            "durable-first: published block must have L2 backing, got {:?}",
-            meta.locations
+            has_l2 || meta.l3_present,
+            "durable-first: published block must be settled L2|L3, got {:?}",
+            meta
         );
+        assert!(store.is_settled(b"h0"));
+    }
+
+    /// Multi-block PutEnd under L2 cap: flush-before-pin so XOR demote can run.
+    #[test]
+    fn multi_block_putend_l2_cap_xor_without_pin_block() {
+        let mut store = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 1,
+        });
+        let mut auth = Authority::default();
+        let mut sess = PutEndSession::new("r-mb", "n0", "m");
+        sess.put_start(b"x".to_vec(), b"X".to_vec());
+        sess.put_start(b"y".to_vec(), b"Y".to_vec());
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            sess.commit_through(&mut store, &mut port).unwrap();
+        }
+        assert!(!store.is_l2_durable(b"x") && store.l3_present(b"x"));
+        assert!(store.is_l2_durable(b"y") && !store.l3_present(b"y"));
+        assert_eq!(store.l2_len(), 1);
     }
 
     /// M1(B) 时序不变量：WRITEBACK −1 解冻必须发生在 RequestBarrier 之后。

@@ -191,7 +191,15 @@ impl LocalTierEngine {
     ) -> Result<(LocalTier, TierSideEffects), String> {
         self.l2.insert(h.to_vec(), bytes.to_vec());
         Self::touch(&mut self.l2_order, h);
-        let l2_demoted_to_l3 = self.ensure_l2_cap();
+        let l2_demoted_to_l3 = match self.ensure_l2_cap() {
+            Ok(d) => d,
+            Err(e) => {
+                // Roll back this insert — do not leave L2 permanently over cap.
+                self.l2.remove(h);
+                self.l2_order.retain(|x| x.as_slice() != h);
+                return Err(e);
+            }
+        };
         let effects = TierSideEffects {
             l0_demoted: Vec::new(),
             l2_demoted_to_l3,
@@ -206,16 +214,20 @@ impl LocalTierEngine {
         }
     }
 
-    fn ensure_l2_cap(&mut self) -> Vec<Vec<u8>> {
+    /// Coldest-first LRU demote L2→L3. Errors if still over cap (all victims pinned).
+    fn ensure_l2_cap(&mut self) -> Result<Vec<Vec<u8>>, String> {
         let mut demoted = Vec::new();
         let cap = self.caps.l2;
         if cap == 0 {
-            return demoted;
+            return Ok(demoted);
         }
         let mut skipped = 0usize;
         while self.l2.len() > cap {
             if skipped >= self.l2.len() {
-                break; // all remaining pinned / stuck
+                return Err(format!(
+                    "l2 over cap ({}>{cap}): all victims pinned — unpin before put",
+                    self.l2.len()
+                ));
             }
             let Some(victim) = self.l2_order.pop_front() else {
                 break;
@@ -234,7 +246,7 @@ impl LocalTierEngine {
                 demoted.push(victim);
             }
         }
-        demoted
+        Ok(demoted)
     }
 
     pub fn probe(&mut self, h: &[u8]) -> AccessKind {
@@ -291,7 +303,14 @@ impl LocalTierEngine {
         if !self.l2.contains_key(h) && self.l3.contains_key(h) {
             self.l2.insert(h.to_vec(), bytes.clone());
             Self::touch(&mut self.l2_order, h);
-            effects.l2_demoted_to_l3 = self.ensure_l2_cap();
+            match self.ensure_l2_cap() {
+                Ok(d) => effects.l2_demoted_to_l3 = d,
+                Err(e) => {
+                    self.l2.remove(h);
+                    self.l2_order.retain(|x| x.as_slice() != h);
+                    return Err(e);
+                }
+            }
             if !self.is_settled(h) {
                 return Err("promote: lost durable backing under L2 cap".into());
             }
@@ -482,5 +501,41 @@ mod tests {
         assert_eq!(demoted.l2_demoted_to_l3, vec![b"x".to_vec()]);
         assert!(!e.is_l2_durable(b"x") && e.l3_present(b"x"));
         assert!(e.is_l2_durable(b"y") && !e.l3_present(b"y"));
+    }
+
+    #[test]
+    fn pinned_cold_skipped_new_write_may_land_l3() {
+        // x pinned → cap demote skips x; unpinned y can be demoted to L3 (still settled).
+        let mut e = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 1,
+        });
+        e.put_durable(b"x", b"X").unwrap();
+        e.pin(b"x");
+        let (ty, fx) = e.put_durable(b"y", b"Y").unwrap();
+        assert_eq!(ty, LocalTier::L3);
+        assert_eq!(fx.l2_demoted_to_l3, vec![b"y".to_vec()]);
+        assert!(e.is_l2_durable(b"x") && e.l3_present(b"y"));
+    }
+
+    #[test]
+    fn all_pinned_l2_over_cap_errors_and_rolls_back() {
+        let mut e = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 1,
+        });
+        e.put_durable(b"x", b"X").unwrap();
+        e.pin(b"x");
+        // Force a second pinned L2 resident (bypass put_durable).
+        e.l2.insert(b"z".to_vec(), b"Z".to_vec());
+        e.l2_order.push_back(b"z".to_vec());
+        e.pin(b"z");
+        assert_eq!(e.l2_len(), 2);
+        let err = e.put_durable(b"y", b"Y").unwrap_err();
+        assert!(err.contains("pinned"), "{err}");
+        assert!(!e.is_l2_durable(b"y"));
+        assert_eq!(e.l2_len(), 2, "rollback y only");
     }
 }
