@@ -564,8 +564,8 @@ mod tests {
 
         let mut minus = plus.clone();
         minus.delta = -1;
+        // WRITEBACK −1 解冻（commit_through 里此 -1 在 barrier 之后；此处直测 CP 侧）。
         auth.report_ref(&minus).unwrap();
-        // Barrier is a ledger; eviction unlock is the WRITEBACK −1 above.
         auth.complete_barrier("req-wb", "n0").unwrap();
         assert!(auth.barrier_completed("req-wb"));
         // 0→正→0 entered inactive; now evictable.

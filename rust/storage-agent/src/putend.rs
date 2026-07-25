@@ -4,8 +4,9 @@
 //! 1. PutStart 本地记账
 //! 2. `put_durable` **只落 L2**（F4；不写 L1、不写 L3）
 //! 3. `RegisterBlocks`（按真实 settle：通常 L2 location）= COMPLETE
-//! 4. 本地 `pin`（≈ SGLang `lock_ref`）+ CP `ReportRef(WRITEBACK)` 冻 radix 驱逐
-//! 5. WRITEBACK−1 + `RequestBarrier` ledger
+//! 4. 本地 `pin`（≈ SGLang `lock_ref`）+ CP `ReportRef(WRITEBACK,+1)` 冻 radix 驱逐
+//! 5. `RequestBarrier`（barrier 完成 = flush+ack 落定）
+//! 6. `ReportRef(WRITEBACK,-1)` 解冻（barrier 之后才解冻）
 //!
 //! L3：仅 L2→L3 demote / L2 cap 压力（稳态 XOR），不在 PutEnd 双写。
 
@@ -145,8 +146,8 @@ impl PutEndSession {
         // Cap demotions of prior blocks: L2→L3 XOR sync on CP.
         for h in &demoted {
             if !self.blocks.iter().any(|b| b.id.block_hash == *h) {
-                let _ = cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false);
-                let _ = cp.set_l3_present(&self.model_id, h, true);
+                cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)?;
+                cp.set_l3_present(&self.model_id, h, true)?;
             }
         }
 
@@ -159,18 +160,21 @@ impl PutEndSession {
                 cp.set_l3_present(&self.model_id, h, true)?;
             }
             if !store.is_l2_durable(h) {
-                let _ = cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false);
+                cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)?;
             }
         }
 
+        // WRITEBACK +1 冻 radix 驱逐：register 后、barrier 前期间 block 不可被驱逐。
+        // -1 延迟到 barrier 之后——barrier 完成才解冻，语义对齐 SGLang `lock_ref`
+        // （flush→ack 整段持有）。骨架单进程无并发，此窗口为异步场景占位。
         cp.report_refs(&self.writeback_deltas(1))?;
         self.writeback_open = true;
-        cp.report_refs(&self.writeback_deltas(-1))?;
-        self.writeback_open = false;
         cp.request_barrier(RequestBarrierRequest {
             request_id: self.request_id.clone(),
             node_id: self.node_id.clone(),
         })?;
+        cp.report_refs(&self.writeback_deltas(-1))?;
+        self.writeback_open = false;
 
         for b in &self.blocks {
             store.unpin(&b.id.block_hash)?;
