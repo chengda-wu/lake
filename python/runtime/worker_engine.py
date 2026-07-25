@@ -111,11 +111,14 @@ class WorkerEngine:
         with self._lock:
             if self._life.state == WorkerState.TERMINATE:
                 return
+            if not self._started:
+                # 从未 start：无 loop 可 join，直接终态
+                self._life.advance(WorkerState.TERMINATE)
+                return
             first = not self._stop.is_set()
             if first:
                 self._life.drain()
                 self._stop.set()
-                self._started = False
                 self._inbound.put(None)
         self._thread.join(timeout=timeout)
         if self._thread.is_alive():

@@ -56,6 +56,18 @@ def test_engine_capacity_signal() -> None:
     assert eng.lifecycle.state == WorkerState.TERMINATE
 
 
+def test_stop_never_started() -> None:
+    """自审：从未 start 的 engine 调 stop 不得 join 未启动线程。"""
+    pool = FakePool()
+    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    eng.stop()  # 不得抛 "cannot join thread before it is started"
+    assert eng.lifecycle.state == WorkerState.TERMINATE
+    # stop 幂等
+    eng.stop()
+    assert eng.lifecycle.state == WorkerState.TERMINATE
+
+
 def test_stop_fails_orphaned_inflight() -> None:
     """stop 后必须唤醒仍卡在 done.wait 的 inflight（审出：哨兵抢先会孤儿化）。"""
     pool = FakePool()
