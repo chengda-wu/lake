@@ -102,12 +102,18 @@ impl ControlPlaneService for ControlPlane {
 
     async fn request_barrier(
         &self,
-        _request: Request<RequestBarrierRequest>,
+        request: Request<RequestBarrierRequest>,
     ) -> Result<Response<Ack>, Status> {
-        Ok(Response::new(Ack {
-            ok: true,
-            err: String::new(),
-        }))
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        // P4.3: agent must flush L2 + ReportRef(WRITEBACK,-1) before this call.
+        match auth.complete_barrier(&req.request_id, &req.node_id) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+            })),
+            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+        }
     }
 
     type LeaseStream =
@@ -524,5 +530,45 @@ mod tests {
         assert_eq!(auth.inactive_len("m"), 0);
         let (_, cand_hit, _) = auth.lookup_prefix("m", &cand, "n0");
         assert_eq!(cand_hit, 1, "peer must not be pressure-evicted mid-batch");
+    }
+
+    /// PutEnd invariant: WRITEBACK holds freeze until barrier release.
+    /// Ref: consistency.md §3 writeback ref; SGLang `_evict_write_back`.
+    #[test]
+    fn writeback_ref_blocks_evict_until_barrier() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"wb0"]);
+        auth.register("n0", &full, vec![meta("m", b"wb0")]).unwrap();
+        let plus = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"wb0".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Writeback as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        };
+        auth.report_ref(&plus).unwrap();
+        assert_eq!(auth.global_ref("m", b"wb0"), 1);
+        assert_eq!(auth.evict_n("m", 10), 0, "writeback must freeze");
+
+        let mut minus = plus.clone();
+        minus.delta = -1;
+        auth.report_ref(&minus).unwrap();
+        auth.complete_barrier("req-wb", "n0").unwrap();
+        assert!(auth.barrier_completed("req-wb"));
+        // 0→正→0 entered inactive; now evictable.
+        assert_eq!(auth.evict_n("m", 1), 1);
+        let (_, hit, _) = auth.lookup_prefix("m", &full, "n0");
+        assert_eq!(hit, 0);
+    }
+
+    #[test]
+    fn request_barrier_requires_ids() {
+        let mut auth = Authority::default();
+        assert!(auth.complete_barrier("", "n0").is_err());
+        assert!(auth.complete_barrier("r", "").is_err());
     }
 }

@@ -102,6 +102,10 @@ impl Namespace {
 pub struct Authority {
     namespaces: HashMap<String, Namespace>,
     inactive_cap: usize,
+    /// Completed request barriers: `(request_id, node_id)`.
+    /// P4.3: agent flushes L2 + `ReportRef(WRITEBACK,-1)` **before** this RPC;
+    /// CP records completion for observability / future directory updates.
+    completed_barriers: HashMap<String, String>,
 }
 
 impl Default for Authority {
@@ -116,6 +120,7 @@ impl Authority {
         Self {
             namespaces: HashMap::new(),
             inactive_cap: inactive_cap.max(1),
+            completed_barriers: HashMap::new(),
         }
     }
 
@@ -398,5 +403,25 @@ impl Authority {
             return 0;
         };
         ns.global_refs.get(&entry.seq_hash).copied().unwrap_or(0)
+    }
+
+    /// Record a completed request-end barrier (`consistency.md` §3).
+    ///
+    /// Agent contract: durable flush + `ReportRef(WRITEBACK,-1)` already applied
+    /// so radix blocks are no longer writeback-frozen. Idempotent per request_id.
+    pub fn complete_barrier(&mut self, request_id: &str, node_id: &str) -> Result<(), String> {
+        if request_id.is_empty() {
+            return Err("RequestBarrier: request_id required".into());
+        }
+        if node_id.is_empty() {
+            return Err("RequestBarrier: node_id required".into());
+        }
+        self.completed_barriers
+            .insert(request_id.to_string(), node_id.to_string());
+        Ok(())
+    }
+
+    pub fn barrier_completed(&self, request_id: &str) -> bool {
+        self.completed_barriers.contains_key(request_id)
     }
 }

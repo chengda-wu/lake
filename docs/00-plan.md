@@ -219,7 +219,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 
 - [x] 内容寻址 block 存储 + 引用计数 + LFU-Aging / 前缀亲和驱逐（复用 B 起步；P4.2：`ReportRef` **合账骨架**——只累加 `global_refs`、忽略 `RefKind`，agent 本地一级/分 kind 后续；驱逐主路径 `LineageBackend::with_frequency`＝叶子约束≈前缀亲和 + TinyLFU 冷叶≈LFU-Aging；`MultiLruBackend` 仍 pub 对照；不 pub 纯 Lru/Fifo，见 `rust/vendor/UPSTREAM.md`。**驱逐正确性 = Authority 单测**（含 inactive 上界：满容 skip insert；压力 `allocate` 仅 `evict_n`）；生产 `ReportRef` 喂数与压力 `allocate` → 后续切片）
 - [x] radix tree 前缀索引（前缀复用查询）（复用 B；P4.2：`RegisterBlocks.prefix_hashes` + `LookupPrefix`）
-- [ ] 分层缓存引擎（RAM/NVMe，对象存储回填）
+- [ ] 分层缓存引擎（RAM/NVMe，对象存储回填）（P4.3 进行中：`MemoryL2` + `LocalTierEngine` promote/demote 最小可用；PutEndSession + WRITEBACK 阻驱逐 + `RequestBarrier`；真 NVMe/L3/带宽池后续）
 - [ ] gRPC 接口 + RDMA 数据平面（先 TCP 后 RDMA）（传输面复用 A）
 - [ ] 一致性哈希分片 + KV Node 扩缩时的 block 重分布
 - [ ] **多模型生命周期**：模型注册/下线级联删、revision 失效（F11）

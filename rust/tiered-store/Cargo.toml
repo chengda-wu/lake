@@ -8,4 +8,4 @@ publish = false
 lake-proto.workspace = true
 tonic.workspace = true
 
-# 空壳:L0–L3 分层缓存引擎。P2 仅验证 proto 生成 + 编译。
+# P4.3: MemoryL2 + LocalTierEngine（promote/demote 最小可用；真 NVMe/L3 后续）。
