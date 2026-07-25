@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// --- 两级 ref(P4.2) ---
+// --- 全局 ref 上报(P4.2 合账骨架；完整两级见 architecture) ---
 type RefKind int32
 
 const (

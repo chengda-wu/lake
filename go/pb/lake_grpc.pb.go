@@ -58,7 +58,7 @@ type ControlPlaneServiceClient interface {
 	//	与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
 	//	P4.2:须带 prefix_hashes 全链以便控制面建 PositionalLineageHash;`blocks` 可为 miss 后缀。
 	RegisterBlocks(ctx context.Context, in *RegisterBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
-	// P4.2:两级 ref 全局汇总(agent 本地一级 → 本 RPC 二级)。流式上报;不进 ViewEvent(B1)。
+	// P4.2:控制面合账骨架（忽略 RefKind；agent 未上报）。完整两级后续。流式;不进 ViewEvent(B1)。
 	ReportRef(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[RefDelta, Ack], error)
 	// 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
 	RequestBarrier(ctx context.Context, in *RequestBarrierRequest, opts ...grpc.CallOption) (*Ack, error)
@@ -189,7 +189,7 @@ type ControlPlaneServiceServer interface {
 	//	与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
 	//	P4.2:须带 prefix_hashes 全链以便控制面建 PositionalLineageHash;`blocks` 可为 miss 后缀。
 	RegisterBlocks(context.Context, *RegisterBlocksRequest) (*Ack, error)
-	// P4.2:两级 ref 全局汇总(agent 本地一级 → 本 RPC 二级)。流式上报;不进 ViewEvent(B1)。
+	// P4.2:控制面合账骨架（忽略 RefKind；agent 未上报）。完整两级后续。流式;不进 ViewEvent(B1)。
 	ReportRef(grpc.ClientStreamingServer[RefDelta, Ack]) error
 	// 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
 	RequestBarrier(context.Context, *RequestBarrierRequest) (*Ack, error)

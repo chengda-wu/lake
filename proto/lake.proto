@@ -48,7 +48,10 @@ service ControlPlaneService {
   //   P4.2:须带 prefix_hashes 全链以便控制面建 PositionalLineageHash;`blocks` 可为 miss 后缀。
   rpc RegisterBlocks(RegisterBlocksRequest) returns (Ack);
 
-  // P4.2:两级 ref 全局汇总(agent 本地一级 → 本 RPC 二级)。流式上报;不进 ViewEvent(B1)。
+  // P4.2:**控制面合账骨架**（非完整两级 ref）。
+  //   本切片：累加 delta → global_refs；**忽略 RefKind**；agent **未**维护本地一级、也未调用本 RPC。
+  //   完整两级（agent 本地 REQUEST/IN_FLIGHT/WRITEBACK + 控制面分 kind）→ 后续切片。
+  //   流式上报;不进 ViewEvent(B1)。
   rpc ReportRef(stream RefDelta) returns (Ack);
 
   // 请求结束屏障:release → flush L2 + ack → 控制面更新目录(见 consistency.md §3)。
@@ -148,7 +151,8 @@ message RegisterBlocksRequest {
   repeated bytes prefix_hashes   = 3;
 }
 
-// --- 两级 ref(P4.2) ---
+// --- 全局 ref 上报(P4.2 合账骨架；完整两级见 architecture/kv-cache-pool.md) ---
+// RefKind：wire 预留三类本地子计数；P4.2 控制面尚未分账（见 ReportRef 注释）。
 enum RefKind {
   REF_KIND_UNSPECIFIED = 0;
   REQUEST              = 1;  // 请求持有
@@ -157,7 +161,7 @@ enum RefKind {
 }
 message RefDelta {
   lake.KVBlockID id = 1;
-  RefKind kind      = 2;
+  RefKind kind      = 2;  // P4.2 可填但 CP 忽略；后续分账用
   int32 delta       = 3;   // +1 / -1(允许多)
   string node_id    = 4;
 }

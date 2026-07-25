@@ -151,7 +151,7 @@ class ControlPlaneServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def ReportRef(self, request_iterator, context):
-        """P4.2:两级 ref 全局汇总(agent 本地一级 → 本 RPC 二级)。流式上报;不进 ViewEvent(B1)。
+        """P4.2:控制面合账骨架（忽略 RefKind；agent 未上报）。完整两级后续。流式;不进 ViewEvent(B1)。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

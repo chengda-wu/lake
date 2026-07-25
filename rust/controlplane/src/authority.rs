@@ -33,7 +33,8 @@ struct Namespace {
     by_flat: HashMap<Vec<u8>, Entry>,
     seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
     inactive: Box<dyn InactiveIndex>,
-    /// Aggregate global refs (REQUEST + IN_FLIGHT + WRITEBACK).
+    /// Aggregate global refs (P4.2 skeleton: all `RefKind` summed into one
+    /// counter; `kind` on the wire is ignored). Agent local L1 + per-kind → later.
     global_refs: HashMap<SequenceHash, i64>,
     next_block_id: BlockId,
 }
@@ -256,7 +257,10 @@ impl Authority {
         blocks
     }
 
-    /// Apply one ref delta. Returns error if block unknown.
+    /// Apply one ref delta (sum into `global_refs`). Returns error if block unknown.
+    ///
+    /// P4.2: `delta.kind` is intentionally ignored (合账骨架). Per-kind buckets
+    /// and agent `ReportRef` producers land in a later slice.
     pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
         let id = delta
             .id
@@ -272,6 +276,7 @@ impl Authority {
             .ok_or_else(|| "RefDelta: unknown block_hash".to_string())?;
         let seq = entry.seq_hash;
         let block_id = entry.block_id;
+        let _kind = delta.kind; // reserved; not booked separately in P4.2
 
         let cur = ns.global_refs.entry(seq).or_insert(0);
         let before = *cur;
