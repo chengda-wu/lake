@@ -571,4 +571,20 @@ mod tests {
         assert!(auth.complete_barrier("", "n0").is_err());
         assert!(auth.complete_barrier("r", "").is_err());
     }
+
+    #[test]
+    fn publish_l0_enables_local_hit() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"loc"]);
+        auth.register("n0", &full, vec![meta("m", b"loc")]).unwrap();
+        auth.publish_location("m", b"loc", Tier::L0, "n0", true)
+            .unwrap();
+        assert!(auth.has_l0_on("m", b"loc", "n0"));
+        let (_, _, all_local) = auth.lookup_prefix("m", &full, "n0");
+        assert!(all_local);
+        auth.publish_location("m", b"loc", Tier::L0, "n0", false)
+            .unwrap();
+        let (_, _, all_local) = auth.lookup_prefix("m", &full, "n0");
+        assert!(!all_local);
+    }
 }

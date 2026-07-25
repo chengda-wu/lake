@@ -1,20 +1,18 @@
 //! PutEnd 两阶段 + writeback 会话（P4.3）。
 //!
-//! 时序（对齐 `kv-cache-pool.md` / `consistency.md` §3，覆盖 writeback 不变量）：
-//! 1. PutStart：本地记账（未进 radix）
-//! 2. RegisterBlocks（PutEnd 控制面侧）+ `ReportRef(WRITEBACK,+1)`
-//! 3. 本地 `MemoryL2::put_durable`（可与 2 重叠；屏障前必须完成）
-//! 4. RequestBarrier：确认 durable → `ReportRef(WRITEBACK,-1)` → CP `RequestBarrier`
+//! 时序（`kv-cache-pool.md` / `consistency.md` §3）：
+//! 1. PutStart 本地记账
+//! 2. RegisterBlocks + `ReportRef(WRITEBACK,+1)`
+//! 3. `LocalTierEngine::put_durable`（L2，可选 L3）
+//! 4. Barrier：WRITEBACK-1 → CP `RequestBarrier`
 //!
-//! Proto 注释的「先 durable 再 Register」是严序 PutEnd；本路径用 WRITEBACK
-//! 覆盖「先注册后落盘」窗口（doc 主路径）。真 gRPC 客户端接线后续。
-//!
-//! 参考：Mooncake PutStart/PutEnd；SGLang `_evict_write_back`。
+//! 经 [`ControlPlanePort`] 接线（进程内或未来 tonic）。
 
 use lake_proto::lake::*;
-use lake_tiered_store::MemoryL2;
+use lake_tiered_store::LocalTierEngine;
 
-/// One full block pending PutEnd / barrier on this agent.
+use crate::cp_port::ControlPlanePort;
+
 #[derive(Clone, Debug)]
 pub struct PendingBlock {
     pub id: KvBlockId,
@@ -22,16 +20,13 @@ pub struct PendingBlock {
     pub durable: bool,
 }
 
-/// Per-request PutEnd ledger (agent-local).
 #[derive(Debug)]
 pub struct PutEndSession {
     pub request_id: String,
     pub node_id: String,
     pub model_id: String,
-    /// Ordered prefix hashes for lineage (full chain).
     pub prefix_hashes: Vec<Vec<u8>>,
     blocks: Vec<PendingBlock>,
-    /// WRITEBACK still held on controlplane for these flats.
     writeback_open: bool,
 }
 
@@ -51,7 +46,6 @@ impl PutEndSession {
         }
     }
 
-    /// PutStart: stage a full block (not yet durable / registered).
     pub fn put_start(&mut self, block_hash: Vec<u8>, bytes: Vec<u8>) {
         self.prefix_hashes.push(block_hash.clone());
         self.blocks.push(PendingBlock {
@@ -66,7 +60,6 @@ impl PutEndSession {
         });
     }
 
-    /// Build `RegisterBlocksRequest` for the controlplane PutEnd RPC.
     pub fn register_request(&self) -> RegisterBlocksRequest {
         let blocks = self
             .blocks
@@ -91,24 +84,21 @@ impl PutEndSession {
         }
     }
 
-    /// After successful RegisterBlocks: WRITEBACK +1 deltas (合账进 global_refs).
-    pub fn writeback_plus_deltas(&mut self) -> Vec<RefDelta> {
-        self.writeback_open = true;
+    fn writeback_deltas(&self, delta: i32) -> Vec<RefDelta> {
         self.blocks
             .iter()
             .map(|b| RefDelta {
                 id: Some(b.id.clone()),
                 kind: RefKind::Writeback as i32,
-                delta: 1,
+                delta,
                 node_id: self.node_id.clone(),
             })
             .collect()
     }
 
-    /// Persist all staged blocks to local L2 stand-in.
-    pub fn flush_durable(&mut self, store: &mut MemoryL2) {
+    pub fn flush_durable(&mut self, store: &mut LocalTierEngine, also_l3: bool) {
         for b in &mut self.blocks {
-            store.put_durable(&b.id.block_hash, &b.bytes);
+            store.put_durable(&b.id.block_hash, &b.bytes, also_l3);
             b.durable = true;
         }
     }
@@ -117,69 +107,95 @@ impl PutEndSession {
         self.blocks.iter().all(|b| b.durable)
     }
 
-    /// Barrier prep: require durable, then WRITEBACK -1 + RequestBarrierRequest.
-    pub fn finish_barrier(&mut self) -> Result<(Vec<RefDelta>, RequestBarrierRequest), String> {
+    /// Full PutEnd → barrier against a [`ControlPlanePort`].
+    pub fn commit_through<P: ControlPlanePort>(
+        &mut self,
+        store: &mut LocalTierEngine,
+        cp: &mut P,
+        also_l3: bool,
+    ) -> Result<(), String> {
+        let reg = self.register_request();
+        cp.register_blocks(reg)?;
+        cp.report_refs(&self.writeback_deltas(1))?;
+        self.writeback_open = true;
+
+        self.flush_durable(store, also_l3);
+        for b in &self.blocks {
+            if also_l3 {
+                cp.set_l3_present(&self.model_id, &b.id.block_hash, true)?;
+            }
+        }
+
         if !self.all_durable() {
-            return Err("RequestBarrier: L2 not durable for all registered blocks".into());
+            return Err("commit: L2 not durable".into());
         }
-        if !self.writeback_open {
-            return Err(
-                "RequestBarrier: writeback not held (call writeback_plus after register)".into(),
-            );
-        }
-        let deltas = self
-            .blocks
-            .iter()
-            .map(|b| RefDelta {
-                id: Some(b.id.clone()),
-                kind: RefKind::Writeback as i32,
-                delta: -1,
-                node_id: self.node_id.clone(),
-            })
-            .collect();
+        cp.report_refs(&self.writeback_deltas(-1))?;
         self.writeback_open = false;
-        let barrier = RequestBarrierRequest {
+        cp.request_barrier(RequestBarrierRequest {
             request_id: self.request_id.clone(),
             node_id: self.node_id.clone(),
-        };
-        Ok((deltas, barrier))
+        })?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cp_port::AuthorityPort;
     use lake_controlplane::Authority;
+    use lake_tiered_store::{LocalTier, LocalTierEngine, TierCaps};
 
     #[test]
-    fn putend_writeback_freeze_then_barrier() {
-        let mut store = MemoryL2::new();
+    fn commit_through_writeback_then_evictable() {
+        let mut store = LocalTierEngine::with_caps(TierCaps::default());
+        let mut auth = Authority::default();
         let mut sess = PutEndSession::new("r1", "n0", "m");
         sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
 
-        let mut auth = Authority::default();
-        let reg = sess.register_request();
-        auth.register(&reg.node_id, &reg.prefix_hashes, reg.blocks)
-            .unwrap();
-        auth.report_refs(&sess.writeback_plus_deltas()).unwrap();
-        assert_eq!(auth.evict_n("m", 1), 0);
-
-        sess.flush_durable(&mut store);
-        assert!(store.is_durable(b"h0"));
-
-        let (minus, barrier) = sess.finish_barrier().unwrap();
-        auth.report_refs(&minus).unwrap();
-        auth.complete_barrier(&barrier.request_id, &barrier.node_id)
-            .unwrap();
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            sess.commit_through(&mut store, &mut port, true).unwrap();
+        }
+        assert!(store.is_l2_durable(b"h0"));
+        assert!(store.l3_present(b"h0"));
         assert!(auth.barrier_completed("r1"));
+        // After WRITEBACK cleared, 0→正→0 path: need +1/-1 REQUEST to enter inactive,
+        // or register left ref=0 without inactive insert. Force cycle:
+        let d = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"h0".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        };
+        auth.report_ref(&d).unwrap();
+        let mut d0 = d;
+        d0.delta = -1;
+        auth.report_ref(&d0).unwrap();
         assert_eq!(auth.evict_n("m", 1), 1);
     }
 
     #[test]
-    fn barrier_rejects_undurable() {
+    fn promote_publishes_l0() {
+        let mut store = LocalTierEngine::new();
+        let mut auth = Authority::default();
         let mut sess = PutEndSession::new("r2", "n0", "m");
-        sess.put_start(b"h1".to_vec(), b"x".to_vec());
-        let _ = sess.writeback_plus_deltas();
-        assert!(sess.finish_barrier().is_err());
+        sess.put_start(b"p".to_vec(), b"P".to_vec());
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            sess.commit_through(&mut store, &mut port, false).unwrap();
+            store.promote_to_l0(b"p").unwrap();
+            port.publish_location("m", b"p", Tier::L0, "n0", true)
+                .unwrap();
+        }
+        assert_eq!(store.local_tier(b"p"), Some(LocalTier::L0));
+        assert!(auth.has_l0_on("m", b"p", "n0"));
+        let (_, _, all_local) = auth.lookup_prefix("m", &[b"p".to_vec()], "n0");
+        assert!(all_local);
     }
 }

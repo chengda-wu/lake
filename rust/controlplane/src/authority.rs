@@ -16,7 +16,7 @@ use kvbm_logical::{
 };
 
 use crate::hash_chain::lineage_from_prefix;
-use crate::tier::TierL2;
+use crate::tier::{TierL0, TierL1, TierL2};
 use lake_proto::lake::*;
 
 const INACTIVE_CAP: usize = 4096;
@@ -423,5 +423,94 @@ impl Authority {
 
     pub fn barrier_completed(&self, request_id: &str) -> bool {
         self.completed_barriers.contains_key(request_id)
+    }
+
+    /// Publish / revoke a tier location on the view + presence markers.
+    ///
+    /// P4.3: agent promote/demote calls this after local byte moves.
+    pub fn publish_location(
+        &mut self,
+        model_id: &str,
+        flat: &[u8],
+        tier: Tier,
+        node_id: &str,
+        present: bool,
+    ) -> Result<(), String> {
+        let ns = self
+            .namespaces
+            .get_mut(model_id)
+            .ok_or_else(|| format!("unknown model_id {model_id}"))?;
+        let entry = ns
+            .by_flat
+            .get_mut(flat)
+            .ok_or_else(|| "publish_location: unknown block".to_string())?;
+        let handle = ns
+            .handles
+            .get(&entry.seq_hash)
+            .ok_or_else(|| "publish_location: missing handle".to_string())?;
+
+        let tier_i = tier as i32;
+        let had = entry
+            .meta
+            .locations
+            .iter()
+            .any(|l| l.tier == tier_i && l.node_id == node_id);
+
+        if present && !had {
+            entry.meta.locations.push(Location {
+                tier: tier_i,
+                node_id: node_id.to_string(),
+                segment_id: 1,
+                offset: 0,
+            });
+            match tier {
+                Tier::L0 => handle.mark_present::<TierL0>(),
+                Tier::L1 => handle.mark_present::<TierL1>(),
+                Tier::L2 => handle.mark_present::<TierL2>(),
+                _ => {}
+            }
+        } else if !present && had {
+            entry
+                .meta
+                .locations
+                .retain(|l| !(l.tier == tier_i && l.node_id == node_id));
+            match tier {
+                Tier::L0 => handle.mark_absent::<TierL0>(),
+                Tier::L1 => handle.mark_absent::<TierL1>(),
+                Tier::L2 => handle.mark_absent::<TierL2>(),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_l3_present(
+        &mut self,
+        model_id: &str,
+        flat: &[u8],
+        present: bool,
+    ) -> Result<(), String> {
+        let ns = self
+            .namespaces
+            .get_mut(model_id)
+            .ok_or_else(|| format!("unknown model_id {model_id}"))?;
+        let entry = ns
+            .by_flat
+            .get_mut(flat)
+            .ok_or_else(|| "set_l3_present: unknown block".to_string())?;
+        entry.meta.l3_present = present;
+        Ok(())
+    }
+
+    pub fn has_l0_on(&self, model_id: &str, flat: &[u8], node_id: &str) -> bool {
+        self.ns(model_id)
+            .and_then(|n| n.by_flat.get(flat))
+            .map(|e| {
+                e.meta
+                    .locations
+                    .iter()
+                    .any(|l| l.tier == Tier::L0 as i32 && l.node_id == node_id)
+            })
+            .unwrap_or(false)
     }
 }

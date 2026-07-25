@@ -8,4 +8,11 @@ publish = false
 lake-proto.workspace = true
 tonic.workspace = true
 
-# P4.3: MemoryL2 + LocalTierEngine（promote/demote 最小可用；真 NVMe/L3 后续）。
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "tier_access"
+harness = false
+
+# P4.3: L0–L3 Memory 站位 + BandwidthPool + TierPipeline + HitStats。

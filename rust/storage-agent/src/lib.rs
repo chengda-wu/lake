@@ -5,6 +5,7 @@
 //! 单 crate 双角色 feature:计算侧 / KV Node(见 kv-cache-pool.md)。
 //! 参考:SGLang agent_hints / `_evict_write_back`;Mooncake PutStart/PutEnd。
 
+mod cp_port;
 mod putend;
 
 use std::pin::Pin;
@@ -14,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+pub use cp_port::{AuthorityPort, ControlPlanePort};
 pub use lake_proto::lake::*;
 pub use putend::{PendingBlock, PutEndSession};
 

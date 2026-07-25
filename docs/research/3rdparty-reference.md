@@ -262,7 +262,7 @@ UCM 与 **LMCache 同层**：挂在 vLLM 等引擎上的 **KVStore + connector +
 - Dynamo `kvbm-physical::TransferManager` 是**抽象**，生产数据面仍优先接 A（Mooncake TE），避免两套传输栈。
 - 其余（SGLang HiCache 策略、LMCache 后端思路、vLLM `KVConnectorBase_V1`、Dynamo kv-router 选路公式）继续以**借鉴/对照**为主，默认不链进依赖树；计算层（P5）再评估 vLLM/SGLang 引擎经 connector 接入。
 
-**现状（P4.2 合入 / P4.3 进行中）**：复用 **B** 已 in-tree vendor（[PR #21](https://github.com/chengda-wu/lake/pull/21) / `rust/vendor/UPSTREAM.md`）；**`lake-controlplane`** 链 `BlockRegistry`/`InactiveIndex`/`LineageBackend::with_frequency`；inactive 上界 skip-insert。**P4.3**：`lake-tiered-store`=`MemoryL2`+`LocalTierEngine`（promote/demote 最小）；agent `PutEndSession` + WRITEBACK→`ReportRef` + `RequestBarrier`（对齐 Mooncake PutEnd / SGLang write_back；真 NVMe/L3/带宽池后续）。`kv-pool` 仍 dumb 字节。复用 **A**（Mooncake TE）仍待传输切片。`3rdparty/` 只读。
+**现状（P4.2 合入 / P4.3）**：复用 **B** vendor + controlplane radix/驱逐。**P4.3**：`lake-tiered-store`=`LocalTierEngine`（L0–L3 内存站位）+ `TierPipeline`/`BandwidthPool` + `HitStats`；agent `PutEndSession`/`ControlPlanePort`（WRITEBACK + barrier + publish L0）；CP `publish_location`/`RequestBarrier`。对齐 Mooncake PutEnd、SGLang write_back、Dynamo Pipeline（补 promote）。真 NVMe/对象/跨机 defer P5。`kv-pool` 仍 dumb。复用 **A** 待传输切片。
 
 锚点（复用时回溯）：
 

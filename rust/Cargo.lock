@@ -944,6 +944,7 @@ dependencies = [
 name = "lake-tiered-store"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "lake-proto",
  "tonic",
 ]

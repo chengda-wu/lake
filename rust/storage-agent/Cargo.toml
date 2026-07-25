@@ -11,13 +11,11 @@ path = "src/main.rs"
 [dependencies]
 lake-proto.workspace = true
 lake-tiered-store = { path = "../tiered-store" }
+lake-controlplane = { path = "../controlplane" }
 tonic.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true }
 prost.workspace = true
-
-[dev-dependencies]
-lake-controlplane = { path = "../controlplane" }
 
 # 双角色用 feature 区分(非两个 crate,见 PR #17 review #6):
 #   compute — 计算节点侧 agent(组装 block table / 发起传输 / 持本地视图镜像)
@@ -28,4 +26,4 @@ default = ["compute", "kvnode"]
 compute = []
 kvnode  = []
 
-# P3:AgentService.Dispatch 占位。P4.3:PutEndSession + MemoryL2 writeback 屏障。
+# P3:AgentService.Dispatch 占位。P4.3:PutEndSession + LocalTierEngine + ControlPlanePort。
