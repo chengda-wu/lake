@@ -2,7 +2,9 @@
 //!
 //! 参考:Dynamo `BlockRegistry` / `InactiveIndex`；驱逐主路径 =
 //! `LineageBackend::with_frequency`（只驱叶子 ≈ 前缀亲和 + TinyLFU 冷叶优先 ≈ LFU-Aging）。
-//! 不用 `BlockManager`/`BlockStore`——因此必须自己守 inactive 上界（见 `ensure_inactive_room`）。
+//! 不用 `BlockManager`/`BlockStore`——因此必须自己守 inactive 上界：
+//! `report_ref` 满容只 skip insert（对齐 Dynamo `inactive.insert`）；
+//! 压力 `allocate` 只在显式 `evict_n`（对齐 `allocate_atomic`）。
 //! EventsManager 不接线。
 
 use std::collections::HashMap;
@@ -37,8 +39,8 @@ struct Namespace {
     by_flat: HashMap<Vec<u8>, Entry>,
     seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
     inactive: Box<dyn InactiveIndex>,
-    /// Hard cap on inactive Real nodes (passed to `LineageBackend::with_frequency`
-    /// as slab/`LruCache` capacity **and** enforced before `insert`).
+    /// Hard cap on inactive Real nodes (slab/`LruCache` capacity hint **and**
+    /// insert gate: at cap, `report_ref` skips insert rather than allocate).
     inactive_cap: usize,
     /// Aggregate global refs (P4.2 skeleton: all `RefKind` summed into one
     /// counter; `kind` on the wire is ignored). Agent local L1 + per-kind → later.
@@ -76,6 +78,8 @@ impl Namespace {
     }
 
     /// Drop up to `n` inactive victims from the location view.
+    /// Pressure path only — mirrors Dynamo `BlockStore::allocate_atomic`
+    /// (evict when a new slot is needed), never called from `report_ref`.
     fn drop_inactive_victims(&mut self, n: usize) -> usize {
         let victims = self.inactive.allocate(n);
         let mut removed = 0;
@@ -91,17 +95,6 @@ impl Namespace {
             }
         }
         removed
-    }
-
-    /// Make room so a new inactive insert cannot overflow Frequency tiers
-    /// (silent `LruCache` kick → leaf still Real but never `allocate`-able).
-    fn ensure_inactive_room(&mut self) {
-        while self.inactive.len() >= self.inactive_cap {
-            if self.drop_inactive_victims(1) == 0 {
-                // Cannot reclaim (should not happen if Frequency assert holds).
-                break;
-            }
-        }
     }
 }
 
@@ -347,14 +340,13 @@ impl Authority {
         let after = *cur;
 
         if before > 0 && after == 0 {
-            // Candidate for eviction — do not delete.
-            if !ns.inactive.has(seq) {
-                ns.ensure_inactive_room();
-                if ns.inactive.len() < ns.inactive_cap {
-                    ns.inactive.insert(seq, block_id);
-                }
-                // else: allocate failed to reclaim; skip insert rather than
-                // overflow Frequency tiers (silent leaf drop → view zombie).
+            // Candidate for eviction — do not delete the view (Dynamo
+            // `release_primary` → `inactive.insert` only; allocate is separate).
+            // At cap: skip insert so Frequency tiers never silently drop leaves.
+            // Block stays at ref=0 out of inactive until a later 0→正→0, or until
+            // an explicit pressure path (`evict_n` / future allocate) frees a slot.
+            if !ns.inactive.has(seq) && ns.inactive.len() < ns.inactive_cap {
+                ns.inactive.insert(seq, block_id);
             }
         } else if before == 0 && after > 0 {
             // Frozen again — leave inactive index (take if present).
@@ -365,6 +357,10 @@ impl Authority {
 
     /// Apply a batch atomically: validate all, then apply all.
     /// On validation failure, state is unchanged (`ok: false` ⇒ safe to retry whole batch).
+    ///
+    /// Must not pressure-evict mid-batch: `report_ref` only inserts/skips, so a
+    /// later delta cannot see a peer deleted by an earlier one (would panic on
+    /// the post-check `expect` and break all-or-nothing).
     pub fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
         for (i, d) in deltas.iter().enumerate() {
             self.check_report_ref(d)

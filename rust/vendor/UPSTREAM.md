@@ -56,7 +56,7 @@
 - **主路径**：`LineageBackend::with_frequency` = 只驱叶子（≈前缀亲和强形式）+ `LeafPolicy::Frequency`（TinyLFU 冷叶优先 ≈ LFU-Aging）
 - **`MultiLruBackend`**：仍 **pub**，作对照/单测；Authority **不再单独挂**它
 - 加权软亲和（非叶子也可驱但权重极高）defer；P4.2 用结构约束近似
-- **inactive 上界**：上游靠 `BlockStore` 固定槽 + allocate 回收；lake 薄驱动无等价物 → Authority 在 `inactive.len() >= cap` 时先 `allocate` 再 `insert`；`FrequencyPolicy::on_leaf_added` 对齐 MultiLru，超容 `debug_assert`（禁止 `LruCache` 静默踢 leaf → 视图僵尸）
+- **inactive 上界（对齐 Dynamo 路径拆分）**：上游 `release_primary` → `inactive.insert` 与 `allocate_atomic` → `inactive.allocate` **分离**；固定槽使 insert 不会顶破 MultiLru cap。lake 无 `BlockStore` → Authority 人工 `INACTIVE_CAP`：`report_ref` 满容 **只 skip insert、不摘视图**；压力驱逐只走显式 `evict_n`（及后续生产 allocate）。`FrequencyPolicy::on_leaf_added` 仍对齐 MultiLru 超容 `debug_assert`（禁静默踢 leaf → 视图僵尸）
 - **TinyLFU 分档时机**：与上游 MultiLru 一致——leaf 进入 inactive 时按当时 count 入档，**存续期间不随 Lookup touch 重分桶**；升温只影响「尚未入 inactive / 再次 0→正→0 再入」的路径
 
 #### 为何不 pub `LruBackend` / `FifoReusePolicy` / `HashMapBackend`

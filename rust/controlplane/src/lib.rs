@@ -417,11 +417,11 @@ mod tests {
         assert_eq!(chain_hit, 1, "leaf gone → gap after parent");
     }
 
-    /// Cold single-block roots past inactive_cap must still be allocatable:
-    /// Authority allocates before insert so Frequency tiers never silently drop leaves
-    /// (`len` large but `next_victim` empty → view zombies).
+    /// Past inactive_cap, `report_ref` skips insert (Dynamo: insert ≠ allocate).
+    /// Cap-resident leaves stay allocatable; over-cap blocks stay in the view
+    /// at ref=0 but out of inactive (no silent Frequency drop / view zombie).
     #[test]
-    fn inactive_cap_allocate_before_insert_no_zombie() {
+    fn inactive_cap_skip_insert_no_zombie() {
         let cap = 4;
         let mut auth = Authority::with_inactive_cap(cap);
         let n = cap * 2;
@@ -452,15 +452,75 @@ mod tests {
             );
         }
         assert_eq!(auth.inactive_len("m"), cap);
-        // Remaining inactive must all be allocatable (no zombie leaves).
+        // Early leaves still in the view (report_ref must not pressure-evict).
+        let (_, early_hit, _) = auth.lookup_prefix("m", &prefix(&[flats[0].as_slice()]), "n0");
+        assert_eq!(early_hit, 1, "skip-insert must not drop view entries");
+        // Cap-resident inactive must all be allocatable (no zombie leaves).
         let removed = auth.evict_n("m", cap);
         assert_eq!(removed, cap, "allocate must clear all inactive at cap");
         assert_eq!(auth.inactive_len("m"), 0);
-        // At least the earliest cold leaves were pressure-evicted during insert.
-        let (_, early_hit, _) = auth.lookup_prefix("m", &prefix(&[flats[0].as_slice()]), "n0");
-        assert_eq!(
-            early_hit, 0,
-            "over-cap insert must have dropped an early leaf"
-        );
+    }
+
+    /// Mid-batch must not panic: previous ensure_inactive_room could delete a
+    /// later delta's block and trip `expect` after the pre-check passed.
+    #[test]
+    fn report_refs_mid_batch_must_not_panic_or_drop_peer() {
+        let mut auth = Authority::with_inactive_cap(1);
+        let held = prefix(&[b"held"]);
+        let cand = prefix(&[b"cand"]);
+        auth.register("n0", &held, vec![meta("m", b"held")])
+            .unwrap();
+        auth.register("n0", &cand, vec![meta("m", b"cand")])
+            .unwrap();
+
+        let held_id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"held".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+        };
+        let cand_id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"cand".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+        };
+        // Fill inactive with cand; hold held at ref=1.
+        for (id, plus_then_minus) in [(&cand_id, true), (&held_id, false)] {
+            let plus = RefDelta {
+                id: Some(id.clone()),
+                kind: RefKind::Request as i32,
+                delta: 1,
+                node_id: "n0".into(),
+            };
+            auth.report_ref(&plus).unwrap();
+            if plus_then_minus {
+                let mut minus = plus.clone();
+                minus.delta = -1;
+                auth.report_ref(&minus).unwrap();
+            }
+        }
+        assert_eq!(auth.inactive_len("m"), 1);
+        assert_eq!(auth.global_ref("m", b"held"), 1);
+        assert_eq!(auth.global_ref("m", b"cand"), 0);
+
+        let held_minus = RefDelta {
+            id: Some(held_id.clone()),
+            kind: RefKind::Request as i32,
+            delta: -1,
+            node_id: "n0".into(),
+        };
+        let cand_plus = RefDelta {
+            id: Some(cand_id.clone()),
+            kind: RefKind::Request as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        };
+        // Must not panic; both blocks remain addressable.
+        auth.report_refs(&[held_minus, cand_plus]).unwrap();
+        assert_eq!(auth.global_ref("m", b"held"), 0);
+        assert_eq!(auth.global_ref("m", b"cand"), 1);
+        let (_, cand_hit, _) = auth.lookup_prefix("m", &cand, "n0");
+        assert_eq!(cand_hit, 1, "peer must not be pressure-evicted mid-batch");
     }
 }
