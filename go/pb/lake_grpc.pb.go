@@ -31,6 +31,10 @@ const (
 	ControlPlaneService_DeregisterModel_FullMethodName     = "/lake.ControlPlaneService/DeregisterModel"
 	ControlPlaneService_SetModelQuota_FullMethodName       = "/lake.ControlPlaneService/SetModelQuota"
 	ControlPlaneService_GetModelQuota_FullMethodName       = "/lake.ControlPlaneService/GetModelQuota"
+	ControlPlaneService_ReconcileOrphans_FullMethodName    = "/lake.ControlPlaneService/ReconcileOrphans"
+	ControlPlaneService_DiscardBlocks_FullMethodName       = "/lake.ControlPlaneService/DiscardBlocks"
+	ControlPlaneService_SaveCheckpoint_FullMethodName      = "/lake.ControlPlaneService/SaveCheckpoint"
+	ControlPlaneService_RestoreCheckpoint_FullMethodName   = "/lake.ControlPlaneService/RestoreCheckpoint"
 )
 
 // ControlPlaneServiceClient is the client API for ControlPlaneService service.
@@ -96,6 +100,17 @@ type ControlPlaneServiceClient interface {
 	//	写路径:AdmitRegisterBlocks(写前) / RegisterBlocks(写后确认) 均可带 backpressure。
 	SetModelQuota(ctx context.Context, in *SetModelQuotaRequest, opts ...grpc.CallOption) (*Ack, error)
 	GetModelQuota(ctx context.Context, in *GetModelQuotaRequest, opts ...grpc.CallOption) (*GetModelQuotaResponse, error)
+	// P4.7:GC + 崩溃 reconcile(F11)。
+	//   - 上报/扫孤儿(对齐 Mooncake put_start_discard_timeout zombie);
+	//   - dead_node_id → 节点级 reconcile(清该节点 ref + 摘 L0;兜底 writeback 泄漏);
+	//   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾)。
+	//     元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
+	ReconcileOrphans(ctx context.Context, in *ReconcileOrphansRequest, opts ...grpc.CallOption) (*ReconcileOrphansResponse, error)
+	// 显式摘块(元数据);返回 Ack 后调用方删字节。
+	DiscardBlocks(ctx context.Context, in *DiscardBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
+	// 降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
+	SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*SaveCheckpointResponse, error)
+	RestoreCheckpoint(ctx context.Context, in *RestoreCheckpointRequest, opts ...grpc.CallOption) (*Ack, error)
 }
 
 type controlPlaneServiceClient struct {
@@ -241,6 +256,46 @@ func (c *controlPlaneServiceClient) GetModelQuota(ctx context.Context, in *GetMo
 	return out, nil
 }
 
+func (c *controlPlaneServiceClient) ReconcileOrphans(ctx context.Context, in *ReconcileOrphansRequest, opts ...grpc.CallOption) (*ReconcileOrphansResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReconcileOrphansResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_ReconcileOrphans_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) DiscardBlocks(ctx context.Context, in *DiscardBlocksRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_DiscardBlocks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*SaveCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SaveCheckpointResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_SaveCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) RestoreCheckpoint(ctx context.Context, in *RestoreCheckpointRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_RestoreCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServiceServer is the server API for ControlPlaneService service.
 // All implementations must embed UnimplementedControlPlaneServiceServer
 // for forward compatibility.
@@ -304,6 +359,17 @@ type ControlPlaneServiceServer interface {
 	//	写路径:AdmitRegisterBlocks(写前) / RegisterBlocks(写后确认) 均可带 backpressure。
 	SetModelQuota(context.Context, *SetModelQuotaRequest) (*Ack, error)
 	GetModelQuota(context.Context, *GetModelQuotaRequest) (*GetModelQuotaResponse, error)
+	// P4.7:GC + 崩溃 reconcile(F11)。
+	//   - 上报/扫孤儿(对齐 Mooncake put_start_discard_timeout zombie);
+	//   - dead_node_id → 节点级 reconcile(清该节点 ref + 摘 L0;兜底 writeback 泄漏);
+	//   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾)。
+	//     元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
+	ReconcileOrphans(context.Context, *ReconcileOrphansRequest) (*ReconcileOrphansResponse, error)
+	// 显式摘块(元数据);返回 Ack 后调用方删字节。
+	DiscardBlocks(context.Context, *DiscardBlocksRequest) (*Ack, error)
+	// 降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
+	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error)
+	RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*Ack, error)
 	mustEmbedUnimplementedControlPlaneServiceServer()
 }
 
@@ -349,6 +415,18 @@ func (UnimplementedControlPlaneServiceServer) SetModelQuota(context.Context, *Se
 }
 func (UnimplementedControlPlaneServiceServer) GetModelQuota(context.Context, *GetModelQuotaRequest) (*GetModelQuotaResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetModelQuota not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) ReconcileOrphans(context.Context, *ReconcileOrphansRequest) (*ReconcileOrphansResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReconcileOrphans not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) DiscardBlocks(context.Context, *DiscardBlocksRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiscardBlocks not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SaveCheckpoint not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestoreCheckpoint not implemented")
 }
 func (UnimplementedControlPlaneServiceServer) mustEmbedUnimplementedControlPlaneServiceServer() {}
 func (UnimplementedControlPlaneServiceServer) testEmbeddedByValue()                             {}
@@ -558,6 +636,78 @@ func _ControlPlaneService_GetModelQuota_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlaneService_ReconcileOrphans_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReconcileOrphansRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).ReconcileOrphans(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_ReconcileOrphans_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).ReconcileOrphans(ctx, req.(*ReconcileOrphansRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_DiscardBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiscardBlocksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).DiscardBlocks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_DiscardBlocks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).DiscardBlocks(ctx, req.(*DiscardBlocksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_SaveCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SaveCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).SaveCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_SaveCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).SaveCheckpoint(ctx, req.(*SaveCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_RestoreCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestoreCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).RestoreCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_RestoreCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).RestoreCheckpoint(ctx, req.(*RestoreCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlaneService_ServiceDesc is the grpc.ServiceDesc for ControlPlaneService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -600,6 +750,22 @@ var ControlPlaneService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetModelQuota",
 			Handler:    _ControlPlaneService_GetModelQuota_Handler,
+		},
+		{
+			MethodName: "ReconcileOrphans",
+			Handler:    _ControlPlaneService_ReconcileOrphans_Handler,
+		},
+		{
+			MethodName: "DiscardBlocks",
+			Handler:    _ControlPlaneService_DiscardBlocks_Handler,
+		},
+		{
+			MethodName: "SaveCheckpoint",
+			Handler:    _ControlPlaneService_SaveCheckpoint_Handler,
+		},
+		{
+			MethodName: "RestoreCheckpoint",
+			Handler:    _ControlPlaneService_RestoreCheckpoint_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -83,6 +83,18 @@ service ControlPlaneService {
   //   写路径:AdmitRegisterBlocks(写前) / RegisterBlocks(写后确认) 均可带 backpressure。
   rpc SetModelQuota(SetModelQuotaRequest) returns (Ack);
   rpc GetModelQuota(GetModelQuotaRequest) returns (GetModelQuotaResponse);
+
+  // P4.7:GC + 崩溃 reconcile(F11)。
+  //   - 上报/扫孤儿(对齐 Mooncake put_start_discard_timeout zombie);
+  //   - dead_node_id → 节点级 reconcile(清该节点 ref + 摘 L0;兜底 writeback 泄漏);
+  //   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾)。
+  //   元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
+  rpc ReconcileOrphans(ReconcileOrphansRequest) returns (ReconcileOrphansResponse);
+  // 显式摘块(元数据);返回 Ack 后调用方删字节。
+  rpc DiscardBlocks(DiscardBlocksRequest) returns (Ack);
+  // 降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
+  rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
+  rpc RestoreCheckpoint(RestoreCheckpointRequest) returns (Ack);
 }
 
 // =============================================================================
@@ -226,6 +238,51 @@ message GetModelQuotaResponse {
   bool               ok             = 5;
   string             err            = 6;
 }
+
+// --- P4.7 GC / reconcile / checkpoint ---
+// 孤儿:写入未完成(无 PutEnd/屏障)的残留;对齐 Mooncake zombie。
+message OrphanReport {
+  string node_id              = 1;
+  repeated lake.KVBlockID ids = 2;
+  uint64 marked_at_ms         = 3;  // 0 → CP 用收到时刻戳
+}
+message ReconcileOrphansRequest {
+  repeated OrphanReport reports = 1;  // 合入孤儿表
+  string dead_node_id           = 2;  // 非空 → 节点级 reconcile(清 ref + 摘 L0)
+  uint64 orphan_ttl_ms          = 3;  // 0 → 默认 30000(Mooncake put_start_discard_timeout)
+  // 冷块 GC:按 (model,revision,pool_kind) 从 inactive 摘最多 N 个的 L0/L1(留 L2/L3)。
+  string gc_model_id            = 4;
+  string gc_revision            = 5;
+  lake.PoolKind gc_pool_kind    = 6;  // 缺省 TARGET
+  uint32 gc_cold_limit          = 7;
+}
+message ReconcileOrphansResponse {
+  repeated lake.KVBlockID discarded     = 1;  // 元数据已删;调用方应删 bytes
+  repeated lake.KVBlockID cold_stripped = 2;  // 仅剥 L0/L1;radix+L2/L3 仍在
+  uint32 refs_cleared                   = 3;  // dead_node 清掉的 ref 条数
+  bool ok                               = 4;
+  string err                            = 5;
+}
+message DiscardBlocksRequest {
+  repeated lake.KVBlockID ids = 1;
+  string reason               = 2;
+}
+message CheckpointSnapshot {
+  uint64 seq                        = 1;
+  repeated ModelDescriptor models   = 2;
+  repeated lake.BlockMeta blocks    = 3;
+}
+message SaveCheckpointRequest {}
+message SaveCheckpointResponse {
+  CheckpointSnapshot snapshot = 1;
+  bool ok                     = 2;
+  string err                  = 3;
+}
+message RestoreCheckpointRequest {
+  // 空 → 从 CheckpointStore.load();非空 → 用请求内快照(单测注入)。
+  CheckpointSnapshot snapshot = 1;
+}
+
 message LookupPrefixResponse {
   repeated ReusableBlock blocks = 1;  // 沿前缀匹配的连续 block 列表
   uint32 hit_length              = 2;  // 命中到第几个 block(仿 SGLang host_hit_length)

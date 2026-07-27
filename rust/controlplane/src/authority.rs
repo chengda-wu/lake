@@ -92,22 +92,22 @@ pub fn resolve_pool_kind(raw: i32) -> Result<i32, String> {
     Err(format!("unsupported pool_kind {raw}"))
 }
 
-struct Entry {
-    seq_hash: SequenceHash,
-    meta: BlockMeta,
-    block_id: BlockId,
+pub(crate) struct Entry {
+    pub(crate) seq_hash: SequenceHash,
+    pub(crate) meta: BlockMeta,
+    pub(crate) block_id: BlockId,
 }
 
 /// One Dynamo-shaped registry domain per `pool_kind`.
-struct PoolView {
-    registry: BlockRegistry,
-    handles: HashMap<SequenceHash, BlockRegistrationHandle>,
+pub(crate) struct PoolView {
+    pub(crate) registry: BlockRegistry,
+    pub(crate) handles: HashMap<SequenceHash, BlockRegistrationHandle>,
     /// Flat content hash → entry **within this pool_kind**.
-    by_flat: HashMap<Vec<u8>, Entry>,
-    seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
-    inactive: Box<dyn InactiveIndex>,
-    inactive_cap: usize,
-    global_refs: HashMap<SequenceHash, i64>,
+    pub(crate) by_flat: HashMap<Vec<u8>, Entry>,
+    pub(crate) seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
+    pub(crate) inactive: Box<dyn InactiveIndex>,
+    pub(crate) inactive_cap: usize,
+    pub(crate) global_refs: HashMap<SequenceHash, i64>,
     next_block_id: BlockId,
 }
 
@@ -158,13 +158,13 @@ impl PoolView {
     }
 }
 
-struct Namespace {
-    descriptor: ModelDescriptor,
+pub(crate) struct Namespace {
+    pub(crate) descriptor: ModelDescriptor,
     /// `pool_kind` → independent radix / inactive / refs.
-    pools: HashMap<i32, PoolView>,
+    pub(crate) pools: HashMap<i32, PoolView>,
     inactive_cap: usize,
     /// Authoritative durable-byte usage for this namespace (all pool_kinds).
-    used_bytes: i64,
+    pub(crate) used_bytes: i64,
 }
 
 impl Namespace {
@@ -192,7 +192,7 @@ impl Namespace {
         self.pools.values().map(|p| p.by_flat.len()).sum()
     }
 
-    fn bytes_per_block(&self) -> i64 {
+    pub(crate) fn bytes_per_block(&self) -> i64 {
         self.descriptor
             .block_spec
             .as_ref()
@@ -251,13 +251,21 @@ fn descriptor_identity_eq(a: &ModelDescriptor, b: &ModelDescriptor) -> bool {
 
 /// Process-local authority state.
 pub struct Authority {
-    namespaces: HashMap<NamespaceKey, Namespace>,
+    pub(crate) namespaces: HashMap<NamespaceKey, Namespace>,
     inactive_cap: usize,
     /// Completed request barriers: `(request_id, node_id)`.
-    completed_barriers: HashMap<String, String>,
+    pub(crate) completed_barriers: HashMap<String, String>,
     /// P4.6 mock pool durable capacity for borrow accounting.
     /// `0` = unlimited free (borrow always available until per-model hard).
     pool_capacity_bytes: i64,
+    /// P4.7: incomplete-write orphans (Mooncake zombie analogue).
+    pub(crate) orphans: HashMap<crate::reconcile::BlockKey, crate::reconcile::OrphanEntry>,
+    /// P4.7: per-node ref holdings for dead-node reconcile / writeback leak.
+    pub(crate) node_refs: HashMap<String, HashMap<crate::reconcile::BlockKey, i64>>,
+    /// P4.7: injectable clock (orphan TTL tests).
+    pub(crate) now_ms: fn() -> u64,
+    /// P4.7: last checkpoint seq.
+    pub(crate) checkpoint_seq: u64,
 }
 
 impl Default for Authority {
@@ -273,6 +281,10 @@ impl Authority {
             inactive_cap: inactive_cap.max(1),
             completed_barriers: HashMap::new(),
             pool_capacity_bytes: 0,
+            orphans: HashMap::new(),
+            node_refs: HashMap::new(),
+            now_ms: crate::reconcile::wall_now_ms,
+            checkpoint_seq: 0,
         }
     }
 
@@ -419,12 +431,12 @@ impl Authority {
             .unwrap_or(0)
     }
 
-    fn ns_mut(&mut self, model_id: &str, revision: &str) -> Option<&mut Namespace> {
+    pub(crate) fn ns_mut(&mut self, model_id: &str, revision: &str) -> Option<&mut Namespace> {
         self.namespaces
             .get_mut(&NamespaceKey::new(model_id, revision))
     }
 
-    fn ns(&self, model_id: &str, revision: &str) -> Option<&Namespace> {
+    pub(crate) fn ns(&self, model_id: &str, revision: &str) -> Option<&Namespace> {
         self.namespaces.get(&NamespaceKey::new(model_id, revision))
     }
 
@@ -965,33 +977,7 @@ impl Authority {
     }
 
     pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
-        self.check_report_ref(delta)?;
-        let id = delta.id.as_ref().expect("checked");
-        let pk = resolve_pool_kind(id.pool_kind).expect("checked");
-        let key = NamespaceKey::from_id(id);
-        let ns = self.namespaces.get_mut(&key).expect("checked");
-        let pool = ns.pools.get_mut(&pk).expect("checked");
-        let entry = pool.by_flat.get(&id.block_hash).expect("checked");
-        let seq = entry.seq_hash;
-        let block_id = entry.block_id;
-        let _kind = delta.kind;
-
-        let cur = pool.global_refs.entry(seq).or_insert(0);
-        let before = *cur;
-        *cur = cur.saturating_add(i64::from(delta.delta));
-        if *cur < 0 {
-            *cur = 0;
-        }
-        let after = *cur;
-
-        if before > 0 && after == 0 {
-            if !pool.inactive.has(seq) && pool.inactive.len() < pool.inactive_cap {
-                pool.inactive.insert(seq, block_id);
-            }
-        } else if before == 0 && after > 0 {
-            let _ = pool.inactive.take(seq, block_id);
-        }
-        Ok(())
+        self.report_ref_raw(delta, /*track_node*/ true)
     }
 
     pub fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
