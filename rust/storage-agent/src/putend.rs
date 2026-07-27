@@ -85,14 +85,17 @@ impl PutEndSession {
                 let h = b.id.block_hash.as_slice();
                 let mut locations = Vec::new();
                 if store.is_l2_durable(h) {
+                    // Prefer SegmentArena coords so CP view matches local layout
+                    // (P4.8); fall back only if arena missed a settled L2.
+                    let (segment_id, offset) = store
+                        .l2_placement(h)
+                        .map(|p| (p.segment_id, p.offset))
+                        .unwrap_or((1, 0));
                     locations.push(Location {
                         tier: Tier::L2 as i32,
                         node_id: self.node_id.clone(),
-                        // TODO(P5): real segment_id/offset from NVMe placement
-                        // (#20 P4.3 review §4.3；P4.4 已有 TcpTransport 段 arena，
-                        // 真介质 placement 权威仍在 P5)。
-                        segment_id: 1,
-                        offset: 0,
+                        segment_id,
+                        offset,
                     });
                 }
                 BlockMeta {
@@ -771,6 +774,93 @@ mod tests {
         let (_, _, all_local_a) =
             auth.lookup_prefix("m", "", PoolKind::Target as i32, &[b"a".to_vec()], "n0");
         assert!(!all_local_a);
+    }
+
+    /// PutEnd RegisterBlocks must carry SegmentArena coords (not fixed 1,0).
+    #[test]
+    fn p48_register_request_uses_arena_placement() {
+        let mut store = LocalTierEngine::with_caps(TierCaps::default());
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let mut sess = PutEndSession::new("r-place", "n0", "m");
+        sess.put_start(b"a".to_vec(), b"A".to_vec());
+        sess.put_start(b"b".to_vec(), b"B".to_vec());
+        // Flush like commit_through durable path.
+        for b in &mut sess.blocks {
+            store.put_durable(&b.id.block_hash, &b.bytes).unwrap();
+            b.durable = true;
+        }
+        let p_a = store.l2_placement(b"a").expect("a placed");
+        let p_b = store.l2_placement(b"b").expect("b placed");
+        assert_ne!(
+            (p_a.segment_id, p_a.offset),
+            (p_b.segment_id, p_b.offset),
+            "two blocks must not share the same arena slot"
+        );
+
+        let req = sess.register_request(&store);
+        assert_eq!(req.blocks.len(), 2);
+        let mut coords = Vec::new();
+        for m in &req.blocks {
+            let loc = m
+                .locations
+                .iter()
+                .find(|l| l.tier == Tier::L2 as i32)
+                .expect("L2 loc");
+            coords.push((
+                m.id.as_ref().unwrap().block_hash.clone(),
+                loc.segment_id,
+                loc.offset,
+            ));
+        }
+        coords.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(coords[0].1, p_a.segment_id);
+        assert_eq!(coords[0].2, p_a.offset);
+        assert_eq!(coords[1].1, p_b.segment_id);
+        assert_eq!(coords[1].2, p_b.offset);
+
+        // Full PutEnd path: CP view must match arena after register.
+        let mut sess2 = PutEndSession::new("r-place2", "n0", "m");
+        sess2.put_start(b"c".to_vec(), vec![1, 2, 3]);
+        sess2.put_start(b"d".to_vec(), vec![4, 5, 6]);
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            sess2.commit_through(&mut store, &mut port).unwrap();
+        }
+        let pc = store.l2_placement(b"c").unwrap();
+        let pd = store.l2_placement(b"d").unwrap();
+        let metas = auth.locate(&[
+            KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"c".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: String::new(),
+            },
+            KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"d".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: String::new(),
+            },
+        ]);
+        let loc_c = metas[0]
+            .locations
+            .iter()
+            .find(|l| l.tier == Tier::L2 as i32)
+            .unwrap();
+        let loc_d = metas[1]
+            .locations
+            .iter()
+            .find(|l| l.tier == Tier::L2 as i32)
+            .unwrap();
+        assert_eq!((loc_c.segment_id, loc_c.offset), (pc.segment_id, pc.offset));
+        assert_eq!((loc_d.segment_id, loc_d.offset), (pd.segment_id, pd.offset));
+        assert_ne!(
+            (loc_c.segment_id, loc_c.offset),
+            (loc_d.segment_id, loc_d.offset)
+        );
     }
 
     /// P4.8: plan colocate → pipeline → Moved updates CP locations.

@@ -3,6 +3,7 @@
 //! 参考:Mooncake 无 compaction 线程（靠 `OffsetBufferAllocator` 减碎片）；
 //! SGLang group semantics ≈ 共置提示；Dynamo Pipeline 已承载带宽节流。
 //! 关键差异:CP 出计划 + 更新 Location 权威；字节/段布局在 tiered-store SegmentArena。
+//! P4.8:co-locate **仅同 node**（跨节点需 transfer + source/target，defer P5）。
 
 use std::collections::HashMap;
 
@@ -134,8 +135,7 @@ fn plan_compact(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove>
         if offs.len() < 2 {
             continue;
         }
-        let dense = (0..offs.len())
-            .all(|i| offs[i] == (i as u64).saturating_mul(slot));
+        let dense = (0..offs.len()).all(|i| offs[i] == (i as u64).saturating_mul(slot));
         if dense {
             continue;
         }
@@ -154,41 +154,9 @@ fn plan_compact(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove>
 }
 
 fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove> {
-    // Group by full prefix_chain key (blocks that share a chain).
-    // Collect L2 placements per chain; if fan-out across segments, pack onto first.
-    let mut chains: HashMap<Vec<Vec<u8>>, Vec<(Vec<u8>, String, u64, u64)>> = HashMap::new();
-    for entry in pool.by_flat.values() {
-        if entry.prefix_chain.len() < 2 {
-            continue;
-        }
-        if pool.global_refs.get(&entry.seq_hash).copied().unwrap_or(0) > 0 {
-            continue;
-        }
-        let Some(l2) = entry
-            .meta
-            .locations
-            .iter()
-            .find(|l| l.tier == Tier::L2 as i32)
-        else {
-            continue;
-        };
-        let flat = entry
-            .meta
-            .id
-            .as_ref()
-            .map(|i| i.block_hash.clone())
-            .unwrap_or_default();
-        // Index under the full chain of the longest member — use each block's own chain
-        // as key; later merge by shared root prefix of length >=2.
-        chains
-            .entry(entry.prefix_chain.clone())
-            .or_default()
-            .push((flat, l2.node_id.clone(), l2.segment_id, l2.offset));
-    }
-
-    // Also gather by chain root: for chains [h0]/[h0,h1] register under longest.
-    // Rebuild: map root → ordered positions from all entries sharing that root.
-    let mut by_root: HashMap<Vec<u8>, Vec<(usize, Vec<u8>, String, u64, u64, Vec<Vec<u8>>)>> =
+    // Group by (prefix root, node_id). P4.8: same-node only — cross-node co-locate
+    // needs Transfer + source/target fields (defer P5).
+    let mut by_root_node: HashMap<(Vec<u8>, String), Vec<(usize, Vec<u8>, u64, u64)>> =
         HashMap::new();
     for entry in pool.by_flat.values() {
         if entry.prefix_chain.is_empty() {
@@ -217,46 +185,38 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
             .iter()
             .position(|h| h == &flat)
             .unwrap_or(entry.prefix_chain.len().saturating_sub(1));
-        by_root.entry(root).or_default().push((
-            pos,
-            flat,
-            l2.node_id.clone(),
-            l2.segment_id,
-            l2.offset,
-            entry.prefix_chain.clone(),
-        ));
+        by_root_node
+            .entry((root, l2.node_id.clone()))
+            .or_default()
+            .push((pos, flat, l2.segment_id, l2.offset));
     }
 
     let mut out = Vec::new();
-    let mut roots: Vec<_> = by_root.keys().cloned().collect();
-    roots.sort();
-    for root in roots {
-        let mut members = by_root.remove(&root).unwrap();
+    let mut keys: Vec<_> = by_root_node.keys().cloned().collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    for key in keys {
+        let mut members = by_root_node.remove(&key).unwrap();
+        let node_id = key.1;
         if members.len() < 2 {
             continue;
         }
-        members.sort_by_key(|(pos, _, _, _, _, _)| *pos);
+        members.sort_by_key(|(pos, _, _, _)| *pos);
         let segments: std::collections::HashSet<u64> =
-            members.iter().map(|(_, _, _, s, _, _)| *s).collect();
-        let nodes: std::collections::HashSet<&str> =
-            members.iter().map(|(_, _, n, _, _, _)| n.as_str()).collect();
-        let needs = segments.len() > 1
-            || nodes.len() > 1
-            || !is_adjacent_on_segment(&members, slot);
+            members.iter().map(|(_, _, s, _)| *s).collect();
+        let needs = segments.len() > 1 || !is_adjacent_on_segment(&members, slot);
         if !needs {
             continue;
         }
-        let dest_node = members[0].2.clone();
-        let dest_seg = members[0].3;
-        for (i, (_pos, flat, node, seg, off, _chain)) in members.iter().enumerate() {
+        let dest_seg = members[0].2;
+        for (i, (_pos, flat, seg, off)) in members.iter().enumerate() {
             let to_off = (i as u64).saturating_mul(slot);
-            if *seg == dest_seg && *off == to_off && node == &dest_node {
+            if *seg == dest_seg && *off == to_off {
                 continue;
             }
             let id = pool.by_flat.get(flat).and_then(|e| e.meta.id.clone());
             out.push(DefragMove {
                 id,
-                node_id: dest_node.clone(),
+                node_id: node_id.clone(),
                 from_segment: *seg,
                 from_offset: *off,
                 to_segment: dest_seg,
@@ -266,21 +226,16 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
             });
         }
     }
-    let _ = chains; // reserved for future chain-key grouping
     out
 }
 
-fn is_adjacent_on_segment(
-    members: &[(usize, Vec<u8>, String, u64, u64, Vec<Vec<u8>>)],
-    slot: u64,
-) -> bool {
+fn is_adjacent_on_segment(members: &[(usize, Vec<u8>, u64, u64)], slot: u64) -> bool {
     if members.is_empty() {
         return true;
     }
-    let seg0 = members[0].3;
-    let node0 = &members[0].2;
-    for (i, (_, _, node, seg, off, _)) in members.iter().enumerate() {
-        if node != node0 || *seg != seg0 {
+    let seg0 = members[0].2;
+    for (i, (_, _, seg, off)) in members.iter().enumerate() {
+        if *seg != seg0 {
             return false;
         }
         if *off != (i as u64).saturating_mul(slot) {

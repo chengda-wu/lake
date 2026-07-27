@@ -1662,7 +1662,7 @@ mod tests {
         assert_eq!(moves[0].segment_id, 1);
     }
 
-    /// Co-locate plan packs a scattered prefix chain onto one segment.
+    /// Co-locate plan packs a scattered prefix chain onto one segment (same node).
     #[test]
     fn p48_plan_colocate_prefix_chain() {
         let mut auth = Authority::default();
@@ -1689,6 +1689,34 @@ mod tests {
         assert!(
             moves.iter().any(|m| !m.compact_segment && m.to_segment == 1),
             "expected co-locate onto seg1; got {moves:?}"
+        );
+        assert!(moves.iter().all(|m| m.node_id == "n0"));
+    }
+
+    /// Cross-node prefix scatter must NOT yield local CoLocateMove (no Transfer yet).
+    #[test]
+    fn p48_plan_colocate_skips_cross_node() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let slot = 64u64;
+        let mut m0 = meta_l2_at("m", b"h0", 1, 0);
+        m0.locations[0].node_id = "n0".into();
+        let mut m1 = meta_l2_at("m", b"h1", 1, 0);
+        m1.locations[0].node_id = "n1".into();
+        auth.register("n0", &prefix(&[b"h0", b"h1"]), vec![m0, m1])
+            .unwrap();
+        let moves = auth
+            .plan_defrag(
+                "m",
+                "",
+                PoolKind::Target as i32,
+                DefragMode::Colocate,
+                slot,
+            )
+            .unwrap();
+        assert!(
+            moves.is_empty(),
+            "cross-node co-locate deferred to P5; got {moves:?}"
         );
     }
 

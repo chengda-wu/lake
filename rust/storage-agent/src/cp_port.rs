@@ -293,8 +293,14 @@ pub fn apply_location_events<P: ControlPlanePort>(
 }
 
 /// Enqueue CP-planned defrag moves onto the tier pipeline.
+///
+/// Skips moves whose `node_id` ≠ `pipe.node_id` (P4.8: local execution only;
+/// cross-node co-locate needs Transfer — defer P5).
 pub fn enqueue_defrag_moves(pipe: &mut TierPipeline, moves: &[DefragMove]) {
     for m in moves {
+        if !m.node_id.is_empty() && m.node_id != pipe.node_id {
+            continue;
+        }
         if m.compact_segment {
             pipe.enqueue(PipelineAction::CompactSegment {
                 segment_id: m.segment_id,
