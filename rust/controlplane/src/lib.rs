@@ -1049,4 +1049,93 @@ mod tests {
             other => panic!("expected backpressure reject, got {other:?}"),
         }
     }
+
+    /// Hard reject must not evict existing reusable inactive blocks (review #1).
+    #[test]
+    fn p46_hard_reject_is_side_effect_free() {
+        let mut auth = Authority::default();
+        ensure_model_quota(&mut auth, "m", 200, 200, false, 100);
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a0"]), vec![meta("m", b"a0")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a1"]), vec![meta("m", b"a1")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        // a1 inactive (reusable); lower hard so even full inactive eviction cannot fit.
+        auth.set_model_quota(
+            "m",
+            "",
+            Quota {
+                soft_bytes: 100,
+                hard_bytes: 100,
+                borrow_enabled: false,
+            },
+        )
+        .unwrap();
+        auth.report_ref(&delta("m", b"a1", 1)).unwrap();
+        auth.report_ref(&delta("m", b"a1", -1)).unwrap();
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+
+        match auth
+            .register("n0", &prefix(&[b"a2"]), vec![meta("m", b"a2")])
+            .unwrap()
+        {
+            RegisterStatus::RejectedHardQuota(_) => {}
+            other => panic!("expected RejectedHardQuota, got {other:?}"),
+        }
+        // a1 must still be lookup-able (not evicted on the reject path).
+        let (_, hit, _) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &prefix(&[b"a1"]), "n0");
+        assert_eq!(hit, 1, "hard reject must not evict existing blocks");
+        assert_eq!(auth.block_count("m", ""), 2);
+        assert_eq!(auth.used_bytes("m", ""), 200);
+    }
+
+    /// RegisterModel shares SetModelQuota validator (review #3).
+    #[test]
+    fn p46_register_model_rejects_invalid_quota() {
+        let mut auth = Authority::default();
+        let err = auth
+            .register_model(ModelDescriptor {
+                model_id: "bad".into(),
+                revision: String::new(),
+                num_layers: 1,
+                block_spec: Some(BlockSpec {
+                    block_tokens: 128,
+                    bytes_per_block: 1,
+                }),
+                hash_algo: HashAlgo::HashSha256256 as i32,
+                quota: Some(Quota {
+                    soft_bytes: 200,
+                    hard_bytes: 100,
+                    borrow_enabled: false,
+                }),
+            })
+            .unwrap_err();
+        assert!(err.contains("soft_bytes") || err.contains("quota"));
+
+        ensure_model_quota(&mut auth, "ok", 100, 200, false, 1);
+        let err = auth
+            .register_model(ModelDescriptor {
+                model_id: "ok".into(),
+                revision: String::new(),
+                num_layers: 32,
+                block_spec: Some(BlockSpec {
+                    block_tokens: 128,
+                    bytes_per_block: 1,
+                }),
+                hash_algo: HashAlgo::HashSha256256 as i32,
+                quota: Some(Quota {
+                    soft_bytes: -1,
+                    hard_bytes: 0,
+                    borrow_enabled: false,
+                }),
+            })
+            .unwrap_err();
+        assert!(err.contains("non-negative") || err.contains("quota"));
+    }
 }

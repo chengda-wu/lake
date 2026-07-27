@@ -36,6 +36,25 @@ pub enum RegisterStatus {
     RejectedHardQuota(BackpressureSignal),
 }
 
+/// Pure admission plan (review #1): reject has no victims; accept lists mutations.
+#[derive(Debug, Clone)]
+enum AdmitPlan {
+    Accept {
+        own_evict_n: usize,
+        reclaim_bytes: i64,
+    },
+    Reject(BackpressureSignal),
+}
+
+impl AdmitPlan {
+    fn status(&self) -> RegisterStatus {
+        match self {
+            AdmitPlan::Accept { .. } => RegisterStatus::Accepted,
+            AdmitPlan::Reject(bp) => RegisterStatus::RejectedHardQuota(bp.clone()),
+        }
+    }
+}
+
 const INACTIVE_CAP: usize = 4096;
 /// Same threshold shape as `MultiLruBackend` / Frequency LeafPolicy.
 const FREQ_THRESHOLDS: [u8; 3] = [3, 8, 15];
@@ -186,6 +205,14 @@ impl Namespace {
         quota::quota_or_default(self.descriptor.quota.as_ref())
     }
 
+    fn inactive_len(&self) -> usize {
+        self.pools.values().map(|p| p.inactive.len()).sum()
+    }
+
+    fn inactive_bytes(&self) -> i64 {
+        (self.inactive_len() as i64).saturating_mul(self.bytes_per_block())
+    }
+
     /// Evict up to `n` inactive victims across all pool_kinds; returns blocks removed.
     fn evict_inactive_n(&mut self, n: usize) -> usize {
         if n == 0 {
@@ -278,6 +305,9 @@ impl Authority {
         if desc.model_id.is_empty() {
             return Err("RegisterModel: model_id required".into());
         }
+        if let Some(q) = desc.quota.as_ref() {
+            quota::validate_quota(q).map_err(|e| format!("RegisterModel: {e}"))?;
+        }
         let key = NamespaceKey::new(desc.model_id.clone(), desc.revision.clone());
         if let Some(ns) = self.namespaces.get_mut(&key) {
             if !descriptor_identity_eq(&ns.descriptor, &desc) {
@@ -287,7 +317,7 @@ impl Authority {
                     desc.model_id, desc.revision
                 ));
             }
-            // Same identity → allow quota refresh.
+            // Same identity → allow quota refresh (same validator as SetModelQuota).
             ns.descriptor.quota = desc.quota;
             return Ok(());
         }
@@ -320,12 +350,7 @@ impl Authority {
         if model_id.is_empty() {
             return Err("SetModelQuota: model_id required".into());
         }
-        if quota.soft_bytes < 0 || quota.hard_bytes < 0 {
-            return Err("SetModelQuota: soft/hard_bytes must be non-negative".into());
-        }
-        if quota.hard_bytes > 0 && quota.soft_bytes > quota.hard_bytes {
-            return Err("SetModelQuota: soft_bytes must be <= hard_bytes when hard>0".into());
-        }
+        quota::validate_quota(&quota).map_err(|e| format!("SetModelQuota: {e}"))?;
         let ns = self.ns_mut(model_id, revision).ok_or_else(|| {
             format!("SetModelQuota: unknown namespace ({model_id}, rev={revision:?})")
         })?;
@@ -408,7 +433,8 @@ impl Authority {
     ///
     /// P4.6: charges per-namespace quota. New flats only. Soft overflow → own
     /// inactive eviction + optional borrow/reclaim; hard overflow →
-    /// [`RegisterStatus::RejectedHardQuota`] (no mutation).
+    /// [`RegisterStatus::RejectedHardQuota`] **without** applying eviction/reclaim
+    /// (plan then commit; see [`Self::preflight_register`]).
     pub fn register(
         &mut self,
         node_id: &str,
@@ -515,8 +541,9 @@ impl Authority {
             n
         };
 
-        if let Some(rejected) = self.admit_register_bytes(&model_id, &revision, new_block_count)? {
-            return Ok(rejected);
+        match self.admit_register_bytes(&model_id, &revision, new_block_count)? {
+            RegisterStatus::Accepted => {}
+            rejected => return Ok(rejected),
         }
 
         let lineage = lineage_from_prefix(prefix_hashes);
@@ -584,97 +611,203 @@ impl Authority {
         Ok(RegisterStatus::Accepted)
     }
 
-    /// Soft eviction + borrow reclaim, then hard check. `Ok(None)` = admit.
+    /// Read-only quota preflight (Mooncake PutStart-shaped). No eviction/reclaim.
+    ///
+    /// PutEnd should call this **before** `flush_durable` so hard reject does not
+    /// leave orphan tier bytes. [`Self::register`] re-runs plan+commit under the
+    /// same rules (single-process; reserved charge deferred).
+    pub fn preflight_register(
+        &self,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+        block_hashes: &[Vec<u8>],
+    ) -> Result<RegisterStatus, String> {
+        let pk = resolve_pool_kind(pool_kind)?;
+        if !self.has_namespace(model_id, revision) {
+            return Err(format!(
+                "preflight: model not registered ({model_id}, rev={revision:?})"
+            ));
+        }
+        let new_blocks = self.count_new_flats(model_id, revision, pk, block_hashes);
+        let plan = self.plan_admit(model_id, revision, new_blocks)?;
+        Ok(plan.status())
+    }
+
+    fn count_new_flats(
+        &self,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+        block_hashes: &[Vec<u8>],
+    ) -> usize {
+        let Some(ns) = self.ns(model_id, revision) else {
+            return block_hashes.len();
+        };
+        let pool = ns.pool(pool_kind);
+        let mut seen = std::collections::HashSet::new();
+        let mut n = 0usize;
+        for h in block_hashes {
+            if !seen.insert(h.as_slice()) {
+                continue;
+            }
+            let exists = pool.map(|p| p.by_flat.contains_key(h)).unwrap_or(false);
+            if !exists {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Plan+commit admission. Hard reject never mutates (no eviction/reclaim).
     fn admit_register_bytes(
         &mut self,
         model_id: &str,
         revision: &str,
         new_blocks: usize,
-    ) -> Result<Option<RegisterStatus>, String> {
+    ) -> Result<RegisterStatus, String> {
+        let plan = self.plan_admit(model_id, revision, new_blocks)?;
+        if let AdmitPlan::Reject(bp) = &plan {
+            return Ok(RegisterStatus::RejectedHardQuota(bp.clone()));
+        }
+        self.commit_admit(model_id, revision, &plan);
+        Ok(RegisterStatus::Accepted)
+    }
+
+    /// Pure planning: decide reject vs how many own/other victims to free.
+    fn plan_admit(
+        &self,
+        model_id: &str,
+        revision: &str,
+        new_blocks: usize,
+    ) -> Result<AdmitPlan, String> {
         if new_blocks == 0 {
-            return Ok(None);
+            return Ok(AdmitPlan::Accept {
+                own_evict_n: 0,
+                reclaim_bytes: 0,
+            });
         }
         let key = NamespaceKey::new(model_id, revision);
-        let (bpb, soft, hard, borrow_enabled, mut used) = {
-            let ns = self.ns(model_id, revision).ok_or_else(|| {
-                format!("admit: unknown namespace ({model_id}, rev={revision:?})")
-            })?;
-            let q = ns.quota();
-            (
-                ns.bytes_per_block(),
-                q.soft_bytes,
-                q.hard_bytes,
-                q.borrow_enabled,
-                ns.used_bytes,
-            )
-        };
+        let ns = self
+            .ns(model_id, revision)
+            .ok_or_else(|| format!("admit: unknown namespace ({model_id}, rev={revision:?})"))?;
+        let q = ns.quota();
+        let bpb = ns.bytes_per_block();
+        let used = ns.used_bytes;
         let delta = (new_blocks as i64).saturating_mul(bpb);
-        let q = Quota {
-            soft_bytes: soft,
-            hard_bytes: hard,
-            borrow_enabled,
-        };
+        let inactive_n = ns.inactive_len();
+        let inactive_bytes = ns.inactive_bytes();
 
-        // Soft path: try own inactive eviction until under soft or stuck.
-        if soft > 0 {
-            let mut guard = 0;
-            while used.saturating_add(delta) > soft && guard < 64 {
-                guard += 1;
-                let need = used.saturating_add(delta) - soft;
-                let want_blocks = ((need + bpb - 1) / bpb).max(1) as usize;
-                let removed = self
-                    .ns_mut(model_id, revision)
-                    .map(|n| n.evict_inactive_n(want_blocks))
-                    .unwrap_or(0);
-                if removed == 0 {
-                    break;
+        // Hard ceiling: if even max own inactive eviction cannot fit, reject
+        // with **zero** mutation (review #1).
+        if q.hard_bytes > 0 && used.saturating_add(delta) > q.hard_bytes {
+            let need = used.saturating_add(delta) - q.hard_bytes;
+            if inactive_bytes < need {
+                let bp = AdmitWrite::HardQuota {
+                    used_bytes: used,
+                    soft_bytes: q.soft_bytes,
+                    hard_bytes: q.hard_bytes,
+                    deficit_bytes: need - inactive_bytes,
                 }
-                used = self.used_bytes(model_id, revision);
+                .backpressure(model_id, revision)
+                .expect("HardQuota");
+                return Ok(AdmitPlan::Reject(bp));
             }
         }
 
-        // Borrow: if still over soft and borrow enabled, reclaim others if pool tight.
-        if borrow_enabled && soft > 0 {
-            let projected = used.saturating_add(delta);
-            if projected > soft {
-                let need_borrow = projected - soft;
-                let free = self.free_bytes();
+        // Own inactive eviction: enough for hard fit + soft pressure.
+        let mut own_evict_n = 0usize;
+        if q.hard_bytes > 0 && used.saturating_add(delta) > q.hard_bytes {
+            let need = used.saturating_add(delta) - q.hard_bytes;
+            own_evict_n = own_evict_n.max(((need + bpb - 1) / bpb) as usize);
+        }
+        if q.soft_bytes > 0 && used.saturating_add(delta) > q.soft_bytes {
+            let need = used.saturating_add(delta) - q.soft_bytes;
+            own_evict_n = own_evict_n.max(((need + bpb - 1) / bpb) as usize);
+        }
+        own_evict_n = own_evict_n.min(inactive_n);
+
+        let sim_used = used.saturating_sub((own_evict_n as i64).saturating_mul(bpb));
+        let mut reclaim_bytes = 0i64;
+
+        if q.borrow_enabled && q.soft_bytes > 0 {
+            let projected = sim_used.saturating_add(delta);
+            if projected > q.soft_bytes {
+                let need_borrow = projected - q.soft_bytes;
+                // Own eviction frees pool capacity too when capacity is finite.
+                let free = if self.pool_capacity_bytes > 0 {
+                    (self.free_bytes() + (own_evict_n as i64).saturating_mul(bpb)).max(0)
+                } else {
+                    self.free_bytes()
+                };
                 if free < need_borrow {
                     let want = need_borrow - free;
-                    self.reclaim_borrowed_bytes(&key, want);
-                    used = self.used_bytes(model_id, revision);
-                }
-                // After reclaim, if still not enough free and still under hard,
-                // allow (soft is soft). Hard check below is authoritative reject.
-                let free_after = self.free_bytes();
-                let projected_after = used.saturating_add(delta);
-                let need_after = (projected_after - soft).max(0);
-                if self.pool_capacity_bytes > 0
-                    && need_after > free_after
-                    && hard > 0
-                    && projected_after <= hard
-                {
-                    // Pool full of non-reclaimable (ref>0) bytes — treat as hard pressure.
-                    let bp = AdmitWrite::HardQuota {
-                        used_bytes: used,
-                        soft_bytes: soft,
-                        hard_bytes: hard,
-                        deficit_bytes: need_after - free_after,
+                    let avail = self.reclaimable_borrowed_bytes(&key);
+                    if avail < want
+                        && self.pool_capacity_bytes > 0
+                        && q.hard_bytes > 0
+                        && projected <= q.hard_bytes
+                    {
+                        let bp = AdmitWrite::HardQuota {
+                            used_bytes: sim_used,
+                            soft_bytes: q.soft_bytes,
+                            hard_bytes: q.hard_bytes,
+                            deficit_bytes: want - avail,
+                        }
+                        .backpressure(model_id, revision)
+                        .expect("HardQuota");
+                        return Ok(AdmitPlan::Reject(bp));
                     }
-                    .backpressure(model_id, revision)
-                    .expect("HardQuota");
-                    return Ok(Some(RegisterStatus::RejectedHardQuota(bp)));
+                    reclaim_bytes = want.min(avail);
                 }
             }
         }
 
-        match quota::classify_write(used, delta, &q) {
+        match quota::classify_write(sim_used, delta, &q) {
             r @ AdmitWrite::HardQuota { .. } => {
                 let bp = r.backpressure(model_id, revision).expect("HardQuota");
-                Ok(Some(RegisterStatus::RejectedHardQuota(bp)))
+                Ok(AdmitPlan::Reject(bp))
             }
-            AdmitWrite::WithinSoft | AdmitWrite::OverSoft => Ok(None),
+            AdmitWrite::WithinSoft | AdmitWrite::OverSoft => Ok(AdmitPlan::Accept {
+                own_evict_n,
+                reclaim_bytes,
+            }),
         }
+    }
+
+    fn commit_admit(&mut self, model_id: &str, revision: &str, plan: &AdmitPlan) {
+        let AdmitPlan::Accept {
+            own_evict_n,
+            reclaim_bytes,
+        } = plan
+        else {
+            return;
+        };
+        if *own_evict_n > 0 {
+            if let Some(ns) = self.ns_mut(model_id, revision) {
+                ns.evict_inactive_n(*own_evict_n);
+            }
+        }
+        if *reclaim_bytes > 0 {
+            let key = NamespaceKey::new(model_id, revision);
+            self.reclaim_borrowed_bytes(&key, *reclaim_bytes);
+        }
+    }
+
+    /// Read-only: how many borrowed inactive bytes other namespaces can yield.
+    fn reclaimable_borrowed_bytes(&self, except: &NamespaceKey) -> i64 {
+        let mut total = 0i64;
+        for (k, ns) in &self.namespaces {
+            if k == except {
+                continue;
+            }
+            let over = quota::borrowed_bytes(ns.used_bytes, ns.quota().soft_bytes);
+            if over <= 0 {
+                continue;
+            }
+            total = total.saturating_add(over.min(ns.inactive_bytes()));
+        }
+        total
     }
 
     /// Evict inactive blocks from other namespaces that are over soft (borrowers).

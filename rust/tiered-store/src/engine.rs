@@ -165,6 +165,22 @@ impl LocalTierEngine {
         Ok(())
     }
 
+    /// Drop a block from all local tiers (PutEnd register/quota failure rollback).
+    ///
+    /// Does **not** reverse collateral L2→L3 demotes of *other* hashes from the
+    /// same `put_durable` window — those stay. Call only for the session's own
+    /// hashes after CP rejected registration (see PutEnd preflight).
+    pub fn discard_settled(&mut self, h: &[u8]) {
+        self.l0.remove(h);
+        self.l1.remove(h);
+        self.l2.remove(h);
+        self.l3.remove(h);
+        self.l0_order.retain(|x| x.as_slice() != h);
+        self.l1_order.retain(|x| x.as_slice() != h);
+        self.l2_order.retain(|x| x.as_slice() != h);
+        self.pins.remove(h);
+    }
+
     pub(crate) fn l0_nbytes(&self, h: &[u8]) -> u64 {
         self.l0.get(h).map(|b| b.len() as u64).unwrap_or(0)
     }

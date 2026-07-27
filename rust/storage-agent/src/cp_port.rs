@@ -10,6 +10,9 @@ use lake_tiered_store::{LocalTier, LocationEvent};
 
 /// Subset of ControlPlane RPCs used by PutEnd / tier publish.
 pub trait ControlPlanePort {
+    /// Quota preflight **before** durable flush (Mooncake PutStart-shaped).
+    /// Hard reject must not leave orphan tier bytes.
+    fn admit_register_blocks(&mut self, req: &RegisterBlocksRequest) -> Result<(), String>;
     fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String>;
     fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String>;
     fn request_barrier(&mut self, req: RequestBarrierRequest) -> Result<(), String>;
@@ -39,7 +42,51 @@ pub struct AuthorityPort<'a> {
     pub auth: &'a mut Authority,
 }
 
+fn admit_keys_from_request(
+    req: &RegisterBlocksRequest,
+) -> Result<(String, String, i32, Vec<Vec<u8>>), String> {
+    let model_id = req
+        .blocks
+        .iter()
+        .find_map(|m| m.id.as_ref().map(|i| i.model_id.clone()))
+        .ok_or_else(|| "AdmitRegister: no KVBlockID".to_string())?;
+    let revision = req
+        .blocks
+        .iter()
+        .find_map(|m| m.id.as_ref().map(|i| i.revision.clone()))
+        .unwrap_or_default();
+    let pool_kind = req
+        .blocks
+        .iter()
+        .find_map(|m| m.id.as_ref().map(|i| i.pool_kind))
+        .unwrap_or(PoolKind::Target as i32);
+    let hashes: Vec<Vec<u8>> = req
+        .blocks
+        .iter()
+        .filter_map(|m| m.id.as_ref().map(|i| i.block_hash.clone()))
+        .collect();
+    if hashes.is_empty() {
+        return Err("AdmitRegister: no block hashes".into());
+    }
+    Ok((model_id, revision, pool_kind, hashes))
+}
+
 impl ControlPlanePort for AuthorityPort<'_> {
+    fn admit_register_blocks(&mut self, req: &RegisterBlocksRequest) -> Result<(), String> {
+        use lake_controlplane::RegisterStatus;
+        let (model_id, revision, pool_kind, hashes) = admit_keys_from_request(req)?;
+        match self
+            .auth
+            .preflight_register(&model_id, &revision, pool_kind, &hashes)?
+        {
+            RegisterStatus::Accepted => Ok(()),
+            RegisterStatus::RejectedHardQuota(bp) => Err(format!(
+                "AdmitRegister: hard quota exceeded (deficit={})",
+                bp.deficit_bytes
+            )),
+        }
+    }
+
     fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
         use lake_controlplane::RegisterStatus;
         match self

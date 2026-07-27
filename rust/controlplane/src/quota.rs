@@ -59,6 +59,20 @@ pub fn quota_or_default(q: Option<&Quota>) -> Quota {
     })
 }
 
+/// Shared validator for `RegisterModel` / `SetModelQuota`.
+///
+/// `soft/hard == 0` means that side is unlimited (P4.5 compat). Negative or
+/// `soft > hard` (when hard > 0) is rejected so callers cannot bypass thresholds.
+pub fn validate_quota(q: &Quota) -> Result<(), String> {
+    if q.soft_bytes < 0 || q.hard_bytes < 0 {
+        return Err("quota: soft/hard_bytes must be non-negative".into());
+    }
+    if q.hard_bytes > 0 && q.soft_bytes > q.hard_bytes {
+        return Err("quota: soft_bytes must be <= hard_bytes when hard>0".into());
+    }
+    Ok(())
+}
+
 /// Bytes borrowed beyond soft (0 if soft unlimited or under soft).
 pub fn borrowed_bytes(used: i64, soft: i64) -> i64 {
     if soft <= 0 {
@@ -125,5 +139,27 @@ mod tests {
         };
         assert_eq!(classify_write(90, 20, &q), AdmitWrite::OverSoft);
         assert_eq!(borrowed_bytes(120, 100), 20);
+    }
+
+    #[test]
+    fn validate_rejects_negative_and_soft_gt_hard() {
+        assert!(validate_quota(&Quota {
+            soft_bytes: -1,
+            hard_bytes: 0,
+            borrow_enabled: false,
+        })
+        .is_err());
+        assert!(validate_quota(&Quota {
+            soft_bytes: 200,
+            hard_bytes: 100,
+            borrow_enabled: false,
+        })
+        .is_err());
+        assert!(validate_quota(&Quota {
+            soft_bytes: 0,
+            hard_bytes: 0,
+            borrow_enabled: true,
+        })
+        .is_ok());
     }
 }

@@ -1,11 +1,12 @@
 //! PutEnd 两阶段（P4.3）。
 //!
-//! **COMPLETE 语义**（Mooncake `PutEnd` → `mark_complete`；#20；`storage-layer.md`）：
+//! **COMPLETE 语义**（Mooncake `PutStart`/`PutEnd` → `mark_complete`；#20；`storage-layer.md`）：
 //! 1. PutStart 本地记账
-//! 2. `put_durable` **只落 L2**（F4；不写 L1、不写 L3；**flush 在 pin 之前**以便 L2 cap XOR）
-//! 3. 本地 `pin`（≈ SGLang `lock_ref`）
-//! 4. `RegisterBlocks`（按真实 settle：L2 或 L3-only）= COMPLETE
-//! 5. CP `ReportRef(WRITEBACK,+1)` → `RequestBarrier` → `WRITEBACK,-1`（解冻晚于 barrier）
+//! 2. CP `admit_register_blocks`（配额 preflight；触硬则**不**写 durable）
+//! 3. `put_durable` **只落 L2**（F4；不写 L1、不写 L3；**flush 在 pin 之前**以便 L2 cap XOR）
+//! 4. 本地 `pin`（≈ SGLang `lock_ref`）
+//! 5. `RegisterBlocks`（按真实 settle：L2 或 L3-only）= COMPLETE；失败则 `discard_settled` 回滚本会话 bytes
+//! 6. CP `ReportRef(WRITEBACK,+1)` → `RequestBarrier` → `WRITEBACK,-1`（解冻晚于 barrier）
 //!
 //! L3：仅 L2→L3 demote / L2 cap 压力（稳态 XOR），不在 PutEnd 双写。
 
@@ -155,6 +156,11 @@ impl PutEndSession {
         store: &mut LocalTierEngine,
         cp: &mut P,
     ) -> Result<(), String> {
+        // Quota preflight **before** durable write (Mooncake PutStart / review #2).
+        // Hard reject must not leave orphan L2/L3 bytes or trigger demotion.
+        let admit_req = self.register_request(store);
+        cp.admit_register_blocks(&admit_req)?;
+
         // Flush **before** pin: pinning blocks first would freeze them against
         // L2→L3 cap demote (`ensure_l2_cap` skips pinned), leaving L2 over cap.
         let demoted = self.flush_durable(store)?;
@@ -169,6 +175,12 @@ impl PutEndSession {
         let unpin_all = |store: &mut LocalTierEngine, blocks: &[PendingBlock]| {
             for b in blocks {
                 let _ = store.unpin(&b.id.block_hash);
+            }
+        };
+        let discard_session = |store: &mut LocalTierEngine, blocks: &[PendingBlock]| {
+            for b in blocks {
+                let _ = store.unpin(&b.id.block_hash);
+                store.discard_settled(&b.id.block_hash);
             }
         };
 
@@ -197,7 +209,12 @@ impl PutEndSession {
 
         let reg = self.register_request(store);
         if let Err(e) = cp.register_blocks(reg) {
-            unpin_all(store, &self.blocks);
+            // Belt-and-suspenders: register can still fail after preflight (race /
+            // validation). Drop this session's durable bytes so tier is not polluted.
+            discard_session(store, &self.blocks);
+            for b in &mut self.blocks {
+                b.durable = false;
+            }
             return Err(e);
         }
         let pk = self.pool_kind();
@@ -284,6 +301,137 @@ mod tests {
             quota: None,
         })
         .unwrap();
+    }
+
+    fn ensure_model_quota(auth: &mut Authority, model: &str, soft: i64, hard: i64, bpb: u64) {
+        auth.register_model(ModelDescriptor {
+            model_id: model.into(),
+            revision: String::new(),
+            num_layers: 1,
+            block_spec: Some(BlockSpec {
+                block_tokens: 128,
+                bytes_per_block: bpb,
+            }),
+            hash_algo: HashAlgo::HashSha256256 as i32,
+            quota: Some(Quota {
+                soft_bytes: soft,
+                hard_bytes: hard,
+                borrow_enabled: false,
+            }),
+        })
+        .unwrap();
+    }
+
+    /// Hard quota preflight runs before flush — no orphan tier bytes (review #2).
+    #[test]
+    fn hard_quota_preflight_skips_durable_write() {
+        let mut store = LocalTierEngine::with_caps(TierCaps::default());
+        let mut auth = Authority::default();
+        ensure_model_quota(&mut auth, "m", 100, 100, 100);
+        // Fill hard with one block via PutEnd.
+        {
+            let mut s = PutEndSession::new("r0", "n0", "m");
+            s.put_start(b"a0".to_vec(), vec![1u8; 100]);
+            let mut port = AuthorityPort { auth: &mut auth };
+            s.commit_through(&mut store, &mut port).unwrap();
+        }
+        assert!(store.is_settled(b"a0"));
+        // Hold a0 so it is not inactive — hard cannot free room by eviction.
+        auth.report_ref(&RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"a0".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: String::new(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        })
+        .unwrap();
+
+        let mut sess = PutEndSession::new("r1", "n0", "m");
+        sess.put_start(b"a1".to_vec(), vec![2u8; 100]);
+        let err = {
+            let mut port = AuthorityPort { auth: &mut auth };
+            sess.commit_through(&mut store, &mut port).unwrap_err()
+        };
+        assert!(
+            err.contains("hard quota") || err.contains("AdmitRegister"),
+            "got {err}"
+        );
+        assert!(
+            !store.is_settled(b"a1"),
+            "rejected write must not leave durable bytes"
+        );
+        assert!(!sess.all_durable());
+    }
+
+    /// Register failure after preflight discards session durable bytes (review #2).
+    #[test]
+    fn register_failure_discards_durable_bytes() {
+        struct FailRegister {
+            auth: Authority,
+        }
+        impl ControlPlanePort for FailRegister {
+            fn admit_register_blocks(&mut self, req: &RegisterBlocksRequest) -> Result<(), String> {
+                use lake_controlplane::RegisterStatus;
+                let hashes: Vec<Vec<u8>> = req
+                    .blocks
+                    .iter()
+                    .filter_map(|m| m.id.as_ref().map(|i| i.block_hash.clone()))
+                    .collect();
+                match self.auth.preflight_register("m", "", 0, &hashes)? {
+                    RegisterStatus::Accepted => Ok(()),
+                    RegisterStatus::RejectedHardQuota(bp) => {
+                        Err(format!("admit hard {}", bp.deficit_bytes))
+                    }
+                }
+            }
+            fn register_blocks(&mut self, _req: RegisterBlocksRequest) -> Result<(), String> {
+                Err("inject: register boom".into())
+            }
+            fn report_refs(&mut self, _: &[RefDelta]) -> Result<(), String> {
+                Ok(())
+            }
+            fn request_barrier(&mut self, _: RequestBarrierRequest) -> Result<(), String> {
+                Ok(())
+            }
+            fn publish_location(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: i32,
+                _: &[u8],
+                _: Tier,
+                _: &str,
+                _: bool,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn set_l3_present(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: i32,
+                _: &[u8],
+                _: bool,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let mut store = LocalTierEngine::with_caps(TierCaps::default());
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let mut port = FailRegister { auth };
+        let mut sess = PutEndSession::new("r-fail", "n0", "m");
+        sess.put_start(b"z".to_vec(), b"Z".to_vec());
+        let err = sess.commit_through(&mut store, &mut port).unwrap_err();
+        assert!(err.contains("register boom"));
+        assert!(!store.is_settled(b"z"));
+        assert!(!sess.all_durable());
     }
 
     #[test]
@@ -436,6 +584,37 @@ mod tests {
             calls: Vec<&'static str>,
         }
         impl ControlPlanePort for RecordingPort {
+            fn admit_register_blocks(&mut self, req: &RegisterBlocksRequest) -> Result<(), String> {
+                use lake_controlplane::RegisterStatus;
+                self.calls.push("admit");
+                let hashes: Vec<Vec<u8>> = req
+                    .blocks
+                    .iter()
+                    .filter_map(|m| m.id.as_ref().map(|i| i.block_hash.clone()))
+                    .collect();
+                let model = req
+                    .blocks
+                    .iter()
+                    .find_map(|m| m.id.as_ref().map(|i| i.model_id.clone()))
+                    .unwrap_or_default();
+                let rev = req
+                    .blocks
+                    .iter()
+                    .find_map(|m| m.id.as_ref().map(|i| i.revision.clone()))
+                    .unwrap_or_default();
+                let pk = req
+                    .blocks
+                    .iter()
+                    .find_map(|m| m.id.as_ref().map(|i| i.pool_kind))
+                    .unwrap_or(0);
+                match self.auth.preflight_register(&model, &rev, pk, &hashes)? {
+                    RegisterStatus::Accepted => Ok(()),
+                    RegisterStatus::RejectedHardQuota(bp) => Err(format!(
+                        "AdmitRegister: hard quota exceeded (deficit={})",
+                        bp.deficit_bytes
+                    )),
+                }
+            }
             fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
                 use lake_controlplane::RegisterStatus;
                 self.calls.push("register");
