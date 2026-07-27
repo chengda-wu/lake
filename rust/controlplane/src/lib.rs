@@ -1720,6 +1720,53 @@ mod tests {
         );
     }
 
+    /// Co-locate must not target a slot held by an unrelated block (arena would fail).
+    #[test]
+    fn p48_plan_colocate_avoids_occupied_slots() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let slot = 64u64;
+        // Foreign block owns seg1/off0 — naive pack onto members[0].seg at base 0 would collide.
+        auth.register("n0", &prefix(&[b"x"]), vec![meta_l2_at("m", b"x", 1, 0)])
+            .unwrap();
+        auth.register(
+            "n0",
+            &prefix(&[b"h0", b"h1"]),
+            vec![
+                meta_l2_at("m", b"h0", 1, 128), // not dense at 0
+                meta_l2_at("m", b"h1", 2, 0),
+            ],
+        )
+        .unwrap();
+        let moves = auth
+            .plan_defrag(
+                "m",
+                "",
+                PoolKind::Target as i32,
+                DefragMode::Colocate,
+                slot,
+            )
+            .unwrap();
+        assert!(
+            !moves.is_empty(),
+            "should still find a free pack target; got empty"
+        );
+        for m in &moves {
+            assert!(
+                !(m.to_segment == 1 && m.to_offset == 0),
+                "must not target foreign-occupied seg1/0; got {moves:?}"
+            );
+        }
+        // Destinations must not collide with foreign x.
+        let (x_seg, x_off) = l2_offset(&auth, "m", b"x");
+        for m in &moves {
+            assert!(
+                !(m.to_segment == x_seg && m.to_offset == x_off),
+                "move onto foreign slot; {m:?}"
+            );
+        }
+    }
+
     /// relocate_in_view updates segment/offset; PauseBackground flips flag.
     #[test]
     fn p48_relocate_and_pause_flag() {

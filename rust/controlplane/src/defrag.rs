@@ -158,7 +158,21 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
     // needs Transfer + source/target fields (defer P5).
     let mut by_root_node: HashMap<(Vec<u8>, String), Vec<(usize, Vec<u8>, u64, u64)>> =
         HashMap::new();
+    // (node, seg, offset) → flat occupying that L2 slot (CP view = planner input).
+    let mut occupancy: HashMap<(String, u64, u64), Vec<u8>> = HashMap::new();
     for entry in pool.by_flat.values() {
+        let flat = entry
+            .meta
+            .id
+            .as_ref()
+            .map(|i| i.block_hash.clone())
+            .unwrap_or_default();
+        for loc in &entry.meta.locations {
+            if loc.tier != Tier::L2 as i32 {
+                continue;
+            }
+            occupancy.insert((loc.node_id.clone(), loc.segment_id, loc.offset), flat.clone());
+        }
         if entry.prefix_chain.is_empty() {
             continue;
         }
@@ -173,12 +187,6 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
         else {
             continue;
         };
-        let flat = entry
-            .meta
-            .id
-            .as_ref()
-            .map(|i| i.block_hash.clone())
-            .unwrap_or_default();
         let root = entry.prefix_chain[0].clone();
         let pos = entry
             .prefix_chain
@@ -201,15 +209,17 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
             continue;
         }
         members.sort_by_key(|(pos, _, _, _)| *pos);
-        let segments: std::collections::HashSet<u64> =
-            members.iter().map(|(_, _, s, _)| *s).collect();
-        let needs = segments.len() > 1 || !is_adjacent_on_segment(&members, slot);
+        let needs = !is_adjacent_on_segment(&members, slot);
         if !needs {
             continue;
         }
-        let dest_seg = members[0].2;
+        let Some((dest_seg, base_off)) =
+            pick_colocate_target(&node_id, &members, slot, &occupancy)
+        else {
+            continue;
+        };
         for (i, (_pos, flat, seg, off)) in members.iter().enumerate() {
-            let to_off = (i as u64).saturating_mul(slot);
+            let to_off = base_off.saturating_add((i as u64).saturating_mul(slot));
             if *seg == dest_seg && *off == to_off {
                 continue;
             }
@@ -229,16 +239,82 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
     out
 }
 
+/// Slot is usable for `intended` iff empty or already held by that same flat.
+/// Another chain member at the slot is a conflict (relocate has no temp staging).
+fn slot_free_for(
+    occupancy: &HashMap<(String, u64, u64), Vec<u8>>,
+    node_id: &str,
+    seg: u64,
+    off: u64,
+    intended: &[u8],
+) -> bool {
+    match occupancy.get(&(node_id.to_string(), seg, off)) {
+        None => true,
+        Some(occ) => occ.as_slice() == intended,
+    }
+}
+
+/// Pick (segment, base_offset) with n conflict-free contiguous slots, or a fresh segment.
+fn pick_colocate_target(
+    node_id: &str,
+    members: &[(usize, Vec<u8>, u64, u64)],
+    slot: u64,
+    occupancy: &HashMap<(String, u64, u64), Vec<u8>>,
+) -> Option<(u64, u64)> {
+    let n = members.len() as u64;
+    if n == 0 || slot == 0 {
+        return None;
+    }
+    let mut segs: Vec<u64> = occupancy
+        .keys()
+        .filter(|(nid, _, _)| nid == node_id)
+        .map(|(_, s, _)| *s)
+        .chain(members.iter().map(|(_, _, s, _)| *s))
+        .collect();
+    segs.sort_unstable();
+    segs.dedup();
+
+    // Prefer first member's segment, then others (stable, fewer long hops).
+    let mut ordered = Vec::new();
+    if let Some((_, _, s0, _)) = members.first() {
+        ordered.push(*s0);
+    }
+    for s in &segs {
+        if !ordered.contains(s) {
+            ordered.push(*s);
+        }
+    }
+
+    const MAX_SLOT_IDX: u64 = 64; // align SegmentArena default capacity
+    for &seg in &ordered {
+        for base_idx in 0..MAX_SLOT_IDX.saturating_sub(n).saturating_add(1) {
+            let base = base_idx.saturating_mul(slot);
+            let ok = (0..n).all(|i| {
+                let off = base.saturating_add(i.saturating_mul(slot));
+                let intended = members[i as usize].1.as_slice();
+                slot_free_for(occupancy, node_id, seg, off, intended)
+            });
+            if ok {
+                return Some((seg, base));
+            }
+        }
+    }
+    // Fresh segment: always empty in the view / arena ensure_seg.
+    let fresh = segs.iter().copied().max().unwrap_or(0).saturating_add(1);
+    Some((fresh, 0))
+}
+
 fn is_adjacent_on_segment(members: &[(usize, Vec<u8>, u64, u64)], slot: u64) -> bool {
     if members.is_empty() {
         return true;
     }
     let seg0 = members[0].2;
+    let base = members[0].3;
     for (i, (_, _, seg, off)) in members.iter().enumerate() {
         if *seg != seg0 {
             return false;
         }
-        if *off != (i as u64).saturating_mul(slot) {
+        if *off != base.saturating_add((i as u64).saturating_mul(slot)) {
             return false;
         }
     }
