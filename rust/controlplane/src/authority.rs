@@ -1,4 +1,4 @@
-//! 位置视图权威：每 model_id 一个 `BlockRegistry` + 强句柄 + InactiveIndex。
+//! 位置视图权威：每 `(model_id, revision)` 一个 `BlockRegistry` + 强句柄 + InactiveIndex。
 //!
 //! 参考:Dynamo `BlockRegistry` / `InactiveIndex`；驱逐主路径 =
 //! `LineageBackend::with_frequency`（只驱叶子 ≈ 前缀亲和 + TinyLFU 冷叶优先 ≈ LFU-Aging）。
@@ -6,6 +6,9 @@
 //! `report_ref` 满容只 skip insert（对齐 Dynamo `inactive.insert`）；
 //! 压力 `allocate` 只在显式 `evict_n`（对齐 `allocate_atomic`）。
 //! EventsManager 不接线。
+//!
+//! P4.5:显式 `RegisterModel` / `DeregisterModel`；禁止懒建命名空间。
+//! 下线 = 整表 drop（强句柄释放 → radix Weak 失效 ≈ 按命名空间剪枝）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +26,26 @@ const INACTIVE_CAP: usize = 4096;
 /// Same threshold shape as `MultiLruBackend` / Frequency LeafPolicy.
 const FREQ_THRESHOLDS: [u8; 3] = [3, 8, 15];
 
+/// Control-plane namespace key = `(model_id, revision)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NamespaceKey {
+    pub model_id: String,
+    pub revision: String,
+}
+
+impl NamespaceKey {
+    pub fn new(model_id: impl Into<String>, revision: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            revision: revision.into(),
+        }
+    }
+
+    pub fn from_id(id: &KvBlockId) -> Self {
+        Self::new(id.model_id.clone(), id.revision.clone())
+    }
+}
+
 struct Entry {
     seq_hash: SequenceHash,
     meta: BlockMeta,
@@ -30,12 +53,13 @@ struct Entry {
 }
 
 struct Namespace {
+    descriptor: ModelDescriptor,
     registry: BlockRegistry,
     /// Keep strong refs so Weak entries in the radix tree stay alive.
     handles: HashMap<SequenceHash, BlockRegistrationHandle>,
-    /// Flat (content) hash → entry. Same `model_id` + same flat in different
+    /// Flat (content) hash → entry. Same namespace + same flat in different
     /// lineages would overwrite; agent chained SHA256 is assumed globally unique
-    /// within a model namespace.
+    /// within a `(model_id, revision)` namespace.
     by_flat: HashMap<Vec<u8>, Entry>,
     seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
     inactive: Box<dyn InactiveIndex>,
@@ -49,7 +73,7 @@ struct Namespace {
 }
 
 impl Namespace {
-    fn new(inactive_cap: usize) -> Self {
+    fn new(descriptor: ModelDescriptor, inactive_cap: usize) -> Self {
         let cap = inactive_cap.max(1);
         let tracker = FrequencyTrackingCapacity::Small.create_tracker();
         let registry = BlockRegistry::builder()
@@ -60,6 +84,7 @@ impl Namespace {
                 .expect("Lineage+Frequency thresholds"),
         );
         Self {
+            descriptor,
             registry,
             handles: HashMap::new(),
             by_flat: HashMap::new(),
@@ -100,7 +125,7 @@ impl Namespace {
 
 /// Process-local authority state.
 pub struct Authority {
-    namespaces: HashMap<String, Namespace>,
+    namespaces: HashMap<NamespaceKey, Namespace>,
     inactive_cap: usize,
     /// Completed request barriers: `(request_id, node_id)`.
     /// P4.3: agent flushes L2 + `ReportRef(WRITEBACK,-1)` **before** this RPC;
@@ -124,20 +149,72 @@ impl Authority {
         }
     }
 
-    fn ns_mut(&mut self, model_id: &str) -> &mut Namespace {
+    /// P4.5: register `(model_id, revision)` namespace. Idempotent — re-register
+    /// updates descriptor metadata only (radix / locations kept).
+    pub fn register_model(&mut self, desc: ModelDescriptor) -> Result<(), String> {
+        if desc.model_id.is_empty() {
+            return Err("RegisterModel: model_id required".into());
+        }
+        let key = NamespaceKey::new(desc.model_id.clone(), desc.revision.clone());
+        if let Some(ns) = self.namespaces.get_mut(&key) {
+            ns.descriptor = desc;
+            return Ok(());
+        }
         let cap = self.inactive_cap;
-        self.namespaces
-            .entry(model_id.to_string())
-            .or_insert_with(|| Namespace::new(cap))
+        self.namespaces.insert(key, Namespace::new(desc, cap));
+        Ok(())
     }
 
-    fn ns(&self, model_id: &str) -> Option<&Namespace> {
-        self.namespaces.get(model_id)
+    /// P4.5: cascade-delete one namespace (radix handles + locations + inactive).
+    /// Byte payloads in kv-pool are not touched here (GC → P4.7).
+    ///
+    /// Production drain / F4 in-flight finish-before-delete is deferred; this
+    /// slice force-drops the view (F11 级联删原型).
+    pub fn deregister_model(&mut self, model_id: &str, revision: &str) -> Result<(), String> {
+        if model_id.is_empty() {
+            return Err("DeregisterModel: model_id required".into());
+        }
+        let key = NamespaceKey::new(model_id, revision);
+        if self.namespaces.remove(&key).is_none() {
+            return Err(format!(
+                "DeregisterModel: unknown namespace ({model_id}, rev={revision:?})"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn has_namespace(&self, model_id: &str, revision: &str) -> bool {
+        self.namespaces
+            .contains_key(&NamespaceKey::new(model_id, revision))
+    }
+
+    pub fn model_descriptor(&self, model_id: &str, revision: &str) -> Option<&ModelDescriptor> {
+        self.namespaces
+            .get(&NamespaceKey::new(model_id, revision))
+            .map(|n| &n.descriptor)
+    }
+
+    /// Number of blocks still in the location view (tests / cascade checks).
+    pub fn block_count(&self, model_id: &str, revision: &str) -> usize {
+        self.ns(model_id, revision)
+            .map(|n| n.by_flat.len())
+            .unwrap_or(0)
+    }
+
+    fn ns_mut(&mut self, model_id: &str, revision: &str) -> Option<&mut Namespace> {
+        self.namespaces
+            .get_mut(&NamespaceKey::new(model_id, revision))
+    }
+
+    fn ns(&self, model_id: &str, revision: &str) -> Option<&Namespace> {
+        self.namespaces.get(&NamespaceKey::new(model_id, revision))
     }
 
     /// Register durable blocks. `prefix_hashes` must be the full ordered chain;
     /// `metas` must be a **contiguous segment** of that chain (miss suffix or
     /// initial prefix — not an arbitrary subset).
+    ///
+    /// Namespace must already exist via [`Self::register_model`].
     pub fn register(
         &mut self,
         node_id: &str,
@@ -151,6 +228,10 @@ impl Authority {
             .iter()
             .find_map(|m| m.id.as_ref().map(|i| i.model_id.clone()))
             .ok_or_else(|| "RegisterBlocks: no KVBlockID".to_string())?;
+        let revision = metas
+            .iter()
+            .find_map(|m| m.id.as_ref().map(|i| i.revision.clone()))
+            .unwrap_or_default();
 
         if prefix_hashes.is_empty() {
             return Err("RegisterBlocks: prefix_hashes required (P4.2 lineage)".into());
@@ -171,6 +252,12 @@ impl Authority {
                 return Err(format!(
                     "RegisterBlocks: mixed model_id {} vs {}",
                     model_id, id.model_id
+                ));
+            }
+            if id.revision != revision {
+                return Err(format!(
+                    "RegisterBlocks: mixed revision {:?} vs {:?}",
+                    revision, id.revision
                 ));
             }
             let Some(&pos) = index_of.get(id.block_hash.as_slice()) else {
@@ -194,8 +281,16 @@ impl Authority {
             }
         }
 
+        if !self.has_namespace(&model_id, &revision) {
+            return Err(format!(
+                "RegisterBlocks: model not registered ({model_id}, rev={revision:?}); call RegisterModel first"
+            ));
+        }
+
         let lineage = lineage_from_prefix(prefix_hashes);
-        let ns = self.ns_mut(&model_id);
+        let ns = self
+            .ns_mut(&model_id, &revision)
+            .expect("checked has_namespace");
 
         for mut meta in metas {
             let Some(id) = meta.id.clone() else { continue };
@@ -253,22 +348,26 @@ impl Authority {
     /// (`handles.insert` when a flat is in `by_flat` but missing from the registry
     /// index) and TinyLFU `match_sequence_hash(..., touch=true)`.
     ///
+    /// Unknown / unregistered namespace → miss (no lazy create; P4.5).
+    ///
     /// P4.3: fine under a single `Mutex<Authority>`. P6 HA / 读写分锁时：懒修复
     /// 应挪到 register 路径，lookup 热路径只读 + 可选无锁 touch，避免永远写锁
     ///（#20；PR #31 review §4.6）。
     pub fn lookup_prefix(
         &mut self,
         model_id: &str,
+        revision: &str,
         prefix_hashes: &[Vec<u8>],
         requester: &str,
     ) -> (Vec<ReusableBlock>, u32, bool) {
         if prefix_hashes.is_empty() {
             return (Vec::new(), 0, false);
         }
-        // Ensure namespace exists so we can lazy-index flats registered earlier.
-        let _ = self.ns_mut(model_id);
+        let Some(_) = self.ns(model_id, revision) else {
+            return (Vec::new(), 0, false);
+        };
         let lineage = lineage_from_prefix(prefix_hashes);
-        let ns = self.ns_mut(model_id);
+        let ns = self.ns_mut(model_id, revision).expect("checked");
 
         let mut out = Vec::new();
         let mut hit = 0u32;
@@ -327,7 +426,7 @@ impl Authority {
     pub fn locate(&self, ids: &[KvBlockId]) -> Vec<BlockMeta> {
         let mut blocks = Vec::new();
         for id in ids {
-            if let Some(ns) = self.ns(&id.model_id) {
+            if let Some(ns) = self.ns(&id.model_id, &id.revision) {
                 if let Some(entry) = ns.by_flat.get(&id.block_hash) {
                     blocks.push(entry.meta.clone());
                 }
@@ -343,8 +442,8 @@ impl Authority {
             .as_ref()
             .ok_or_else(|| "RefDelta missing id".to_string())?;
         let ns = self
-            .ns(&id.model_id)
-            .ok_or_else(|| format!("unknown model_id {}", id.model_id))?;
+            .ns(&id.model_id, &id.revision)
+            .ok_or_else(|| format!("unknown namespace ({}, rev={:?})", id.model_id, id.revision))?;
         if !ns.by_flat.contains_key(&id.block_hash) {
             return Err("RefDelta: unknown block_hash".to_string());
         }
@@ -358,7 +457,8 @@ impl Authority {
     pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
         self.check_report_ref(delta)?;
         let id = delta.id.as_ref().expect("checked");
-        let ns = self.namespaces.get_mut(&id.model_id).expect("checked");
+        let key = NamespaceKey::from_id(id);
+        let ns = self.namespaces.get_mut(&key).expect("checked");
         let entry = ns.by_flat.get(&id.block_hash).expect("checked");
         let seq = entry.seq_hash;
         let block_id = entry.block_id;
@@ -411,20 +511,22 @@ impl Authority {
     /// Returns number of blocks removed from the location view.
     ///
     /// Production pressure-driven `allocate` (and agent `ReportRef` feeding) → later slice.
-    pub fn evict_n(&mut self, model_id: &str, n: usize) -> usize {
-        let Some(ns) = self.namespaces.get_mut(model_id) else {
+    pub fn evict_n(&mut self, model_id: &str, revision: &str, n: usize) -> usize {
+        let Some(ns) = self.ns_mut(model_id, revision) else {
             return 0;
         };
         ns.drop_inactive_victims(n)
     }
 
     /// Inactive index size (tests).
-    pub fn inactive_len(&self, model_id: &str) -> usize {
-        self.ns(model_id).map(|n| n.inactive.len()).unwrap_or(0)
+    pub fn inactive_len(&self, model_id: &str, revision: &str) -> usize {
+        self.ns(model_id, revision)
+            .map(|n| n.inactive.len())
+            .unwrap_or(0)
     }
 
-    pub fn global_ref(&self, model_id: &str, flat: &[u8]) -> i64 {
-        let Some(ns) = self.ns(model_id) else {
+    pub fn global_ref(&self, model_id: &str, revision: &str, flat: &[u8]) -> i64 {
+        let Some(ns) = self.ns(model_id, revision) else {
             return 0;
         };
         let Some(entry) = ns.by_flat.get(flat) else {
@@ -459,15 +561,15 @@ impl Authority {
     pub fn publish_location(
         &mut self,
         model_id: &str,
+        revision: &str,
         flat: &[u8],
         tier: Tier,
         node_id: &str,
         present: bool,
     ) -> Result<(), String> {
         let ns = self
-            .namespaces
-            .get_mut(model_id)
-            .ok_or_else(|| format!("unknown model_id {model_id}"))?;
+            .ns_mut(model_id, revision)
+            .ok_or_else(|| format!("unknown namespace ({model_id}, rev={revision:?})"))?;
         let entry = ns
             .by_flat
             .get_mut(flat)
@@ -515,13 +617,13 @@ impl Authority {
     pub fn set_l3_present(
         &mut self,
         model_id: &str,
+        revision: &str,
         flat: &[u8],
         present: bool,
     ) -> Result<(), String> {
         let ns = self
-            .namespaces
-            .get_mut(model_id)
-            .ok_or_else(|| format!("unknown model_id {model_id}"))?;
+            .ns_mut(model_id, revision)
+            .ok_or_else(|| format!("unknown namespace ({model_id}, rev={revision:?})"))?;
         let entry = ns
             .by_flat
             .get_mut(flat)
@@ -530,8 +632,8 @@ impl Authority {
         Ok(())
     }
 
-    pub fn has_l0_on(&self, model_id: &str, flat: &[u8], node_id: &str) -> bool {
-        self.ns(model_id)
+    pub fn has_l0_on(&self, model_id: &str, revision: &str, flat: &[u8], node_id: &str) -> bool {
+        self.ns(model_id, revision)
             .and_then(|n| n.by_flat.get(flat))
             .map(|e| {
                 e.meta

@@ -18,15 +18,15 @@ KV Cache Pool 把 KV cache 从"附属于产生它的 GPU"提升为全局可寻�
 
 ```proto
 message KVBlockID { string model_id; bytes block_hash;
-                    PoolKind pool_kind; string scope; }   // pool_kind=TARGET|DRAFT, scope 多租户预留(默认 public)
+                    PoolKind pool_kind; string scope; string revision; }  // revision=P4.5; scope 多租户预留
 message Location  { Tier tier; string node_id; uint64 segment_id; uint64 offset; }  // 仅 L0/L1/L2(tier∈{L0,L1,L2} 硬约束)
 message BlockMeta { KVBlockID id; BlockKind block_kind; repeated Location locations;
                     bool l3_present; uint32 ref_count; }
 ```
 > 完整 schema 见 [`../../proto/schema.proto`](../../proto/schema.proto),RPC 边界见 [`../../proto/lake.proto`](../../proto/lake.proto)。
-- **block = page(128 token × 全部层)**,身份按 token 段而非按层:`KVBlockID = (model_id, block_hash, pool_kind, scope)`,**不含 `layer_idx`**。`block_hash` 本就 layer-agnostic(链式哈希只吃 token),layer_idx 只在 `LayerSlice`(子块传输切片)里出现。对齐 SGLang radix(每页一 hash 当 L3 key)、vLLM prefix caching(token-based hash 跨层共享),也与下文 page-first「整块所有层连续、传引擎单条 `(ptr,len)`」一致。
-- `block_hash` = 前缀链式哈希 `hash(parent_block_hash || 本块 token ids)`,序列起点块 parent = ⊥(空)。相同前缀 → 相同链式 hash → 命中同一 KV。**算法可插拔**(BLAKE3-128 / SHA-256-128 / SHA-256-256),由模型注册元数据声明,proto 只规定 ≥128-bit + 链式;不同 `model_id` 可用不同算法。
-- `locations` 只含 L0/L1/L2 段式位置(`node_id + segment_id + offset`,仿 Mooncake SegmentID),`tier∈{L0,L1,L2}` 为硬约束(L3 永不进 Location);**L3 不进 Location**,用 `l3_present` bool,object key = `s3://lake/kv/{model_id}/{block_hash}` 现场拼(仿 SGLang L3 用链式 hash 当 key、不记位置实时查后端)。`l3_present=false` 且 `locations` 全空 → block 不存在;`l3_present=true` → 即使缓存副本全空仍存在(从 L3 回填)。层间不变量:L0/L1 缓存副本可各一份;L2/L3 稳态二选一(XOR,允许迁移窗口短暂双有);L2 同层不冗余(见 [`storage-layer.md`](storage-layer.md)「层间副本 vs 移动」)。
+- **block = page(128 token × 全部层)**,身份按 token 段而非按层:`KVBlockID = (model_id, revision, block_hash, pool_kind, scope)`,**不含 `layer_idx`**。`block_hash` 本就 layer-agnostic(链式哈希只吃 token),layer_idx 只在 `LayerSlice`(子块传输切片)里出现。对齐 SGLang radix(每页一 hash 当 L3 key)、vLLM prefix caching(token-based hash 跨层共享),也与下文 page-first「整块所有层连续、传引擎单条 `(ptr,len)`」一致。
+- `block_hash` = 前缀链式哈希 `hash(parent_block_hash || 本块 token ids)`,序列起点块 parent = ⊥(空)。相同前缀 → 相同链式 hash → 命中同一 KV。**算法可插拔**(BLAKE3-128 / SHA-256-128 / SHA-256-256),由模型注册元数据(`ModelDescriptor.hash_algo`)声明,proto 只规定 ≥128-bit + 链式;不同 `(model_id, revision)` 可用不同算法。
+- `locations` 只含 L0/L1/L2 段式位置(`node_id + segment_id + offset`,仿 Mooncake SegmentID),`tier∈{L0,L1,L2}` 为硬约束(L3 永不进 Location);**L3 不进 Location**,用 `l3_present` bool,object key = `s3://lake/kv/{model_id}/{revision}/{block_hash}` 现场拼(仿 SGLang L3 用链式 hash 当 key、不记位置实时查后端)。`l3_present=false` 且 `locations` 全空 → block 不存在;`l3_present=true` → 即使缓存副本全空仍存在(从 L3 回填)。层间不变量:L0/L1 缓存副本可各一份;L2/L3 稳态二选一(XOR,允许迁移窗口短暂双有);L2 同层不冗余(见 [`storage-layer.md`](storage-layer.md)「层间副本 vs 移动」)。
 - `rkey/lkey` 不进 schema——MR 注册时 per-NIC 动态产生,传输时 agent 查本地 MR 表得 lkey、查 peer BufferDesc 得 rkey(仿 Mooncake)。
 
 内容寻址使前缀复用天然成立:相同**前缀** → 相同 block hash → 命中同一 KV。
@@ -35,11 +35,11 @@ message BlockMeta { KVBlockID id; BlockKind block_kind; repeated Location locati
 
 **block 粒度 = 128 token**:缓存命中 / 复用 / 传输 / 写回的最小单位。128 为初版默认,待 P7 校准(与 SGLang `--page-size`、vLLM `block_size` 同量级)。L1–L3 统一按 128-token block、page-first 组织(两类复用条件一致、不区分类型,见 [`storage-layer.md`](storage-layer.md) "KV 类型"节)。HBM(L0)的 t-type block 同取 128,便于 L0↔L1 整块零拷贝;r-type 在 L0 不按 block 而按紧凑状态槽,落 L1+ 时再按 block 切(trailing pages 或 state checkpoint)。
 
-**模型无关**:`model_id` 是寻址命名空间,Pool 不解释张量布局(层数、头维、dtype),按不透明字节块存取。接入新模型只需注册 `model_id`,无需新建池。
+**模型无关**:池内命名空间是 `(model_id, revision)`(P4.5 显式 `RegisterModel`),Pool 不解释张量布局(层数、头维、dtype),按不透明字节块存取。接入新模型/revision 只需注册命名空间,无需新建池。`BlockSpec` 挂 `ModelDescriptor`,不进 `KVBlockID`。
 
 **drafter / r-type 不物理分池**:`pool_kind`(TARGET|DRAFT)与 `block_kind`(T_TYPE|R_TYPE_STATE|R_TYPE_TRAILING)是 `BlockMeta` 元数据字段,区分命名空间与 block 内布局,不改物理池结构——L1–L3 统一按 block 不透明存(参考 SGLang `PoolName.DRAFT` 命名区分但 lake 不分物理池、vLLM `kv_cache_spec_kind`)。block 内装逐 token KV 还是紧凑 state 快照由 `block_kind` 声明,Pool 不解释。
 
-**多租户预留(不实现)**:`KVBlockID.scope` 字段已在 schema,**当前不入寻址**——默认 `"public"`,寻址/分片仍按 `hash(model_id, block_hash, pool_kind)`(**忽略 scope**),同一 `model_id` 内 KV 全局共享复用,不做租户间私有隔离(多租户归外部控制面,见 [`../features/features.md`](../features/features.md) F8)。未来 F8 启用时把 `scope` 纳入 hash + 寻址过滤,**不改 KVBlockID 结构**(字段已在),只改寻址语义——向后兼容。
+**多租户预留(不实现)**:`KVBlockID.scope` 字段已在 schema,**当前不入寻址**——默认 `"public"`,寻址/分片仍按 `(model_id, revision, block_hash, pool_kind)`(**忽略 scope**),同一命名空间内 KV 全局共享复用,不做租户间私有隔离(多租户归外部控制面,见 [`../features/features.md`](../features/features.md) F8)。未来 F8 启用时把 `scope` 纳入 hash + 寻址过滤,**不改 KVBlockID 结构**(字段已在),只改寻址语义——向后兼容。
 
 ### t-type / r-type:复用条件一致,区别在 HBM 存储形态
 
@@ -67,7 +67,7 @@ message BlockMeta { KVBlockID id; BlockKind block_kind; repeated Location locati
 
 ### 前缀树索引
 
-radix tree 归存储池,按 `model_id` 分命名空间。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。
+radix tree 归存储池,按 `(model_id, revision)` 分命名空间(每命名空间一个 `BlockRegistry` / 一棵 radix)。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。下线级联删 = drop 整个命名空间(强句柄释放 → radix Weak 失效)。
 
 **权威与镜像**：radix tree 的**权威**在存储控制面进程内存（位置视图权威的一部分,见 [`control-plane.md`](control-plane.md)「位置视图权威的归属」）。Router 与各 agent 各持一份**只读镜像**（控制面 gRPC stream 推送的副本,见 [`control-plane.md`](control-plane.md)「Router 持位置视图镜像」）——它们只读、不写、不拥有;满块注册写权威（控制面内存,release 一致,不进 etcd）,不写任何本地索引。
 
