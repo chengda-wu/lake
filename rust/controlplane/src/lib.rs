@@ -27,6 +27,36 @@ pub use lake_proto::lake::*;
 
 use control_plane_service_server::ControlPlaneService;
 
+/// Keys needed for [`Authority::preflight_register`] / `AdmitRegisterBlocks` RPC.
+fn admit_keys_from_request(
+    req: &RegisterBlocksRequest,
+) -> Result<(String, String, i32, Vec<Vec<u8>>), String> {
+    let model_id = req
+        .blocks
+        .iter()
+        .find_map(|m| m.id.as_ref().map(|i| i.model_id.clone()))
+        .ok_or_else(|| "AdmitRegisterBlocks: no KVBlockID".to_string())?;
+    let revision = req
+        .blocks
+        .iter()
+        .find_map(|m| m.id.as_ref().map(|i| i.revision.clone()))
+        .unwrap_or_default();
+    let pool_kind = req
+        .blocks
+        .iter()
+        .find_map(|m| m.id.as_ref().map(|i| i.pool_kind))
+        .unwrap_or(PoolKind::Target as i32);
+    let hashes: Vec<Vec<u8>> = req
+        .blocks
+        .iter()
+        .filter_map(|m| m.id.as_ref().map(|i| i.block_hash.clone()))
+        .collect();
+    if hashes.is_empty() {
+        return Err("AdmitRegisterBlocks: no block hashes".into());
+    }
+    Ok((model_id, revision, pool_kind, hashes))
+}
+
 #[derive(Clone, Default)]
 pub struct ControlPlane {
     inner: Arc<Mutex<Authority>>,
@@ -74,6 +104,44 @@ impl ControlPlaneService for ControlPlane {
         let auth = self.inner.lock().unwrap();
         let blocks = auth.locate(&req.ids);
         Ok(Response::new(LocateResponse { blocks }))
+    }
+
+    async fn admit_register_blocks(
+        &self,
+        request: Request<RegisterBlocksRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let (model_id, revision, pool_kind, hashes) = match admit_keys_from_request(&req) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(Response::new(Ack {
+                    ok: false,
+                    err: e,
+                    backpressure: None,
+                }));
+            }
+        };
+        let auth = self.inner.lock().unwrap();
+        match auth.preflight_register(&model_id, &revision, pool_kind, &hashes) {
+            Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+                backpressure: None,
+            })),
+            Ok(RegisterStatus::RejectedHardQuota(bp)) => Ok(Response::new(Ack {
+                ok: false,
+                err: format!(
+                    "AdmitRegisterBlocks: hard quota exceeded (deficit={})",
+                    bp.deficit_bytes
+                ),
+                backpressure: Some(bp),
+            })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
+        }
     }
 
     async fn register_blocks(
@@ -268,6 +336,8 @@ const _ANCHOR: fn() = || {
     let _ = GetModelQuotaRequest::default();
     let _ = BackpressureSignal::default();
     let _ = RefDelta::default();
+    // AdmitRegisterBlocks reuses RegisterBlocksRequest on the wire.
+    let _ = RegisterBlocksRequest::default();
 };
 
 #[cfg(test)]

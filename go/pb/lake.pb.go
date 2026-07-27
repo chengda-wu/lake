@@ -3170,11 +3170,12 @@ const file_lake_proto_rawDesc = "" +
 	"PullPolicy\x12\x14\n" +
 	"\x10PULL_BEST_EFFORT\x10\x00\x12\x16\n" +
 	"\x12PULL_WAIT_COMPLETE\x10\x01\x12\x10\n" +
-	"\fPULL_TIMEOUT\x10\x022\x95\x05\n" +
+	"\fPULL_TIMEOUT\x10\x022\xd4\x05\n" +
 	"\x13ControlPlaneService\x12;\n" +
 	"\rSubscribeView\x12\x16.lake.SubscribeRequest\x1a\x10.lake.ViewUpdate0\x01\x12E\n" +
 	"\fLookupPrefix\x12\x19.lake.LookupPrefixRequest\x1a\x1a.lake.LookupPrefixResponse\x123\n" +
-	"\x06Locate\x12\x13.lake.LocateRequest\x1a\x14.lake.LocateResponse\x128\n" +
+	"\x06Locate\x12\x13.lake.LocateRequest\x1a\x14.lake.LocateResponse\x12=\n" +
+	"\x13AdmitRegisterBlocks\x12\x1b.lake.RegisterBlocksRequest\x1a\t.lake.Ack\x128\n" +
 	"\x0eRegisterBlocks\x12\x1b.lake.RegisterBlocksRequest\x1a\t.lake.Ack\x12(\n" +
 	"\tReportRef\x12\x0e.lake.RefDelta\x1a\t.lake.Ack(\x01\x128\n" +
 	"\x0eRequestBarrier\x12\x1b.lake.RequestBarrierRequest\x1a\t.lake.Ack\x121\n" +
@@ -3315,53 +3316,55 @@ var file_lake_proto_depIdxs = []int32{
 	6,  // 37: lake.ControlPlaneService.SubscribeView:input_type -> lake.SubscribeRequest
 	9,  // 38: lake.ControlPlaneService.LookupPrefix:input_type -> lake.LookupPrefixRequest
 	21, // 39: lake.ControlPlaneService.Locate:input_type -> lake.LocateRequest
-	23, // 40: lake.ControlPlaneService.RegisterBlocks:input_type -> lake.RegisterBlocksRequest
-	24, // 41: lake.ControlPlaneService.ReportRef:input_type -> lake.RefDelta
-	25, // 42: lake.ControlPlaneService.RequestBarrier:input_type -> lake.RequestBarrierRequest
-	26, // 43: lake.ControlPlaneService.Lease:input_type -> lake.LeaseHeartbeat
-	14, // 44: lake.ControlPlaneService.RegisterModel:input_type -> lake.RegisterModelRequest
-	15, // 45: lake.ControlPlaneService.DeregisterModel:input_type -> lake.DeregisterModelRequest
-	16, // 46: lake.ControlPlaneService.SetModelQuota:input_type -> lake.SetModelQuotaRequest
-	17, // 47: lake.ControlPlaneService.GetModelQuota:input_type -> lake.GetModelQuotaRequest
-	28, // 48: lake.AgentService.Dispatch:input_type -> lake.DispatchRequest
-	29, // 49: lake.AgentService.ReportLoad:input_type -> lake.LoadReport
-	30, // 50: lake.AgentService.PlaceBlocks:input_type -> lake.PlaceBlocksRequest
-	31, // 51: lake.TransferService.SubmitTransfer:input_type -> lake.TransferBatchRequest
-	34, // 52: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
-	36, // 53: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
-	37, // 54: lake.TransferService.Pull:input_type -> lake.PullRequest
-	39, // 55: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
-	40, // 56: lake.TransferService.Publish:input_type -> lake.PublishRequest
-	41, // 57: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
-	44, // 58: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
-	46, // 59: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
-	48, // 60: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
-	7,  // 61: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
-	19, // 62: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
-	22, // 63: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
-	43, // 64: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
-	43, // 65: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
-	43, // 66: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
-	27, // 67: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
-	43, // 68: lake.ControlPlaneService.RegisterModel:output_type -> lake.Ack
-	43, // 69: lake.ControlPlaneService.DeregisterModel:output_type -> lake.Ack
-	43, // 70: lake.ControlPlaneService.SetModelQuota:output_type -> lake.Ack
-	18, // 71: lake.ControlPlaneService.GetModelQuota:output_type -> lake.GetModelQuotaResponse
-	43, // 72: lake.AgentService.Dispatch:output_type -> lake.Ack
-	43, // 73: lake.AgentService.ReportLoad:output_type -> lake.Ack
-	43, // 74: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
-	33, // 75: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
-	35, // 76: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
-	43, // 77: lake.TransferService.FreeBatch:output_type -> lake.Ack
-	38, // 78: lake.TransferService.Pull:output_type -> lake.PullResponse
-	43, // 79: lake.TransferService.FreePull:output_type -> lake.Ack
-	43, // 80: lake.TransferService.Publish:output_type -> lake.Ack
-	43, // 81: lake.TransferService.FreePublish:output_type -> lake.Ack
-	43, // 82: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
-	47, // 83: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
-	49, // 84: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
-	61, // [61:85] is the sub-list for method output_type
-	37, // [37:61] is the sub-list for method input_type
+	23, // 40: lake.ControlPlaneService.AdmitRegisterBlocks:input_type -> lake.RegisterBlocksRequest
+	23, // 41: lake.ControlPlaneService.RegisterBlocks:input_type -> lake.RegisterBlocksRequest
+	24, // 42: lake.ControlPlaneService.ReportRef:input_type -> lake.RefDelta
+	25, // 43: lake.ControlPlaneService.RequestBarrier:input_type -> lake.RequestBarrierRequest
+	26, // 44: lake.ControlPlaneService.Lease:input_type -> lake.LeaseHeartbeat
+	14, // 45: lake.ControlPlaneService.RegisterModel:input_type -> lake.RegisterModelRequest
+	15, // 46: lake.ControlPlaneService.DeregisterModel:input_type -> lake.DeregisterModelRequest
+	16, // 47: lake.ControlPlaneService.SetModelQuota:input_type -> lake.SetModelQuotaRequest
+	17, // 48: lake.ControlPlaneService.GetModelQuota:input_type -> lake.GetModelQuotaRequest
+	28, // 49: lake.AgentService.Dispatch:input_type -> lake.DispatchRequest
+	29, // 50: lake.AgentService.ReportLoad:input_type -> lake.LoadReport
+	30, // 51: lake.AgentService.PlaceBlocks:input_type -> lake.PlaceBlocksRequest
+	31, // 52: lake.TransferService.SubmitTransfer:input_type -> lake.TransferBatchRequest
+	34, // 53: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
+	36, // 54: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
+	37, // 55: lake.TransferService.Pull:input_type -> lake.PullRequest
+	39, // 56: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
+	40, // 57: lake.TransferService.Publish:input_type -> lake.PublishRequest
+	41, // 58: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
+	44, // 59: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
+	46, // 60: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
+	48, // 61: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
+	7,  // 62: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
+	19, // 63: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
+	22, // 64: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
+	43, // 65: lake.ControlPlaneService.AdmitRegisterBlocks:output_type -> lake.Ack
+	43, // 66: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
+	43, // 67: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
+	43, // 68: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
+	27, // 69: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
+	43, // 70: lake.ControlPlaneService.RegisterModel:output_type -> lake.Ack
+	43, // 71: lake.ControlPlaneService.DeregisterModel:output_type -> lake.Ack
+	43, // 72: lake.ControlPlaneService.SetModelQuota:output_type -> lake.Ack
+	18, // 73: lake.ControlPlaneService.GetModelQuota:output_type -> lake.GetModelQuotaResponse
+	43, // 74: lake.AgentService.Dispatch:output_type -> lake.Ack
+	43, // 75: lake.AgentService.ReportLoad:output_type -> lake.Ack
+	43, // 76: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
+	33, // 77: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
+	35, // 78: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
+	43, // 79: lake.TransferService.FreeBatch:output_type -> lake.Ack
+	38, // 80: lake.TransferService.Pull:output_type -> lake.PullResponse
+	43, // 81: lake.TransferService.FreePull:output_type -> lake.Ack
+	43, // 82: lake.TransferService.Publish:output_type -> lake.Ack
+	43, // 83: lake.TransferService.FreePublish:output_type -> lake.Ack
+	43, // 84: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
+	47, // 85: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
+	49, // 86: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
+	62, // [62:87] is the sub-list for method output_type
+	37, // [37:62] is the sub-list for method input_type
 	37, // [37:37] is the sub-list for extension type_name
 	37, // [37:37] is the sub-list for extension extendee
 	0,  // [0:37] is the sub-list for field type_name

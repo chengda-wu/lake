@@ -10,8 +10,11 @@ use lake_tiered_store::{LocalTier, LocationEvent};
 
 /// Subset of ControlPlane RPCs used by PutEnd / tier publish.
 pub trait ControlPlanePort {
-    /// Quota preflight **before** durable flush (Mooncake PutStart-shaped).
-    /// Hard reject must not leave orphan tier bytes.
+    /// Quota preflight **before** durable flush.
+    ///
+    /// Mirrors proto `ControlPlaneService.AdmitRegisterBlocks` (P4.6 方案 A).
+    /// In-process [`AuthorityPort`] calls `Authority::preflight_register` directly;
+    /// tonic clients should call the same RPC over the wire.
     fn admit_register_blocks(&mut self, req: &RegisterBlocksRequest) -> Result<(), String>;
     fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String>;
     fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String>;
