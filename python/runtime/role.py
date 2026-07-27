@@ -45,6 +45,11 @@ class RoleConfig:
     allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
     # C3：mock=P3 可复现递推；tiny_lm=纯 Python 最小因果 LM
     model_backend: str = "mock"  # mock | tiny_lm
+    # C12：模型加载 / warmup 骨架
+    model_id: str = "mock-llm"
+    model_revision: str = ""
+    warmup_num_reqs: int = 1
+    warmup_tokens_per_req: int = 1
     # arena / TP / 指标标签等留 D3
 
     def __post_init__(self) -> None:
@@ -54,6 +59,12 @@ class RoleConfig:
             )
         if self.max_running_reqs <= 0:
             raise ValueError(f"max_running_reqs must be > 0, got {self.max_running_reqs}")
+        if self.warmup_num_reqs <= 0:
+            raise ValueError(f"warmup_num_reqs must be > 0, got {self.warmup_num_reqs}")
+        if self.warmup_tokens_per_req <= 0:
+            raise ValueError(
+                f"warmup_tokens_per_req must be > 0, got {self.warmup_tokens_per_req}"
+            )
 
     @classmethod
     def from_env(cls) -> "RoleConfig":
@@ -65,6 +76,8 @@ class RoleConfig:
         LAKE_NUM_DRAFT_TOKENS / LAKE_MAX_RUNNING_REQS / LAKE_PULL_BUDGET_MS
         LAKE_MAX_NUM_SCHEDULED_TOKENS / LAKE_LONG_PREFILL_TOKEN_THRESHOLD
         LAKE_MAX_MODEL_LENGTH
+        LAKE_MODEL_ID / LAKE_MODEL_REVISION
+        LAKE_WARMUP_NUM_REQS / LAKE_WARMUP_TOKENS_PER_REQ
         """
         role_raw = os.environ.get("LAKE_WORKER_ROLE", "hybrid").strip().lower()
         try:
@@ -75,6 +88,8 @@ class RoleConfig:
         return cls(
             role=role,
             model_backend=backend,
+            model_id=os.environ.get("LAKE_MODEL_ID", "mock-llm").strip() or "mock-llm",
+            model_revision=os.environ.get("LAKE_MODEL_REVISION", "").strip(),
             enable_drafter=_env_bool("LAKE_ENABLE_DRAFTER", False),
             enable_overlap=_env_bool("LAKE_ENABLE_OVERLAP", True),
             allow_partial_hit=_env_bool("LAKE_ALLOW_PARTIAL_HIT", False),
@@ -84,4 +99,6 @@ class RoleConfig:
             long_prefill_token_threshold=_env_int("LAKE_LONG_PREFILL_TOKEN_THRESHOLD", 0),
             max_model_length=_env_int("LAKE_MAX_MODEL_LENGTH", 0),
             pull_budget_ms=_env_int("LAKE_PULL_BUDGET_MS", 0),
+            warmup_num_reqs=_env_int("LAKE_WARMUP_NUM_REQS", 1),
+            warmup_tokens_per_req=_env_int("LAKE_WARMUP_TOKENS_PER_REQ", 1),
         )

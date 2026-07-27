@@ -97,6 +97,10 @@ def test_role_config_from_env() -> None:
         "LAKE_ENABLE_DRAFTER",
         "LAKE_MAX_RUNNING_REQS",
         "LAKE_ENABLE_OVERLAP",
+        "LAKE_MODEL_ID",
+        "LAKE_MODEL_REVISION",
+        "LAKE_WARMUP_NUM_REQS",
+        "LAKE_WARMUP_TOKENS_PER_REQ",
     ]
     saved = {k: os.environ.get(k) for k in keys}
     try:
@@ -105,12 +109,20 @@ def test_role_config_from_env() -> None:
         os.environ["LAKE_ENABLE_DRAFTER"] = "1"
         os.environ["LAKE_MAX_RUNNING_REQS"] = "3"
         os.environ["LAKE_ENABLE_OVERLAP"] = "0"
+        os.environ["LAKE_MODEL_ID"] = "tiny"
+        os.environ["LAKE_MODEL_REVISION"] = "r1"
+        os.environ["LAKE_WARMUP_NUM_REQS"] = "2"
+        os.environ["LAKE_WARMUP_TOKENS_PER_REQ"] = "3"
         cfg = RoleConfig.from_env()
         assert cfg.role == WorkerRole.PREFILL
         assert cfg.model_backend == "tiny_lm"
+        assert cfg.model_id == "tiny"
+        assert cfg.model_revision == "r1"
         assert cfg.enable_drafter is True
         assert cfg.max_running_reqs == 3
         assert cfg.enable_overlap is False
+        assert cfg.warmup_num_reqs == 2
+        assert cfg.warmup_tokens_per_req == 3
     finally:
         for k, v in saved.items():
             if v is None:
