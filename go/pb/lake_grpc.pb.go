@@ -608,6 +608,7 @@ const (
 	TransferService_FreeBatch_FullMethodName         = "/lake.TransferService/FreeBatch"
 	TransferService_Pull_FullMethodName              = "/lake.TransferService/Pull"
 	TransferService_Publish_FullMethodName           = "/lake.TransferService/Publish"
+	TransferService_FreePublish_FullMethodName       = "/lake.TransferService/FreePublish"
 )
 
 // TransferServiceClient is the client API for TransferService service.
@@ -635,6 +636,10 @@ type TransferServiceClient interface {
 	//	Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
 	Pull(ctx context.Context, in *PullRequest, opts ...grpc.CallOption) (*PullResponse, error)
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*Ack, error)
+	// 释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
+	//
+	//	不调用则按请求数常驻增长(复审 should-fix)。请求结束 / barrier 后应调一次。
+	FreePublish(ctx context.Context, in *FreePublishRequest, opts ...grpc.CallOption) (*Ack, error)
 }
 
 type transferServiceClient struct {
@@ -695,6 +700,16 @@ func (c *transferServiceClient) Publish(ctx context.Context, in *PublishRequest,
 	return out, nil
 }
 
+func (c *transferServiceClient) FreePublish(ctx context.Context, in *FreePublishRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, TransferService_FreePublish_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TransferServiceServer is the server API for TransferService service.
 // All implementations must embed UnimplementedTransferServiceServer
 // for forward compatibility.
@@ -720,6 +735,10 @@ type TransferServiceServer interface {
 	//	Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
 	Pull(context.Context, *PullRequest) (*PullResponse, error)
 	Publish(context.Context, *PublishRequest) (*Ack, error)
+	// 释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
+	//
+	//	不调用则按请求数常驻增长(复审 should-fix)。请求结束 / barrier 后应调一次。
+	FreePublish(context.Context, *FreePublishRequest) (*Ack, error)
 	mustEmbedUnimplementedTransferServiceServer()
 }
 
@@ -744,6 +763,9 @@ func (UnimplementedTransferServiceServer) Pull(context.Context, *PullRequest) (*
 }
 func (UnimplementedTransferServiceServer) Publish(context.Context, *PublishRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method Publish not implemented")
+}
+func (UnimplementedTransferServiceServer) FreePublish(context.Context, *FreePublishRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method FreePublish not implemented")
 }
 func (UnimplementedTransferServiceServer) mustEmbedUnimplementedTransferServiceServer() {}
 func (UnimplementedTransferServiceServer) testEmbeddedByValue()                         {}
@@ -856,6 +878,24 @@ func _TransferService_Publish_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TransferService_FreePublish_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FreePublishRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransferServiceServer).FreePublish(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransferService_FreePublish_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransferServiceServer).FreePublish(ctx, req.(*FreePublishRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TransferService_ServiceDesc is the grpc.ServiceDesc for TransferService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -882,6 +922,10 @@ var TransferService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Publish",
 			Handler:    _TransferService_Publish_Handler,
+		},
+		{
+			MethodName: "FreePublish",
+			Handler:    _TransferService_FreePublish_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

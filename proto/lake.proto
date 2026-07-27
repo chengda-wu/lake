@@ -102,6 +102,9 @@ service TransferService {
   //   Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
   rpc Pull(PullRequest) returns (PullResponse);
   rpc Publish(PublishRequest) returns (Ack);
+  // 释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
+  //   不调用则按请求数常驻增长(复审 should-fix)。请求结束 / barrier 后应调一次。
+  rpc FreePublish(FreePublishRequest) returns (Ack);
 }
 
 // =============================================================================
@@ -266,6 +269,9 @@ message PublishRequest {
   uint32 seq                  = 2;  // 仿 SGLang on_publish(seq) overlap fence
   // seq fence 按 request_id 分作用域(并发 publish 互不干扰);空串视为 "_" 默认流。
   string request_id           = 3;
+}
+message FreePublishRequest {
+  string request_id = 1;  // 与 PublishRequest.request_id 同作用域规则(空→"_")
 }
 message LayerSlice {
   lake.KVBlockID id = 1;

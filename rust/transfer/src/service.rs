@@ -71,6 +71,11 @@ impl TransferServer {
         &self.bytes
     }
 
+    /// 观测用:未 FreePublish 的 request 桶数(防泄漏回归测)。
+    pub fn publish_stream_count(&self) -> usize {
+        self.publish.lock().unwrap().len()
+    }
+
     fn task_state_to_proto(s: TaskState) -> i32 {
         match s {
             TaskState::Pending => transfer_status_response::State::Pending as i32,
@@ -252,6 +257,23 @@ impl TransferService for TransferServer {
             err: String::new(),
         }))
     }
+
+    async fn free_publish(
+        &self,
+        request: Request<FreePublishRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let scope = publish_scope(&req.request_id).to_string();
+        let removed = self.publish.lock().unwrap().remove(&scope).is_some();
+        Ok(Response::new(Ack {
+            ok: removed,
+            err: if removed {
+                String::new()
+            } else {
+                format!("unknown publish request_id={scope:?}")
+            },
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +453,48 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(other.ok);
+        assert_eq!(svc.publish_stream_count(), 2);
+
+        // FreePublish 清理后可从 seq=1 重启(复审 should-fix)
+        let freed = svc
+            .free_publish(Request::new(FreePublishRequest {
+                request_id: "req-a".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(freed.ok);
+        assert_eq!(svc.publish_stream_count(), 1);
+        let restart = svc
+            .publish(Request::new(PublishRequest {
+                request_id: "req-a".into(),
+                seq: 1,
+                slices: vec![],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(restart.ok);
+
+        assert!(
+            svc.free_publish(Request::new(FreePublishRequest {
+                request_id: "req-b".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .ok
+        );
+        assert!(
+            svc.free_publish(Request::new(FreePublishRequest {
+                request_id: "req-a".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .ok
+        );
+        assert_eq!(svc.publish_stream_count(), 0);
     }
 
     #[tokio::test]

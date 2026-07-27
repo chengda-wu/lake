@@ -653,6 +653,11 @@ class TransferServiceStub:
                 request_serializer=lake__pb2.PublishRequest.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
                 _registered_method=True)
+        self.FreePublish = channel.unary_unary(
+                '/lake.TransferService/FreePublish',
+                request_serializer=lake__pb2.FreePublishRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class TransferServiceServicer:
@@ -700,6 +705,14 @@ class TransferServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def FreePublish(self, request, context):
+        """释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
+        不调用则按请求数常驻增长(复审 should-fix)。请求结束 / barrier 后应调一次。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TransferServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -726,6 +739,11 @@ def add_TransferServiceServicer_to_server(servicer, server):
             'Publish': grpc.unary_unary_rpc_method_handler(
                     servicer.Publish,
                     request_deserializer=lake__pb2.PublishRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'FreePublish': grpc.unary_unary_rpc_method_handler(
+                    servicer.FreePublish,
+                    request_deserializer=lake__pb2.FreePublishRequest.FromString,
                     response_serializer=lake__pb2.Ack.SerializeToString,
             ),
     }
@@ -868,6 +886,33 @@ class TransferService:
             target,
             '/lake.TransferService/Publish',
             lake__pb2.PublishRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FreePublish(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.TransferService/FreePublish',
+            lake__pb2.FreePublishRequest.SerializeToString,
             lake__pb2.Ack.FromString,
             options,
             channel_credentials,
