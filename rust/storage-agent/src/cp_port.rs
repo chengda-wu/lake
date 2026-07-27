@@ -61,6 +61,10 @@ impl ControlPlanePort for AuthorityPort<'_> {
 }
 
 /// Apply pipeline location hints to the controlplane view.
+///
+/// L1 arms are currently **dead** on the producer side: P4.3 `TierPipeline` /
+/// PutEnd never emit L1 Present/Absent (`ensure_l1_room` drops L1 silently).
+/// Kept so a future L1 presence publisher can reuse this path without API churn.
 pub fn apply_location_events<P: ControlPlanePort>(
     cp: &mut P,
     model_id: &str,
@@ -71,6 +75,7 @@ pub fn apply_location_events<P: ControlPlanePort>(
         match ev {
             LocationEvent::Present { hash, tier } => match tier {
                 LocalTier::L0 => cp.publish_location(model_id, hash, Tier::L0, node_id, true)?,
+                // Reserved: no P4.3 producer emits L1 (see `ensure_l1_room`).
                 LocalTier::L1 => cp.publish_location(model_id, hash, Tier::L1, node_id, true)?,
                 LocalTier::L2 => cp.publish_location(model_id, hash, Tier::L2, node_id, true)?,
                 LocalTier::L3 => cp.set_l3_present(model_id, hash, true)?,

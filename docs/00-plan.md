@@ -224,7 +224,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [ ] 一致性哈希分片 + KV Node 扩缩时的 block 重分布
 - [ ] **多模型生命周期**：模型注册/下线级联删、revision 失效（F11）
 - [ ] **按模型配额与空间分配**（软/硬配额 + 借用 + 背压信号）
-- [ ] **GC**：冷块/孤儿块回收 + 崩溃 reconcile
+- [ ] **GC**：冷块/孤儿块回收 + 崩溃 reconcile（P4.3 review 遗留详见 [#20](https://github.com/chengda-wu/lake/issues/20) P4.7 + 评论「PR #31 review 遗留」：barrier 失败 inactive 窗口、WRITEBACK−1 失败永久冻结、`apply_location_events` 非原子等）
 - [ ] **碎片整理**：逻辑共置 + 物理压实，后台节流可暂停
 
 **完成判据**：前缀复用命中率、驱逐正确性有单测；吞吐 micro-benchmark；多模型隔离/配额/GC/碎片整理各有验证用例。
@@ -251,7 +251,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 
 ## P6 — 弹性与调度（Go）
 
-- [ ] 无状态 router + 本地命中视图镜像（权威在 Rust 存储控制面进程内存,etcd 只 checkpoint;Go Router 零 RPC 读镜像）
+- [ ] 无状态 router + 本地命中视图镜像（权威在 Rust 存储控制面进程内存,etcd 只 checkpoint;Go Router 零 RPC 读镜像；读写分锁时：P4.3 `lookup_prefix` 因懒修复/`touch` 走写锁，懒修复应挪 register 路径——见 `authority.rs`）
 - [ ] 池间调度 + 反压
 - [ ] 基于指标的弹性扩缩容（队列长度/TTFT/ITL/命中率）
 - [ ] 冷启动压缩（权重预加载、layer-async serve、KV prefetch）
@@ -263,7 +263,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 ## P7 — 性能建模与验证
 
 - [ ] 成本模型：KV 传输带宽 vs prefill/decode 计算时间
-- [ ] 分层缓存的命中率/成本曲线（P4.3 仅有 `HitStats` 计数骨架 + criterion micro-bench；真 workload 曲线本项）
+- [ ] 分层缓存的命中率/成本曲线（P4.3 仅有 `HitStats` 计数骨架 + criterion micro-bench；`estimate_promote_cost` = `nbytes × hops`，hops∈{0..3} 对齐 L0/L1/L2/L3→L0 跳数，见 `LocalTierEngine::estimate_promote_cost`；真 workload 曲线与带宽校准本项）
 - [ ] 弹性冷启动时延分解
 - [ ] 回填到 `docs/` 与 SLO，修正非目标与设计假设
 

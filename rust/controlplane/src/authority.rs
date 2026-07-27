@@ -249,6 +249,13 @@ impl Authority {
         Ok(())
     }
 
+    /// Prefix lookup + soft touch. `&mut self` because of **lazy handle repair**
+    /// (`handles.insert` when a flat is in `by_flat` but missing from the registry
+    /// index) and TinyLFU `match_sequence_hash(..., touch=true)`.
+    ///
+    /// P4.3: fine under a single `Mutex<Authority>`. P6 HA / 读写分锁时：懒修复
+    /// 应挪到 register 路径，lookup 热路径只读 + 可选无锁 touch，避免永远写锁
+    ///（#20；PR #31 review §4.6）。
     pub fn lookup_prefix(
         &mut self,
         model_id: &str,

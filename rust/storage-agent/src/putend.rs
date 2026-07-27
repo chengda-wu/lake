@@ -28,6 +28,8 @@ pub struct PutEndSession {
     pub model_id: String,
     pub prefix_hashes: Vec<Vec<u8>>,
     blocks: Vec<PendingBlock>,
+    /// Observability / future assert: true while WRITEBACK+1 is held
+    /// (between `report_refs(+1)` and successful `-1`). Not read by logic yet.
     writeback_open: bool,
 }
 
@@ -72,6 +74,8 @@ impl PutEndSession {
                     locations.push(Location {
                         tier: Tier::L2 as i32,
                         node_id: self.node_id.clone(),
+                        // TODO(P5): real segment_id/offset from NVMe placement
+                        // (#20 P4.3 review §4.3 / P4.4·P5；内存站位无 segment map).
                         segment_id: 1,
                         offset: 0,
                     });
@@ -199,6 +203,11 @@ impl PutEndSession {
             request_id: self.request_id.clone(),
             node_id: self.node_id.clone(),
         }) {
+            // Roll back WRITEBACK+1. Side effect: global_refs may hit 0 → CP
+            // `inactive.insert` (blocks become eviction candidates) even though
+            // Register already succeeded. Correct for "no holder", but leaves a
+            // register→retry window under real tonic + concurrent eviction.
+            // Deferred: #20 P4.7（PR #31 review §4.1 / writeback 泄漏兜底）.
             let _ = cp.report_refs(&self.writeback_deltas(-1));
             self.writeback_open = false;
             unpin_all(store, &self.blocks);

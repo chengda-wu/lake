@@ -173,7 +173,16 @@ impl LocalTierEngine {
         self.l2.get(h).map(|b| b.len() as u64).unwrap_or(0)
     }
 
-    /// Multi-hop promote cost estimate (L3→L2→L1→L0 may each move `nbytes`).
+    /// Multi-hop promote cost estimate for `BandwidthPool` / `HitStats`.
+    ///
+    /// Hop 语义（与 [`promote_to_l0`] 实际 insert 次数对齐，供 P7 校准）：
+    /// - 已在 L0 → `0`
+    /// - 仅缺 L0（已在 L1）→ `1 * n`（L1→L0）
+    /// - 在 L2、无 L1 → `2 * n`（L2→L1 + L1→L0）
+    /// - 仅在 L3 → `3 * n`（L3→L2 fill + L2→L1 + L1→L0）
+    ///
+    /// 这是字节×跳数的骨架模型，不是实测带宽；真 workload 曲线见 `00-plan` P7 /
+    /// #20（PR #31 review §4.5）。
     pub fn estimate_promote_cost(&self, h: &[u8]) -> u64 {
         let Some(n) = self.get(h).map(|b| b.len() as u64) else {
             return 0;
@@ -434,6 +443,13 @@ impl LocalTierEngine {
         Ok(effects)
     }
 
+    /// Drop coldest L1 until under cap.
+    ///
+    /// **静默、不进 [`TierSideEffects`]**：P4.3 从不把 L1 presence 发布到 CP
+    ///（PutEnd/`register_request` 只报 L2；promote 只发 L0；L1=demotion-only）。
+    /// 因此 L1 drop 无需 revoke。`LocationEvent::Present{L1}` / `apply_location_events`
+    /// 的 L1 arm 为未来「满块顺便写 L1 / P7」预留，当前无生产者——若开始发 L1
+    /// 事件，此处必须同步上报 Absent，否则视图漂移（#20；PR #31 review §4.2）。
     fn ensure_l1_room(&mut self) {
         let cap = self.caps.l1;
         if cap == 0 {
