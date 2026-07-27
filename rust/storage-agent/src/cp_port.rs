@@ -3,10 +3,11 @@
 //! 进程内 [`AuthorityPort`] 供单测 / 同进程联调；真 tonic 客户端可另实现本 trait。
 //! `TierPipeline::tick` 返回的 [`lake_tiered_store::LocationEvent`] 经
 //! [`apply_location_events`] 刷到 CP（pipeline 本身不持 CP 句柄）。
+//! P4.8:`Moved` → `relocate_in_view`；`DefragMove` → pipeline enqueue。
 
 use lake_controlplane::Authority;
 use lake_proto::lake::*;
-use lake_tiered_store::{LocalTier, LocationEvent};
+use lake_tiered_store::{LocalTier, LocationEvent, PipelineAction, TierPipeline};
 
 /// Subset of ControlPlane RPCs used by PutEnd / tier publish.
 pub trait ControlPlanePort {
@@ -37,6 +38,18 @@ pub trait ControlPlanePort {
         pool_kind: i32,
         flat: &[u8],
         present: bool,
+    ) -> Result<(), String>;
+    /// P4.8: update segment/offset after defrag Moved.
+    fn relocate_in_view(
+        &mut self,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+        flat: &[u8],
+        tier: Tier,
+        node_id: &str,
+        segment_id: u64,
+        offset: u64,
     ) -> Result<(), String>;
 }
 
@@ -149,6 +162,22 @@ impl ControlPlanePort for AuthorityPort<'_> {
         self.auth
             .set_l3_present(model_id, revision, pool_kind, flat, present)
     }
+
+    fn relocate_in_view(
+        &mut self,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+        flat: &[u8],
+        tier: Tier,
+        node_id: &str,
+        segment_id: u64,
+        offset: u64,
+    ) -> Result<(), String> {
+        self.auth.relocate_in_view(
+            model_id, revision, pool_kind, flat, tier, node_id, segment_id, offset,
+        )
+    }
 }
 
 /// Apply pipeline location hints to the controlplane view.
@@ -226,7 +255,65 @@ pub fn apply_location_events<P: ControlPlanePort>(
                 )?,
                 LocalTier::L3 => cp.set_l3_present(model_id, revision, pool_kind, hash, false)?,
             },
+            LocationEvent::Moved {
+                hash,
+                tier,
+                segment_id,
+                offset,
+                node_id: move_node,
+            } => {
+                let n = if move_node.is_empty() {
+                    node_id
+                } else {
+                    move_node.as_str()
+                };
+                let wire_tier = match tier {
+                    LocalTier::L0 => Tier::L0,
+                    LocalTier::L1 => Tier::L1,
+                    LocalTier::L2 => Tier::L2,
+                    LocalTier::L3 => {
+                        // L3 has no segment coords — ignore.
+                        continue;
+                    }
+                };
+                cp.relocate_in_view(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    wire_tier,
+                    n,
+                    *segment_id,
+                    *offset,
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+/// Enqueue CP-planned defrag moves onto the tier pipeline.
+pub fn enqueue_defrag_moves(pipe: &mut TierPipeline, moves: &[DefragMove]) {
+    for m in moves {
+        if m.compact_segment {
+            pipe.enqueue(PipelineAction::CompactSegment {
+                segment_id: m.segment_id,
+            });
+        } else if let Some(id) = &m.id {
+            pipe.enqueue(PipelineAction::CoLocateMove {
+                hash: id.block_hash.clone(),
+                dest_segment: m.to_segment,
+                dest_offset: m.to_offset,
+            });
+        }
+    }
+}
+
+/// Sync CP `PauseBackground` onto the shared [`lake_tiered_store::BandwidthPool`].
+pub fn sync_background_pause(pipe: &mut TierPipeline, paused: bool) {
+    if paused {
+        pipe.bandwidth.pause();
+    } else {
+        pipe.bandwidth.resume();
+    }
 }

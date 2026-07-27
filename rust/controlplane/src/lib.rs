@@ -4,13 +4,15 @@
 //! P4.5:`RegisterModel` / `DeregisterModel`——每 `(model_id, revision)` 一命名空间。
 //! P4.6:按命名空间软/硬配额 + 借用 + `BackpressureSignal` + `AdmitRegisterBlocks`。
 //! P4.7:冷块 GC / 孤儿 TTL / 节点 reconcile / `CheckpointStore` 内存 mock。
+//! P4.8:碎片整理计划(`TriggerDefrag`/`PauseBackground`)+ Location segment/offset。
 //! 参考:`registry/mod.rs::register_sequence_hash`；Mooncake `ClearInvalidHandles` /
-//! `put_start_discard_timeout`；LMCache `QuotaManager`。
+//! `put_start_discard_timeout`；LMCache `QuotaManager`；Mooncake allocator(无 compaction)。
 //! 关键差异:节点级 reconcile 兜底 writeback 泄漏(非会话 TTL)；冷块留 L2/L3；
-//! checkpoint 非 etcd(P6)。
+//! checkpoint 非 etcd(P6)；主动 defrag 经 BandwidthPool。
 
 mod authority;
 mod checkpoint;
+mod defrag;
 mod hash_chain;
 mod quota;
 mod reconcile;
@@ -25,6 +27,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 pub use authority::{Authority, NamespaceKey, RegisterStatus};
 pub use checkpoint::{CheckpointStore, MemoryCheckpointStore};
+pub use defrag::DEFAULT_DEFRAG_SLOT_BYTES;
 pub use lake_proto::lake::*;
 pub use reconcile::DEFAULT_ORPHAN_TTL_MS;
 
@@ -74,6 +77,8 @@ fn admit_keys_from_request(req: &RegisterBlocksRequest) -> Result<AdmitKeys, Str
 pub struct ControlPlane {
     inner: Arc<Mutex<Authority>>,
     checkpoints: Arc<MemoryCheckpointStore>,
+    /// Shared pause flag for promote/demote/GC/defrag (agent syncs BandwidthPool).
+    background_paused: Arc<Mutex<bool>>,
 }
 
 impl ControlPlane {
@@ -85,7 +90,16 @@ impl ControlPlane {
         Self {
             inner: Arc::new(Mutex::new(Authority::default())),
             checkpoints: Arc::new(store),
+            background_paused: Arc::new(Mutex::new(false)),
         }
+    }
+
+    pub fn background_paused(&self) -> bool {
+        *self.background_paused.lock().unwrap()
+    }
+
+    pub fn set_background_paused(&self, paused: bool) {
+        *self.background_paused.lock().unwrap() = paused;
     }
 }
 
@@ -450,6 +464,51 @@ impl ControlPlaneService for ControlPlane {
                 backpressure: None,
             })),
         }
+    }
+
+    async fn trigger_defrag(
+        &self,
+        request: Request<TriggerDefragRequest>,
+    ) -> Result<Response<TriggerDefragResponse>, Status> {
+        let req = request.into_inner();
+        let mode = DefragMode::try_from(req.mode).unwrap_or(DefragMode::Both);
+        let auth = self.inner.lock().unwrap();
+        match auth.plan_defrag(
+            &req.model_id,
+            &req.revision,
+            req.pool_kind,
+            mode,
+            req.slot_bytes,
+        ) {
+            Ok(moves) => {
+                let planned_moves = moves.len() as u32;
+                Ok(Response::new(TriggerDefragResponse {
+                    moves,
+                    planned_moves,
+                    ok: true,
+                    err: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(TriggerDefragResponse {
+                moves: vec![],
+                planned_moves: 0,
+                ok: false,
+                err: e,
+            })),
+        }
+    }
+
+    async fn pause_background(
+        &self,
+        request: Request<PauseBackgroundRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        self.set_background_paused(req.paused);
+        Ok(Response::new(Ack {
+            ok: true,
+            err: String::new(),
+            backpressure: None,
+        }))
     }
 }
 
@@ -1551,5 +1610,113 @@ mod tests {
         );
         let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 1);
+    }
+
+    // --- P4.8: defrag plan + placement ---
+
+    fn meta_l2_at(model: &str, hash: &[u8], seg: u64, off: u64) -> BlockMeta {
+        let mut m = meta(model, hash);
+        m.locations[0].segment_id = seg;
+        m.locations[0].offset = off;
+        m
+    }
+
+    fn l2_offset(auth: &Authority, model: &str, hash: &[u8]) -> (u64, u64) {
+        let id = KvBlockId {
+            model_id: model.into(),
+            block_hash: hash.to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+        let metas = auth.locate(&[id]);
+        let loc = metas[0]
+            .locations
+            .iter()
+            .find(|l| l.tier == Tier::L2 as i32)
+            .expect("L2");
+        (loc.segment_id, loc.offset)
+    }
+
+    /// Compact plan detects non-dense L2 offsets in a segment.
+    #[test]
+    fn p48_plan_compact_on_holes() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let slot = 100u64;
+        auth.register(
+            "n0",
+            &prefix(&[b"a", b"b", b"c"]),
+            vec![
+                meta_l2_at("m", b"a", 1, 0),
+                meta_l2_at("m", b"b", 1, 200),
+                meta_l2_at("m", b"c", 1, 300),
+            ],
+        )
+        .unwrap();
+        let moves = auth
+            .plan_defrag("m", "", PoolKind::Target as i32, DefragMode::Compact, slot)
+            .unwrap();
+        assert_eq!(moves.len(), 1);
+        assert!(moves[0].compact_segment);
+        assert_eq!(moves[0].segment_id, 1);
+    }
+
+    /// Co-locate plan packs a scattered prefix chain onto one segment.
+    #[test]
+    fn p48_plan_colocate_prefix_chain() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let slot = 64u64;
+        auth.register(
+            "n0",
+            &prefix(&[b"h0", b"h1"]),
+            vec![
+                meta_l2_at("m", b"h0", 1, 0),
+                meta_l2_at("m", b"h1", 2, 0),
+            ],
+        )
+        .unwrap();
+        let moves = auth
+            .plan_defrag(
+                "m",
+                "",
+                PoolKind::Target as i32,
+                DefragMode::Colocate,
+                slot,
+            )
+            .unwrap();
+        assert!(
+            moves.iter().any(|m| !m.compact_segment && m.to_segment == 1),
+            "expected co-locate onto seg1; got {moves:?}"
+        );
+    }
+
+    /// relocate_in_view updates segment/offset; PauseBackground flips flag.
+    #[test]
+    fn p48_relocate_and_pause_flag() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.register("n0", &prefix(&[b"p"]), vec![meta("m", b"p")])
+            .unwrap();
+        auth.relocate_in_view(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"p",
+            Tier::L2,
+            "n0",
+            7,
+            128,
+        )
+        .unwrap();
+        assert_eq!(l2_offset(&auth, "m", b"p"), (7, 128));
+
+        let cp = ControlPlane::new();
+        assert!(!cp.background_paused());
+        cp.set_background_paused(true);
+        assert!(cp.background_paused());
+        cp.set_background_paused(false);
+        assert!(!cp.background_paused());
     }
 }

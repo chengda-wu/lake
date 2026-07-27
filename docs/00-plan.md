@@ -225,7 +225,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [~] **多模型生命周期**：模型注册/下线级联删、revision 失效（F11；P4.5：`RegisterModel`/`DeregisterModel` + `(model_id,revision)` 命名空间，见 #20；PR #33 待合）
 - [~] **按模型配额与空间分配**（软/硬配额 + 借用 + 背压；P4.6：`AdmitRegisterBlocks` 写前准入(方案 A，不 reserve) + `SetModelQuota`/`GetModelQuota` + `BackpressureSignal`；`Reserve*` → 多进程/P4.7，见 #20）
 - [~] **GC**：冷块/孤儿块回收 + 崩溃 reconcile（P4.7：`ReconcileOrphans`/`DiscardBlocks`/`CheckpointStore` 内存 mock；节点级 reconcile 兜底 writeback 泄漏；见 #20。P4.3 review 半原子 `apply_location_events` 等仍可后续收紧）
-- [ ] **碎片整理**：逻辑共置 + 物理压实，后台节流可暂停
+- [~] **碎片整理**：逻辑共置 + 物理压实，后台节流可暂停（P4.8：`TriggerDefrag`/`PauseBackground` + `SegmentArena` + pipeline Compact/CoLocate；共享 BandwidthPool；见 #20）
 
 **完成判据**：前缀复用命中率、驱逐正确性有单测；吞吐 micro-benchmark；多模型隔离/配额/GC/碎片整理各有验证用例。
 

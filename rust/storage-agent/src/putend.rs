@@ -282,10 +282,13 @@ impl PutEndSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cp_port::{apply_location_events, AuthorityPort};
+    use crate::cp_port::{
+        apply_location_events, enqueue_defrag_moves, sync_background_pause, AuthorityPort,
+    };
     use lake_controlplane::Authority;
     use lake_tiered_store::{
-        BandwidthPool, LocalTier, LocalTierEngine, PipelineAction, TierCaps, TierPipeline,
+        BandwidthPool, LocalTier, LocalTierEngine, PipelineAction, SegmentArena, TierCaps,
+        TierPipeline,
     };
 
     fn ensure_model(auth: &mut Authority, model: &str) {
@@ -417,6 +420,19 @@ mod tests {
                 _: i32,
                 _: &[u8],
                 _: bool,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn relocate_in_view(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: i32,
+                _: &[u8],
+                _: Tier,
+                _: &str,
+                _: u64,
+                _: u64,
             ) -> Result<(), String> {
                 Ok(())
             }
@@ -668,6 +684,22 @@ mod tests {
                 self.auth
                     .set_l3_present(model_id, revision, pool_kind, flat, present)
             }
+            fn relocate_in_view(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                tier: Tier,
+                node_id: &str,
+                segment_id: u64,
+                offset: u64,
+            ) -> Result<(), String> {
+                self.calls.push("relocate");
+                self.auth.relocate_in_view(
+                    model_id, revision, pool_kind, flat, tier, node_id, segment_id, offset,
+                )
+            }
         }
 
         let mut store = LocalTierEngine::new();
@@ -739,5 +771,90 @@ mod tests {
         let (_, _, all_local_a) =
             auth.lookup_prefix("m", "", PoolKind::Target as i32, &[b"a".to_vec()], "n0");
         assert!(!all_local_a);
+    }
+
+    /// P4.8: plan colocate → pipeline → Moved updates CP locations.
+    #[test]
+    fn p48_colocate_plan_tick_updates_cp() {
+        let slot = 64u64;
+        let arena = SegmentArena::new(slot, 8);
+        let mut store = LocalTierEngine::with_caps_arena(TierCaps::default(), arena);
+        store.put_durable(b"h0", b"0").unwrap();
+        store.put_durable(b"h1", b"1").unwrap();
+        let _ = store.l2_arena.free(b"h0");
+        let _ = store.l2_arena.free(b"h1");
+        store.l2_arena.place_at(b"h0", 1, 0).unwrap();
+        store.l2_arena.place_at(b"h1", 2, 0).unwrap();
+
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let m0 = BlockMeta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"h0".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: String::new(),
+            }),
+            block_kind: BlockKind::TType as i32,
+            locations: vec![Location {
+                tier: Tier::L2 as i32,
+                node_id: "n0".into(),
+                segment_id: 1,
+                offset: 0,
+            }],
+            l3_present: false,
+            ref_count: 1,
+        };
+        let mut m1 = m0.clone();
+        m1.id.as_mut().unwrap().block_hash = b"h1".to_vec();
+        m1.locations[0].segment_id = 2;
+        m1.locations[0].offset = 0;
+        auth.register(
+            "n0",
+            &[b"h0".to_vec(), b"h1".to_vec()],
+            vec![m0, m1],
+        )
+        .unwrap();
+
+        let moves = auth
+            .plan_defrag(
+                "m",
+                "",
+                PoolKind::Target as i32,
+                DefragMode::Colocate,
+                slot,
+            )
+            .unwrap();
+        assert!(!moves.is_empty());
+
+        let mut pipe = TierPipeline::new(store, BandwidthPool::new(1 << 20)).with_node_id("n0");
+        sync_background_pause(&mut pipe, true);
+        enqueue_defrag_moves(&mut pipe, &moves);
+        let (n_paused, _) = pipe.tick(8);
+        assert_eq!(n_paused, 0, "paused bandwidth must block defrag");
+        sync_background_pause(&mut pipe, false);
+        pipe.bandwidth.reset_window();
+        let (n, ev) = pipe.tick(8);
+        assert!(n >= 1);
+        {
+            let mut port = AuthorityPort { auth: &mut auth };
+            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev)
+                .unwrap();
+        }
+        let metas = auth.locate(&[KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"h1".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        }]);
+        let loc = metas[0]
+            .locations
+            .iter()
+            .find(|l| l.tier == Tier::L2 as i32)
+            .unwrap();
+        assert_eq!(loc.segment_id, 1);
+        assert_eq!(loc.offset, slot);
     }
 }

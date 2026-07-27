@@ -2,6 +2,7 @@
 //!
 //! P3:Dispatch 占位。P4.3:PutEnd COMPLETE + `TierPipeline`/`apply_location_events`。
 //! P4.4:`TransferService` 由 `main` 挂 `lake_transfer::TransferServer`(TcpTransport)。
+//! P4.8:defrag moves enqueue + `Moved` → relocate_in_view。
 //! 参考:Mooncake PutEnd / transfer-engine;`hiradix_cache.py::_evict_write_back`/`lock_ref`;
 //! Dynamo `offload/pipeline.rs` settlement→presence。
 
@@ -15,7 +16,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub use cp_port::{apply_location_events, AuthorityPort, ControlPlanePort};
+pub use cp_port::{
+    apply_location_events, enqueue_defrag_moves, sync_background_pause, AuthorityPort,
+    ControlPlanePort,
+};
 pub use lake_proto::lake::*;
 pub use putend::{PendingBlock, PutEndSession};
 
