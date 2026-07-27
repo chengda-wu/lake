@@ -638,6 +638,11 @@ class TransferServiceStub:
                 request_serializer=lake__pb2.TransferStatusRequest.SerializeToString,
                 response_deserializer=lake__pb2.TransferStatusResponse.FromString,
                 _registered_method=True)
+        self.FreeBatch = channel.unary_unary(
+                '/lake.TransferService/FreeBatch',
+                request_serializer=lake__pb2.FreeBatchRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
         self.Pull = channel.unary_unary(
                 '/lake.TransferService/Pull',
                 request_serializer=lake__pb2.PullRequest.SerializeToString,
@@ -662,12 +667,19 @@ class TransferServiceServicer:
         """仿 Mooncake TransferEngine:
         allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
         SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
+        调用方查完 status 后须 FreeBatch(对齐 Mooncake freeBatchID),否则 batches 表泄漏。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def GetTransferStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def FreeBatch(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -700,6 +712,11 @@ def add_TransferServiceServicer_to_server(servicer, server):
                     servicer.GetTransferStatus,
                     request_deserializer=lake__pb2.TransferStatusRequest.FromString,
                     response_serializer=lake__pb2.TransferStatusResponse.SerializeToString,
+            ),
+            'FreeBatch': grpc.unary_unary_rpc_method_handler(
+                    servicer.FreeBatch,
+                    request_deserializer=lake__pb2.FreeBatchRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
             ),
             'Pull': grpc.unary_unary_rpc_method_handler(
                     servicer.Pull,
@@ -771,6 +788,33 @@ class TransferService:
             '/lake.TransferService/GetTransferStatus',
             lake__pb2.TransferStatusRequest.SerializeToString,
             lake__pb2.TransferStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FreeBatch(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.TransferService/FreeBatch',
+            lake__pb2.FreeBatchRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

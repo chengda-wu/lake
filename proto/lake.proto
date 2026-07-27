@@ -92,8 +92,10 @@ service TransferService {
   // 仿 Mooncake TransferEngine:
   //   allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
   // SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
+  // 调用方查完 status 后须 FreeBatch(对齐 Mooncake freeBatchID),否则 batches 表泄漏。
   rpc SubmitTransfer(TransferBatchRequest) returns (TransferBatchAck);
   rpc GetTransferStatus(TransferStatusRequest) returns (TransferStatusResponse);
+  rpc FreeBatch(FreeBatchRequest) returns (Ack);
 
   // 引擎契约:pull(block_ids) 返回 handle,publish(逐层增量)上报产出。
   //   跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
@@ -238,6 +240,9 @@ message TransferStatusResponse {
   State state      = 1;
   uint64 bytes_done = 2;
 }
+message FreeBatchRequest {
+  uint64 batch_id = 1;  // 对齐 Mooncake freeBatchID;释放后 GetTransferStatus 返回 NOT_FOUND
+}
 
 // --- Pull / Publish(引擎契约) ---
 message PullRequest {
@@ -259,6 +264,8 @@ message PullResponse {
 message PublishRequest {
   repeated LayerSlice slices = 1;   // 逐层增量(page_first_direct),非整块
   uint32 seq                  = 2;  // 仿 SGLang on_publish(seq) overlap fence
+  // seq fence 按 request_id 分作用域(并发 publish 互不干扰);空串视为 "_" 默认流。
+  string request_id           = 3;
 }
 message LayerSlice {
   lake.KVBlockID id = 1;

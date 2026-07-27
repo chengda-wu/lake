@@ -605,6 +605,7 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 const (
 	TransferService_SubmitTransfer_FullMethodName    = "/lake.TransferService/SubmitTransfer"
 	TransferService_GetTransferStatus_FullMethodName = "/lake.TransferService/GetTransferStatus"
+	TransferService_FreeBatch_FullMethodName         = "/lake.TransferService/FreeBatch"
 	TransferService_Pull_FullMethodName              = "/lake.TransferService/Pull"
 	TransferService_Publish_FullMethodName           = "/lake.TransferService/Publish"
 )
@@ -624,8 +625,10 @@ type TransferServiceClient interface {
 	//	allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
 	//
 	// SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
+	// 调用方查完 status 后须 FreeBatch(对齐 Mooncake freeBatchID),否则 batches 表泄漏。
 	SubmitTransfer(ctx context.Context, in *TransferBatchRequest, opts ...grpc.CallOption) (*TransferBatchAck, error)
 	GetTransferStatus(ctx context.Context, in *TransferStatusRequest, opts ...grpc.CallOption) (*TransferStatusResponse, error)
+	FreeBatch(ctx context.Context, in *FreeBatchRequest, opts ...grpc.CallOption) (*Ack, error)
 	// 引擎契约:pull(block_ids) 返回 handle,publish(逐层增量)上报产出。
 	//
 	//	跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
@@ -656,6 +659,16 @@ func (c *transferServiceClient) GetTransferStatus(ctx context.Context, in *Trans
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransferStatusResponse)
 	err := c.cc.Invoke(ctx, TransferService_GetTransferStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *transferServiceClient) FreeBatch(ctx context.Context, in *FreeBatchRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, TransferService_FreeBatch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -697,8 +710,10 @@ type TransferServiceServer interface {
 	//	allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
 	//
 	// SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
+	// 调用方查完 status 后须 FreeBatch(对齐 Mooncake freeBatchID),否则 batches 表泄漏。
 	SubmitTransfer(context.Context, *TransferBatchRequest) (*TransferBatchAck, error)
 	GetTransferStatus(context.Context, *TransferStatusRequest) (*TransferStatusResponse, error)
+	FreeBatch(context.Context, *FreeBatchRequest) (*Ack, error)
 	// 引擎契约:pull(block_ids) 返回 handle,publish(逐层增量)上报产出。
 	//
 	//	跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
@@ -720,6 +735,9 @@ func (UnimplementedTransferServiceServer) SubmitTransfer(context.Context, *Trans
 }
 func (UnimplementedTransferServiceServer) GetTransferStatus(context.Context, *TransferStatusRequest) (*TransferStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTransferStatus not implemented")
+}
+func (UnimplementedTransferServiceServer) FreeBatch(context.Context, *FreeBatchRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method FreeBatch not implemented")
 }
 func (UnimplementedTransferServiceServer) Pull(context.Context, *PullRequest) (*PullResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Pull not implemented")
@@ -784,6 +802,24 @@ func _TransferService_GetTransferStatus_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TransferService_FreeBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FreeBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransferServiceServer).FreeBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransferService_FreeBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransferServiceServer).FreeBatch(ctx, req.(*FreeBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TransferService_Pull_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PullRequest)
 	if err := dec(in); err != nil {
@@ -834,6 +870,10 @@ var TransferService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTransferStatus",
 			Handler:    _TransferService_GetTransferStatus_Handler,
+		},
+		{
+			MethodName: "FreeBatch",
+			Handler:    _TransferService_FreeBatch_Handler,
 		},
 		{
 			MethodName: "Pull",

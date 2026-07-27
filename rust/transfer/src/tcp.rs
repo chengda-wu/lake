@@ -65,6 +65,11 @@ impl TcpTransport {
             .map(|s| s.buf.len())
             .ok_or(TransferError::UnknownSegment(segment_id))
     }
+
+    /// 观测用:当前未 free 的 batch 数(防泄漏回归测)。
+    pub fn batch_count(&self) -> usize {
+        self.batches.lock().unwrap().len()
+    }
 }
 
 impl Transport for TcpTransport {
@@ -167,7 +172,18 @@ impl Transport for TcpTransport {
             validate_location_tier(&op.source)?;
         }
 
-        // 先校验全部源/目标,再拷贝(全有或全无,对齐 P4.2 ReportRef 风格)。
+        // 1) 先校验 batch(未知 / 超容)——**禁止**在校验失败前改写目标段。
+        {
+            let batches = self.batches.lock().unwrap();
+            let batch = batches
+                .get(&batch_id)
+                .ok_or(TransferError::UnknownBatch(batch_id))?;
+            if ops.len() > batch.tasks.len() {
+                return Err(TransferError::BatchFull);
+            }
+        }
+
+        // 2) 再校验全部源/目标范围(全有或全无,对齐 P4.2 ReportRef 风格)。
         {
             let segs = self.segments.lock().unwrap();
             for op in ops {
@@ -212,7 +228,7 @@ impl Transport for TcpTransport {
             }
         }
 
-        // CPU 拷贝(TCP 语义)。同段重叠区用临时缓冲。
+        // 3) CPU 拷贝(TCP 语义)。同段重叠区用临时缓冲。
         let payloads: Vec<Vec<u8>> = {
             let segs = self.segments.lock().unwrap();
             ops.iter()
@@ -234,13 +250,11 @@ impl Transport for TcpTransport {
             }
         }
 
+        // 4) 更新批状态(batch 已在步骤 1 校验存在且容量足够)。
         let mut batches = self.batches.lock().unwrap();
         let batch = batches
             .get_mut(&batch_id)
             .ok_or(TransferError::UnknownBatch(batch_id))?;
-        if ops.len() > batch.tasks.len() {
-            return Err(TransferError::BatchFull);
-        }
         for (i, op) in ops.iter().enumerate() {
             batch.tasks[i] = Task {
                 state: TaskState::Done,
@@ -327,5 +341,53 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, TransferError::InvalidTier(_)));
+    }
+
+    #[test]
+    fn failed_submit_does_not_mutate_dst() {
+        // review #32:未知 batch / BatchFull 不得先写目标段。
+        let t = TcpTransport::new();
+        let src = t.open_segment("src", 16).unwrap();
+        let dst = t.open_segment("dst", 16).unwrap();
+        t.write_segment(src, 0, b"PAYLOAD!!!!!!!!!").unwrap();
+        t.write_segment(dst, 0, b"............XXXX").unwrap();
+        let before = t.read_segment(dst, 0, 16).unwrap();
+
+        let err = t
+            .submit_transfer(
+                999_999, // unknown batch
+                &[TransferOp {
+                    source: loc(src, 0, Tier::L2),
+                    target_segment_id: dst,
+                    target_offset: 0,
+                    length: 8,
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransferError::UnknownBatch(999_999)));
+        assert_eq!(t.read_segment(dst, 0, 16).unwrap(), before);
+
+        let batch = t.allocate_batch_id(1).unwrap();
+        let err = t
+            .submit_transfer(
+                batch,
+                &[
+                    TransferOp {
+                        source: loc(src, 0, Tier::L2),
+                        target_segment_id: dst,
+                        target_offset: 0,
+                        length: 4,
+                    },
+                    TransferOp {
+                        source: loc(src, 4, Tier::L2),
+                        target_segment_id: dst,
+                        target_offset: 4,
+                        length: 4,
+                    },
+                ],
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransferError::BatchFull));
+        assert_eq!(t.read_segment(dst, 0, 16).unwrap(), before);
     }
 }

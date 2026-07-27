@@ -1,7 +1,7 @@
 //! `TransferService` gRPC → `TcpTransport` + 内容寻址字节库。
 //!
 //! 挂在 storage-agent(边7/8,非控制面)。Pull 仿 SGLang prefetch 三策略;
-//! Publish 仿 `on_publish` layer-wise + seq fence。
+//! Publish 仿 `on_publish` layer-wise + **按 request_id 分作用域**的 seq fence。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,10 +27,19 @@ struct PullHandle {
     dest_segment: u64,
 }
 
-struct PublishState {
+#[derive(Default)]
+struct PublishStream {
     last_seq: u32,
     /// (block_hash, layer_idx) → 累计长度(layer-wise 增量)。
     layers: HashMap<(Vec<u8>, u32), u64>,
+}
+
+fn publish_scope(request_id: &str) -> &str {
+    if request_id.is_empty() {
+        "_"
+    } else {
+        request_id
+    }
 }
 
 /// TransferService 实现。
@@ -39,7 +48,8 @@ pub struct TransferServer {
     bytes: Arc<InMemoryByteStore>,
     pulls: Mutex<HashMap<u64, PullHandle>>,
     next_pull: AtomicU64,
-    publish: Mutex<PublishState>,
+    /// seq fence 按 `request_id` 分桶(并发 publish 互不干扰)。
+    publish: Mutex<HashMap<String, PublishStream>>,
 }
 
 impl TransferServer {
@@ -49,10 +59,7 @@ impl TransferServer {
             bytes,
             pulls: Mutex::new(HashMap::new()),
             next_pull: AtomicU64::new(1),
-            publish: Mutex::new(PublishState {
-                last_seq: 0,
-                layers: HashMap::new(),
-            }),
+            publish: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,6 +133,24 @@ impl TransferService for TransferServer {
         }))
     }
 
+    async fn free_batch(
+        &self,
+        request: Request<FreeBatchRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        match self.transport.free_batch_id(req.batch_id) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+            })),
+            Err(TransferError::UnknownBatch(_)) => Ok(Response::new(Ack {
+                ok: false,
+                err: format!("unknown batch_id={}", req.batch_id),
+            })),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn pull(&self, request: Request<PullRequest>) -> Result<Response<PullResponse>, Status> {
         let req = request.into_inner();
         let policy = PullPolicy::try_from(req.policy).unwrap_or(PullPolicy::PullBestEffort);
@@ -197,14 +222,18 @@ impl TransferService for TransferServer {
 
     async fn publish(&self, request: Request<PublishRequest>) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut st = self.publish.lock().unwrap();
-        // seq fence:允许 seq==0(未设置)、seq==last(重试)、seq>last(步进);拒绝 0<seq<last。
+        let scope = publish_scope(&req.request_id).to_string();
+        let mut map = self.publish.lock().unwrap();
+        let st = map.entry(scope).or_default();
+        // seq fence(本 request_id 内):允许 seq==0、seq==last、seq>last;拒绝 0<seq<last。
         if req.seq > 0 && req.seq < st.last_seq {
             return Ok(Response::new(Ack {
                 ok: false,
                 err: format!(
-                    "Publish seq={} < last_seq={} (overlap fence)",
-                    req.seq, st.last_seq
+                    "Publish seq={} < last_seq={} (overlap fence, request_id={:?})",
+                    req.seq,
+                    st.last_seq,
+                    publish_scope(&req.request_id)
                 ),
             }));
         }
@@ -278,6 +307,25 @@ mod tests {
         assert_eq!(st.state, transfer_status_response::State::Done as i32);
         assert_eq!(st.bytes_done, 4);
         assert_eq!(&transport.read_segment(dst, 4, 4).unwrap(), b"abcd");
+
+        assert_eq!(transport.batch_count(), 1);
+        let freed = svc
+            .free_batch(Request::new(FreeBatchRequest {
+                batch_id: ack.batch_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(freed.ok);
+        assert_eq!(transport.batch_count(), 0);
+        let miss = svc
+            .get_transfer_status(Request::new(TransferStatusRequest {
+                batch_id: ack.batch_id,
+                task_id: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(miss.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]
@@ -306,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_wait_complete_and_publish_layers() {
+    async fn pull_wait_complete_and_publish_scoped() {
         let transport = Arc::new(TcpTransport::new());
         let bytes = Arc::new(InMemoryByteStore::new());
         let b0 = block(b"h0");
@@ -331,6 +379,7 @@ mod tests {
 
         let ack = svc
             .publish(Request::new(PublishRequest {
+                request_id: "req-a".into(),
                 seq: 1,
                 slices: vec![
                     LayerSlice {
@@ -352,18 +401,9 @@ mod tests {
             .into_inner();
         assert!(ack.ok);
 
-        // 同 seq 重试 OK;步进到 3 后再发 2 → fence 拒绝
-        assert!(
-            svc.publish(Request::new(PublishRequest {
-                seq: 1,
-                slices: vec![],
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .ok
-        );
+        // 同 request 内:步进到 3 后再发 2 → fence 拒绝
         svc.publish(Request::new(PublishRequest {
+            request_id: "req-a".into(),
             seq: 3,
             slices: vec![],
         }))
@@ -371,6 +411,7 @@ mod tests {
         .unwrap();
         let back = svc
             .publish(Request::new(PublishRequest {
+                request_id: "req-a".into(),
                 seq: 2,
                 slices: vec![],
             }))
@@ -378,6 +419,18 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!back.ok);
+
+        // 另一 request_id 从 seq=1 起步不受影响(review #32 §2)
+        let other = svc
+            .publish(Request::new(PublishRequest {
+                request_id: "req-b".into(),
+                seq: 1,
+                slices: vec![],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(other.ok);
     }
 
     #[tokio::test]
