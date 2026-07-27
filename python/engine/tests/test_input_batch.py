@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
 from engine.attn.metadata import build_attn_metadata
+from engine.input_batch import InputBatch, InputBuffers
 from engine.model_runner import ModelRunner
 from engine.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
-from engine.pool_types import ReadyHandle
+from engine.pool_types import PreparePlan, ReadyHandle
 from kernels.attn_ref import causal_attn_queries
 from runtime.node_scheduler import NodeScheduler, build_req_from_generate
 from runtime.role import RoleConfig
-from runtime.scheduler_output import ForwardMode, SchedulerOutput
+from runtime.scheduler_output import ForwardMode, ReqIoSet, SchedulerOutput
 
 
 def test_causal_attn_queries_matches_full_slice() -> None:
@@ -54,6 +55,9 @@ def test_prepare_inputs_attn_metadata() -> None:
     assert meta.block_tables["r"] == [0, 1]
     assert meta.max_query_len == 3
     assert meta.query_start_loc == [0, 3]
+    assert meta.positions == [2, 3, 4]
+    assert meta.slot_mapping == [2, 3, 4]
+    assert meta.block_table_tensor == [[0, 1]]
 
 
 def test_two_reqs_same_batch_tiny() -> None:
@@ -90,3 +94,49 @@ def test_build_attn_metadata_loc() -> None:
     )
     assert meta.query_start_loc == [0, 3, 4]
     assert meta.max_query_len == 3
+
+
+def test_input_buffers_materialize_ragged_queries() -> None:
+    batch = InputBatch(
+        req_ids=["a", "b"],
+        token_ids={"a": [10, 11, 12, 13], "b": [20, 21, 22]},
+        query_start={"a": 1, "b": 2},
+        query_end={"a": 4, "b": 3},
+    )
+    buffers = InputBuffers(max_num_reqs=4, max_num_tokens=8)
+    buffers.materialize(batch, slot_mapping_by_req={"a": [101, 102, 103], "b": [201]})
+    assert buffers.num_reqs == 2
+    assert buffers.num_tokens == 4
+    assert buffers.query_start_loc[:3] == [0, 3, 4]
+    assert buffers.input_ids[:4] == [11, 12, 13, 22]
+    assert buffers.positions[:4] == [1, 2, 3, 2]
+    assert buffers.slot_mapping[:4] == [101, 102, 103, 201]
+    assert buffers.is_padding[:4] == [False, False, False, False]
+
+
+def test_build_attn_metadata_rejects_bad_slot_mapping() -> None:
+    try:
+        build_attn_metadata(
+            seq_lens={"a": 4},
+            query_start={"a": 1},
+            query_end={"a": 4},
+            slot_mapping_by_req={"a": [7]},
+            req_order=["a"],
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "slot_mapping len mismatch" in str(e)
+
+
+def test_inmemory_agent_returns_c11_tables() -> None:
+    ag = InMemoryAgent()
+    plan = PreparePlan(
+        step_id=1,
+        forward_mode=ForwardMode.EXTEND,
+        read_set=[],
+        write_set=[ReqIoSet(req_id="r1", token_start=0, token_end=9)],
+        num_scheduled_tokens={"r1": 9},
+    )
+    ready = ag.prepare_step(plan)
+    assert ready.block_table_by_req["r1"] == [0, 1]
+    assert ready.slot_mapping_by_req["r1"] == list(range(9))

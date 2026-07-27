@@ -51,6 +51,8 @@ class ReadyHandle:
     effective_write_set: Optional[List[ReqIoSet]] = None
     # D4：agent 出表；key=req_id → block slot 索引列表（逻辑，非物理指针）
     block_table_by_req: Dict[str, List[int]] = field(default_factory=dict)
+    # C11：agent 出本步 query 写槽；key=req_id → slot 索引列表（长度=query_len）
+    slot_mapping_by_req: Dict[str, List[int]] = field(default_factory=dict)
 
 
 @dataclass

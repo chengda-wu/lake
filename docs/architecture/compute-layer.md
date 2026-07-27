@@ -598,6 +598,47 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 
 **本轮不做**：runner 内 BlockPool / `finished_req_ids` 清态；SGLang 分相状态机；TP `collective_rpc`（D8）；真 CUDA graph / 真权重；gateway shedding。
 
+### C11–C15 本轮开发计划（cal-0727，vLLM 对比）
+
+> 目标：在 C0–C10 的可验证骨架上，补齐与 vLLM 生产计算路径相比最关键的"硬件化接口"，但继续守 lake 的职责边界：KV / block table / L0 slot 仍归池 agent，runner 不引入私有 `BlockPool` / `RequestState`。
+
+#### 当前差距（对比 vLLM）
+
+| 维度 | vLLM 已有形态 | lake 当前形态 | 本轮差距 |
+|------|---------------|---------------|----------|
+| 调度信封 | `SchedulerOutput` 含 new/cached diff、spec、structured、connector、PP token、CoW/zero 等字段 | 已有 `SchedulerOutput` + `read_set`/`write_set`，保留最小 new/cached/spec 字段 | 需补齐 PP/structured/多模态/LoRA 的可空字段边界，但不加入物理 `block_ids` |
+| InputBatch / buffer | `InputBuffers` 预分配 GPU tensor，`InputBatch` 含 positions、query_start_loc、logits_indices、padding、spec 宽度 | `InputBatch` 仍是 Python list/dict，便于 mock | 需引入固定地址 buffer 抽象，为 graph / Triton kernel 接口做准备 |
+| AttentionMetadata | `CommonAttentionMetadata` 含 device/CPU 双视图、`block_table_tensor`、`slot_mapping`、prefill/decode 标志、DCP/R-SWA 字段 | 仅有 seq/query 几何 + agent 逻辑 block table | 需定义 lake 版 device metadata：agent 出固定地址 block table / slot mapping，runner 只读 |
+| ModelRunner | `GPUModelRunner` 能 `load_model`、`initialize_kv_cache`、`prepare_inputs`、`execute_model`、`sample_tokens`、`_dummy_run`；另有 sampler/structured/spec/PP/graph 子模块 | `ModelRunner` 已拆 `prepare_inputs` / `prepare_attn` / `sample_tokens`，后端为 mock/TinyLM | 需接入真权重加载骨架、runner buffer 生命周期、sample/structured 拆分，不引入 runner 内请求表 |
+| KV Connector / offload | `KVConnectorBase_V1` 提供 scheduler/worker 双侧 load/save/request_finished 钩子，connector 可选 | `pool_iface` 必经，`prepare_step`/`done`/`on_request_finished` 已有 mock | 需把生产 agent 的 device 会计与错误路径钉清，仍不走 vLLM 可选 connector metadata |
+| Overlap / FutureMap | vLLM async + SGLang `FutureMap` 都有 device relay；SGLang 还能 relay spec extras | 当前 `FutureMap` 是 host 占位，`InMemoryAgent` 用代数防 shrink | 需升级为 device relay 设计与测试边界，尤其 spec extras / grammar 同步例外 |
+| 并行执行 | vLLM `Executor.collective_rpc` 扇出同一 `SchedulerOutput` 到 TP/PP worker，PP 有 `PPHandler` | 单卡先行，无 runtime executor | 需先定 D8 最小 runtime executor 形态，再接 TP/PP |
+
+#### 本轮切片
+
+| 里程碑 | 内容 | 主改 | 验收 |
+|--------|------|------|------|
+| **C11** | **Runner 静态 buffer + lake AttentionMetadata v2**：引入固定地址 `InputBuffers` / block table / slot mapping 镜像；`InputBatch` 保持 host 权威但能导出 device-ready 形态 | `engine/input_batch.py`、`engine/attn/metadata.py`、`engine/model_runner.py`、`engine/pool_types.py` | 单测覆盖 ragged query_start、decode 单 token、chunked extend、agent block table 缺失/错配 |
+| **C12** | **真实模型加载骨架**：`load_model` / `warmup` / 权重 pin 回调；先支持 TinyLM→TorchModule 形态，不做 HF 全量生态 | `engine/model_runner.py`、`engine/models/`、`runtime/lifecycle.py`、`runtime/role.py` | Worker Warm→Ready 时完成模型 init；dummy/warmup 不触 KV done；容量信号带模型状态 |
+| **C13** | **Sampling / structured output 挂载点（D7）**：拆 `execute_model` 与 `sample_tokens` 的时序；加入 `GrammarOutput` / bitmask 占位，明确 spec+grammar 何时关 overlap | `engine/sample/`、`runtime/scheduler_output.py`、`runtime/node_scheduler.py` | 贪心采样不回归；structured 占位可 defer sample；spec+grammar 强制 drain 的测试存在 |
+| **C14** | **pool_iface 生产会计契约**：把 `commit_write_extent`、partial hit、prepare/done 错误路径从 mock 语义提升为 agent FFI 契约；补 D10 device accounting 文档与测试 | `engine/pool_iface.py`、`engine/agent.py`、`engine/agents/memory.py`、`engine/tests/` | 旧 commit 不压新 prepare HWM；`TIMEOUT`/`CAPACITY` 不触发 mode fallback；finish 只打一次 agent |
+| **C15** | **D8 runtime executor 草案**：单进程 executor 先抽象 `execute_model(SchedulerOutput)` 扇出接口，TP/PP 真通信后置 | `runtime/worker_engine.py`、`runtime/` 新 executor 模块、测试 | 单卡路径仍走同接口；未来多 worker 可接同一 output；不复制 Host `Req` 权威 |
+
+**C11 状态（2026-07-27）**：已落 Python 版固定 buffer 镜像（`InputBuffers`）+ `AttentionMetadata` v2（`block_table_tensor` / `slot_mapping` / `positions`）+ `ReadyHandle.slot_mapping_by_req`；`InMemoryAgent` 已返回逻辑 block table / slot mapping 供单测。真 device tensor / CUDA graph capture 仍归 C12+ 后续生产化。
+
+#### 本轮不做
+
+- 不接 vLLM `BlockPool` / `KVCacheManager` / runner 内 `RequestState`，这些与池权威冲突。
+- 不实现完整 HF 模型生态、多模态、LoRA、PP 激活传递、真 CUDA graph capture、真 RDMA。
+- 不做 gateway shedding / admission 策略外移以外的过载处理。
+
+#### 参考实现与关键差异（C11–C15）
+
+- **参考 vLLM**：`vllm/v1/core/sched/output.py::{SchedulerOutput,NewRequestData,CachedRequestData,GrammarOutput}`；`vllm/v1/worker/gpu/model_runner.py::GPUModelRunner`（`load_model` / `initialize_kv_cache` / `prepare_inputs` / `execute_model` / `sample_tokens` / `_dummy_run`）；`vllm/v1/worker/gpu/input_batch.py::{InputBuffers,InputBatch,prepare_prefill_inputs}`；`vllm/v1/attention/backend.py::{CommonAttentionMetadata,AttentionMetadataBuilder}`；`vllm/distributed/kv_transfer/kv_connector/v1/base.py::KVConnectorBase_V1`（`start_load_kv` / `wait_for_layer_load` / `save_kv_layer` / `request_finished`）。
+- **参考 SGLang**：`managers/scheduler.py::Scheduler.event_loop_overlap`；`managers/overlap_utils.py::{FutureMap,resolve_forward_inputs,stash,publish}`。
+- **值得参考**：vLLM 的静态 GPU buffer、attention metadata builder、生产入口复用 dummy/warmup、scheduler→worker 增量信封；SGLang 的 device 侧 token/spec relay 和关 overlap 条件。
+- **关键差异**：vLLM/SGLang 都让引擎持 KV / block table / 请求态；lake 只借接口形态和 buffer 几何，KV 位置、slot、block table 由池 agent 权威维护。vLLM `KVConnectorBase_V1` 是可选插件，lake `pool_iface` 是必经路径；vLLM 的 HBM 由 runner 分配，lake 的 HBM/L0 是存储池放置副本。
+
 ## D2 — `pool_iface` / StorageAgent FFI 草签（已定 2026-07-22）
 
 > **不进 protobuf**（边6 = PyO3 / `.so`）。Python 落点：`engine/agent.py::StorageAgent` + `engine/pool_types.py`；P3 实现 `engine/agents/grpc_skeleton.py`；单测 `engine/agents/memory.py`。

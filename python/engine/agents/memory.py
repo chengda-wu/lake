@@ -113,11 +113,21 @@ class InMemoryAgent:
                 st.prefill_blocks = max(st.prefill_blocks, 1)
 
         self._ready_step = plan.step_id
+        block_table_by_req: Dict[str, List[int]] = {}
+        slot_mapping_by_req: Dict[str, List[int]] = {}
+        live_reqs = {io.req_id for io in eff_read} | {io.req_id for io in eff_write}
+        for req_id in live_reqs:
+            end = self.l0_token_end.get(req_id, 0)
+            block_table_by_req[req_id] = list(range((end + 7) // 8))
+        for io in eff_write:
+            slot_mapping_by_req[io.req_id] = list(range(io.token_start, io.token_end))
         return ReadyHandle(
             step_id=plan.step_id,
             stats_by_req=stats,
             effective_read_set=eff_read,
             effective_write_set=eff_write,
+            block_table_by_req=block_table_by_req,
+            slot_mapping_by_req=slot_mapping_by_req,
         )
 
     def done(self, step_id: int) -> None:

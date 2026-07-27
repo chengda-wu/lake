@@ -12,7 +12,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from engine.attn.metadata import AttentionMetadata, build_attn_metadata
 from engine.drafter.tiny_mtp import TinyMTPDrafter
-from engine.input_batch import InputBatch
+from engine.input_batch import InputBatch, InputBuffers
 from engine.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
@@ -43,6 +43,7 @@ class ModelRunner:
     ) -> None:
         self._pool = pool
         self._input_batch = InputBatch()
+        self._input_buffers = InputBuffers(max_num_reqs=64, max_num_tokens=8192)
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
         self._tiny: Optional[TinyLM] = tiny_lm
@@ -98,11 +99,15 @@ class ModelRunner:
         seq_lens = {}
         for rid in batch.req_ids:
             seq_lens[rid] = batch.query_end[rid]
+        self._input_buffers.materialize(
+            batch, slot_mapping_by_req=ready.slot_mapping_by_req
+        )
         meta = build_attn_metadata(
             seq_lens=seq_lens,
             query_start=batch.query_start,
             query_end=batch.query_end,
             block_tables=ready.block_table_by_req,
+            buffers=self._input_buffers,
             req_order=batch.req_ids,
         )
         self._attn_meta = meta
