@@ -54,6 +54,23 @@ impl TierSideEffects {
     }
 }
 
+/// One L2→L3 demote — enough to undo if the enclosing op fails.
+struct L2Demote {
+    hash: Vec<u8>,
+    /// Bytes removed from L2 (restored on undo even when L3 already had SSOT).
+    l2_bytes: Vec<u8>,
+    /// Whether this demote inserted into L3 (`entry` was vacant).
+    inserted_l3: bool,
+}
+
+struct L2DemoteBatch(Vec<L2Demote>);
+
+impl L2DemoteBatch {
+    fn into_hashes(self) -> Vec<Vec<u8>> {
+        self.0.into_iter().map(|d| d.hash).collect()
+    }
+}
+
 /// In-process L0–L3 byte maps + LRU + local pin (≈ SGLang `lock_ref`).
 pub struct LocalTierEngine {
     caps: TierCaps,
@@ -184,6 +201,9 @@ impl LocalTierEngine {
     /// 对齐 `storage-layer.md`：写回不写 L1、不写 L3。L3 仅经 [`demote_l2_to_l3`]
     /// 或 L2 容量压力（迁移窗后稳态 XOR）。参考：SGLang 满块不写 host；
     /// Mooncake PutEnd 完成当前副本；Dynamo offload 链式 demote 而非 Put 双写。
+    ///
+    /// `ensure_l2_cap` 失败时**回滚本窗全部 L2→L3 demote**（含本次 hash 被挤到 L3
+    /// 的情况），避免 Err 仍 `is_settled` / 污染 L3。
     pub fn put_durable(
         &mut self,
         h: &[u8],
@@ -192,9 +212,10 @@ impl LocalTierEngine {
         self.l2.insert(h.to_vec(), bytes.to_vec());
         Self::touch(&mut self.l2_order, h);
         let l2_demoted_to_l3 = match self.ensure_l2_cap() {
-            Ok(d) => d,
-            Err(e) => {
-                // Roll back this insert — do not leave L2 permanently over cap.
+            Ok(d) => d.into_hashes(),
+            Err((demoted, e)) => {
+                // Undo every demote in this window, then drop the failed insert.
+                self.undo_l2_demotes(&demoted);
                 self.l2.remove(h);
                 self.l2_order.retain(|x| x.as_slice() != h);
                 return Err(e);
@@ -214,19 +235,23 @@ impl LocalTierEngine {
         }
     }
 
-    /// Coldest-first LRU demote L2→L3. Errors if still over cap (all victims pinned).
-    fn ensure_l2_cap(&mut self) -> Result<Vec<Vec<u8>>, String> {
+    /// Coldest-first LRU demote L2→L3. On stuck-pinned, returns demotes so far
+    /// for caller rollback (put/promote must not leak L3 on Err).
+    fn ensure_l2_cap(&mut self) -> Result<L2DemoteBatch, (L2DemoteBatch, String)> {
         let mut demoted = Vec::new();
         let cap = self.caps.l2;
         if cap == 0 {
-            return Ok(demoted);
+            return Ok(L2DemoteBatch(demoted));
         }
         let mut skipped = 0usize;
         while self.l2.len() > cap {
             if skipped >= self.l2.len() {
-                return Err(format!(
-                    "l2 over cap ({}>{cap}): all victims pinned — unpin before put",
-                    self.l2.len()
+                return Err((
+                    L2DemoteBatch(demoted),
+                    format!(
+                        "l2 over cap ({}>{cap}): all victims pinned — unpin before put",
+                        self.l2.len()
+                    ),
                 ));
             }
             let Some(victim) = self.l2_order.pop_front() else {
@@ -242,11 +267,29 @@ impl LocalTierEngine {
             }
             skipped = 0;
             if let Some(bytes) = self.l2.remove(&victim) {
-                self.l3.entry(victim.clone()).or_insert(bytes);
-                demoted.push(victim);
+                let inserted_l3 = !self.l3.contains_key(&victim);
+                if inserted_l3 {
+                    self.l3.insert(victim.clone(), bytes.clone());
+                }
+                // else: L3 already holds SSOT; drop L2 copy (same as `or_insert`).
+                demoted.push(L2Demote {
+                    hash: victim,
+                    l2_bytes: bytes,
+                    inserted_l3,
+                });
             }
         }
-        Ok(demoted)
+        Ok(L2DemoteBatch(demoted))
+    }
+
+    fn undo_l2_demotes(&mut self, demoted: &L2DemoteBatch) {
+        for d in demoted.0.iter().rev() {
+            if d.inserted_l3 {
+                self.l3.remove(&d.hash);
+            }
+            self.l2.insert(d.hash.clone(), d.l2_bytes.clone());
+            Self::touch(&mut self.l2_order, &d.hash);
+        }
     }
 
     pub fn probe(&mut self, h: &[u8]) -> AccessKind {
@@ -304,8 +347,9 @@ impl LocalTierEngine {
             self.l2.insert(h.to_vec(), bytes.clone());
             Self::touch(&mut self.l2_order, h);
             match self.ensure_l2_cap() {
-                Ok(d) => effects.l2_demoted_to_l3 = d,
-                Err(e) => {
+                Ok(d) => effects.l2_demoted_to_l3 = d.into_hashes(),
+                Err((demoted, e)) => {
+                    self.undo_l2_demotes(&demoted);
                     self.l2.remove(h);
                     self.l2_order.retain(|x| x.as_slice() != h);
                     return Err(e);
@@ -536,6 +580,41 @@ mod tests {
         let err = e.put_durable(b"y", b"Y").unwrap_err();
         assert!(err.contains("pinned"), "{err}");
         assert!(!e.is_l2_durable(b"y"));
+        assert!(
+            !e.l3_present(b"y"),
+            "Err must not leave y on L3 (cap demote then stuck-pinned)"
+        );
+        assert!(!e.is_settled(b"y"));
         assert_eq!(e.l2_len(), 2, "rollback y only");
+        // Pre-existing pinned L2 residents untouched.
+        assert!(e.is_l2_durable(b"x") && e.is_l2_durable(b"z"));
+    }
+
+    #[test]
+    fn put_durable_err_also_undoes_collateral_l2_demotes() {
+        // Cap=1; x pinned. Insert unpinned w on L2 (over cap). put y: demotes w to L3
+        // then stuck (x pinned, y may demote…) — any Err must restore pre-put L2/L3.
+        let mut e = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 1,
+        });
+        e.put_durable(b"x", b"X").unwrap();
+        e.pin(b"x");
+        e.l2.insert(b"w".to_vec(), b"W".to_vec());
+        e.l2_order.push_front(b"w".to_vec()); // colder than x
+        assert_eq!(e.l2_len(), 2);
+        // Second pinned resident so after demoting w (+ maybe y) we still stick.
+        e.l2.insert(b"z".to_vec(), b"Z".to_vec());
+        e.l2_order.push_back(b"z".to_vec());
+        e.pin(b"z");
+        assert_eq!(e.l2_len(), 3);
+        let err = e.put_durable(b"y", b"Y").unwrap_err();
+        assert!(err.contains("pinned"), "{err}");
+        assert!(!e.l3_present(b"y") && !e.is_settled(b"y"));
+        // Collateral demote of w must be undone.
+        assert!(e.is_l2_durable(b"w"), "w restored to L2");
+        assert!(!e.l3_present(b"w"), "w not left on L3");
+        assert_eq!(e.get(b"w"), Some(b"W".as_slice()));
     }
 }
