@@ -34,7 +34,9 @@ class ControlPlaneServiceStub:
     3 个 service 按通信边划分:
     ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
     AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
-    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
+    TransferService     — 边7/8:传输控制信令(字节旁路;**agent / KV Node agent 实现,非控制面**)
+    P4:TcpTransport(gRPC 字节走 TcpDataService);P5:RdmaTransport
+    TcpDataService      — TCP 退化数据面(Put/Get bytes;对齐 Mooncake MC_FORCE_TCP fallback)
 
     参考:
     - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -99,7 +101,9 @@ class ControlPlaneServiceServicer:
     3 个 service 按通信边划分:
     ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
     AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
-    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
+    TransferService     — 边7/8:传输控制信令(字节旁路;**agent / KV Node agent 实现,非控制面**)
+    P4:TcpTransport(gRPC 字节走 TcpDataService);P5:RdmaTransport
+    TcpDataService      — TCP 退化数据面(Put/Get bytes;对齐 Mooncake MC_FORCE_TCP fallback)
 
     参考:
     - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -232,7 +236,9 @@ class ControlPlaneService:
     3 个 service 按通信边划分:
     ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
     AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
-    TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
+    TransferService     — 边7/8:传输控制信令(字节旁路;**agent / KV Node agent 实现,非控制面**)
+    P4:TcpTransport(gRPC 字节走 TcpDataService);P5:RdmaTransport
+    TcpDataService      — TCP 退化数据面(Put/Get bytes;对齐 Mooncake MC_FORCE_TCP fallback)
 
     参考:
     - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -610,8 +616,10 @@ class AgentService:
 
 class TransferServiceStub:
     """=============================================================================
-    TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+    TransferService — 边7/8:传输控制信令(字节走数据面旁路)
     =============================================================================
+    P4.4:接线 TcpTransport(单进程本地拷贝 / gRPC TcpDataService 字节搬运)。
+    P5:同 API 换 RdmaTransport(Mooncake FFI),业务零改。
     """
 
     def __init__(self, channel):
@@ -644,12 +652,16 @@ class TransferServiceStub:
 
 class TransferServiceServicer:
     """=============================================================================
-    TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+    TransferService — 边7/8:传输控制信令(字节走数据面旁路)
     =============================================================================
+    P4.4:接线 TcpTransport(单进程本地拷贝 / gRPC TcpDataService 字节搬运)。
+    P5:同 API 换 RdmaTransport(Mooncake FFI),业务零改。
     """
 
     def SubmitTransfer(self, request, context):
-        """仿 Mooncake:allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus。
+        """仿 Mooncake TransferEngine:
+        allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
+        SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -709,8 +721,10 @@ def add_TransferServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class TransferService:
     """=============================================================================
-    TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+    TransferService — 边7/8:传输控制信令(字节走数据面旁路)
     =============================================================================
+    P4.4:接线 TcpTransport(单进程本地拷贝 / gRPC TcpDataService 字节搬运)。
+    P5:同 API 换 RdmaTransport(Mooncake FFI),业务零改。
     """
 
     @staticmethod
@@ -822,15 +836,15 @@ class TransferService:
             _registered_method=True)
 
 
-class SkeletonKvServiceStub:
+class TcpDataServiceStub:
     """=============================================================================
-    P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+    TcpDataService — TCP 退化数据面(P4.4 正名自 P3 SkeletonKvService)
     =============================================================================
 
-    SkeletonKvService — mock KV **字节**走 gRPC。
-    生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
-    P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
-    P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+    对齐 Mooncake `MC_FORCE_TCP` / `installTransport("tcp")` fallback:
+    无 RDMA 时 KV **字节**走 gRPC Put/Get(CPU 拷贝,非零拷贝)。
+    TransferService 控制信令 + TcpTransport 可经本 service 搬字节;
+    P5 真 RDMA 旁路后本 service 仍作 TCP 退化路径保留。
     """
 
     def __init__(self, channel):
@@ -840,26 +854,26 @@ class SkeletonKvServiceStub:
             channel: A grpc.Channel.
         """
         self.PutBlocks = channel.unary_unary(
-                '/lake.SkeletonKvService/PutBlocks',
+                '/lake.TcpDataService/PutBlocks',
                 request_serializer=lake__pb2.PutBlocksRequest.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
                 _registered_method=True)
         self.GetBlocks = channel.unary_unary(
-                '/lake.SkeletonKvService/GetBlocks',
+                '/lake.TcpDataService/GetBlocks',
                 request_serializer=lake__pb2.GetBlocksRequest.SerializeToString,
                 response_deserializer=lake__pb2.GetBlocksResponse.FromString,
                 _registered_method=True)
 
 
-class SkeletonKvServiceServicer:
+class TcpDataServiceServicer:
     """=============================================================================
-    P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+    TcpDataService — TCP 退化数据面(P4.4 正名自 P3 SkeletonKvService)
     =============================================================================
 
-    SkeletonKvService — mock KV **字节**走 gRPC。
-    生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
-    P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
-    P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+    对齐 Mooncake `MC_FORCE_TCP` / `installTransport("tcp")` fallback:
+    无 RDMA 时 KV **字节**走 gRPC Put/Get(CPU 拷贝,非零拷贝)。
+    TransferService 控制信令 + TcpTransport 可经本 service 搬字节;
+    P5 真 RDMA 旁路后本 service 仍作 TCP 退化路径保留。
     """
 
     def PutBlocks(self, request, context):
@@ -875,7 +889,7 @@ class SkeletonKvServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
 
-def add_SkeletonKvServiceServicer_to_server(servicer, server):
+def add_TcpDataServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'PutBlocks': grpc.unary_unary_rpc_method_handler(
                     servicer.PutBlocks,
@@ -889,21 +903,21 @@ def add_SkeletonKvServiceServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'lake.SkeletonKvService', rpc_method_handlers)
+            'lake.TcpDataService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('lake.SkeletonKvService', rpc_method_handlers)
+    server.add_registered_method_handlers('lake.TcpDataService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class SkeletonKvService:
+class TcpDataService:
     """=============================================================================
-    P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+    TcpDataService — TCP 退化数据面(P4.4 正名自 P3 SkeletonKvService)
     =============================================================================
 
-    SkeletonKvService — mock KV **字节**走 gRPC。
-    生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
-    P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
-    P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
+    对齐 Mooncake `MC_FORCE_TCP` / `installTransport("tcp")` fallback:
+    无 RDMA 时 KV **字节**走 gRPC Put/Get(CPU 拷贝,非零拷贝)。
+    TransferService 控制信令 + TcpTransport 可经本 service 搬字节;
+    P5 真 RDMA 旁路后本 service 仍作 TCP 退化路径保留。
     """
 
     @staticmethod
@@ -920,7 +934,7 @@ class SkeletonKvService:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/lake.SkeletonKvService/PutBlocks',
+            '/lake.TcpDataService/PutBlocks',
             lake__pb2.PutBlocksRequest.SerializeToString,
             lake__pb2.Ack.FromString,
             options,
@@ -947,7 +961,7 @@ class SkeletonKvService:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/lake.SkeletonKvService/GetBlocks',
+            '/lake.TcpDataService/GetBlocks',
             lake__pb2.GetBlocksRequest.SerializeToString,
             lake__pb2.GetBlocksResponse.FromString,
             options,
@@ -964,7 +978,7 @@ class SkeletonKvService:
 class WorkerServiceStub:
     """WorkerService — 计算层 Generate。
     生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    P3/P4:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + TcpDataService。
     执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
     """
 
@@ -984,7 +998,7 @@ class WorkerServiceStub:
 class WorkerServiceServicer:
     """WorkerService — 计算层 Generate。
     生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    P3/P4:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + TcpDataService。
     执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
     """
 
@@ -1013,7 +1027,7 @@ def add_WorkerServiceServicer_to_server(servicer, server):
 class WorkerService:
     """WorkerService — 计算层 Generate。
     生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-    P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+    P3/P4:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + TcpDataService。
     执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
     """
 

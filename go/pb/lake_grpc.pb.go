@@ -614,10 +614,16 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // =============================================================================
-// TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+// TransferService — 边7/8:传输控制信令(字节走数据面旁路)
 // =============================================================================
+// P4.4:接线 TcpTransport(单进程本地拷贝 / gRPC TcpDataService 字节搬运)。
+// P5:同 API 换 RdmaTransport(Mooncake FFI),业务零改。
 type TransferServiceClient interface {
-	// 仿 Mooncake:allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus。
+	// 仿 Mooncake TransferEngine:
+	//
+	//	allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
+	//
+	// SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
 	SubmitTransfer(ctx context.Context, in *TransferBatchRequest, opts ...grpc.CallOption) (*TransferBatchAck, error)
 	GetTransferStatus(ctx context.Context, in *TransferStatusRequest, opts ...grpc.CallOption) (*TransferStatusResponse, error)
 	// 引擎契约:pull(block_ids) 返回 handle,publish(逐层增量)上报产出。
@@ -681,10 +687,16 @@ func (c *transferServiceClient) Publish(ctx context.Context, in *PublishRequest,
 // for forward compatibility.
 //
 // =============================================================================
-// TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+// TransferService — 边7/8:传输控制信令(字节走数据面旁路)
 // =============================================================================
+// P4.4:接线 TcpTransport(单进程本地拷贝 / gRPC TcpDataService 字节搬运)。
+// P5:同 API 换 RdmaTransport(Mooncake FFI),业务零改。
 type TransferServiceServer interface {
-	// 仿 Mooncake:allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus。
+	// 仿 Mooncake TransferEngine:
+	//
+	//	allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
+	//
+	// SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
 	SubmitTransfer(context.Context, *TransferBatchRequest) (*TransferBatchAck, error)
 	GetTransferStatus(context.Context, *TransferStatusRequest) (*TransferStatusResponse, error)
 	// 引擎契约:pull(block_ids) 返回 handle,publish(逐层增量)上报产出。
@@ -837,159 +849,159 @@ var TransferService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SkeletonKvService_PutBlocks_FullMethodName = "/lake.SkeletonKvService/PutBlocks"
-	SkeletonKvService_GetBlocks_FullMethodName = "/lake.SkeletonKvService/GetBlocks"
+	TcpDataService_PutBlocks_FullMethodName = "/lake.TcpDataService/PutBlocks"
+	TcpDataService_GetBlocks_FullMethodName = "/lake.TcpDataService/GetBlocks"
 )
 
-// SkeletonKvServiceClient is the client API for SkeletonKvService service.
+// TcpDataServiceClient is the client API for TcpDataService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // =============================================================================
-// P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+// TcpDataService — TCP 退化数据面(P4.4 正名自 P3 SkeletonKvService)
 // =============================================================================
 //
-// SkeletonKvService — mock KV **字节**走 gRPC。
+// 对齐 Mooncake `MC_FORCE_TCP` / `installTransport("tcp")` fallback:
 //
-//	生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
-//	P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
-//	P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
-type SkeletonKvServiceClient interface {
+//	无 RDMA 时 KV **字节**走 gRPC Put/Get(CPU 拷贝,非零拷贝)。
+//	TransferService 控制信令 + TcpTransport 可经本 service 搬字节;
+//	P5 真 RDMA 旁路后本 service 仍作 TCP 退化路径保留。
+type TcpDataServiceClient interface {
 	PutBlocks(ctx context.Context, in *PutBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
 	GetBlocks(ctx context.Context, in *GetBlocksRequest, opts ...grpc.CallOption) (*GetBlocksResponse, error)
 }
 
-type skeletonKvServiceClient struct {
+type tcpDataServiceClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewSkeletonKvServiceClient(cc grpc.ClientConnInterface) SkeletonKvServiceClient {
-	return &skeletonKvServiceClient{cc}
+func NewTcpDataServiceClient(cc grpc.ClientConnInterface) TcpDataServiceClient {
+	return &tcpDataServiceClient{cc}
 }
 
-func (c *skeletonKvServiceClient) PutBlocks(ctx context.Context, in *PutBlocksRequest, opts ...grpc.CallOption) (*Ack, error) {
+func (c *tcpDataServiceClient) PutBlocks(ctx context.Context, in *PutBlocksRequest, opts ...grpc.CallOption) (*Ack, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Ack)
-	err := c.cc.Invoke(ctx, SkeletonKvService_PutBlocks_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, TcpDataService_PutBlocks_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *skeletonKvServiceClient) GetBlocks(ctx context.Context, in *GetBlocksRequest, opts ...grpc.CallOption) (*GetBlocksResponse, error) {
+func (c *tcpDataServiceClient) GetBlocks(ctx context.Context, in *GetBlocksRequest, opts ...grpc.CallOption) (*GetBlocksResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetBlocksResponse)
-	err := c.cc.Invoke(ctx, SkeletonKvService_GetBlocks_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, TcpDataService_GetBlocks_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// SkeletonKvServiceServer is the server API for SkeletonKvService service.
-// All implementations must embed UnimplementedSkeletonKvServiceServer
+// TcpDataServiceServer is the server API for TcpDataService service.
+// All implementations must embed UnimplementedTcpDataServiceServer
 // for forward compatibility.
 //
 // =============================================================================
-// P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+// TcpDataService — TCP 退化数据面(P4.4 正名自 P3 SkeletonKvService)
 // =============================================================================
 //
-// SkeletonKvService — mock KV **字节**走 gRPC。
+// 对齐 Mooncake `MC_FORCE_TCP` / `installTransport("tcp")` fallback:
 //
-//	生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
-//	P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
-//	P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
-type SkeletonKvServiceServer interface {
+//	无 RDMA 时 KV **字节**走 gRPC Put/Get(CPU 拷贝,非零拷贝)。
+//	TransferService 控制信令 + TcpTransport 可经本 service 搬字节;
+//	P5 真 RDMA 旁路后本 service 仍作 TCP 退化路径保留。
+type TcpDataServiceServer interface {
 	PutBlocks(context.Context, *PutBlocksRequest) (*Ack, error)
 	GetBlocks(context.Context, *GetBlocksRequest) (*GetBlocksResponse, error)
-	mustEmbedUnimplementedSkeletonKvServiceServer()
+	mustEmbedUnimplementedTcpDataServiceServer()
 }
 
-// UnimplementedSkeletonKvServiceServer must be embedded to have
+// UnimplementedTcpDataServiceServer must be embedded to have
 // forward compatible implementations.
 //
 // NOTE: this should be embedded by value instead of pointer to avoid a nil
 // pointer dereference when methods are called.
-type UnimplementedSkeletonKvServiceServer struct{}
+type UnimplementedTcpDataServiceServer struct{}
 
-func (UnimplementedSkeletonKvServiceServer) PutBlocks(context.Context, *PutBlocksRequest) (*Ack, error) {
+func (UnimplementedTcpDataServiceServer) PutBlocks(context.Context, *PutBlocksRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method PutBlocks not implemented")
 }
-func (UnimplementedSkeletonKvServiceServer) GetBlocks(context.Context, *GetBlocksRequest) (*GetBlocksResponse, error) {
+func (UnimplementedTcpDataServiceServer) GetBlocks(context.Context, *GetBlocksRequest) (*GetBlocksResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBlocks not implemented")
 }
-func (UnimplementedSkeletonKvServiceServer) mustEmbedUnimplementedSkeletonKvServiceServer() {}
-func (UnimplementedSkeletonKvServiceServer) testEmbeddedByValue()                           {}
+func (UnimplementedTcpDataServiceServer) mustEmbedUnimplementedTcpDataServiceServer() {}
+func (UnimplementedTcpDataServiceServer) testEmbeddedByValue()                        {}
 
-// UnsafeSkeletonKvServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to SkeletonKvServiceServer will
+// UnsafeTcpDataServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TcpDataServiceServer will
 // result in compilation errors.
-type UnsafeSkeletonKvServiceServer interface {
-	mustEmbedUnimplementedSkeletonKvServiceServer()
+type UnsafeTcpDataServiceServer interface {
+	mustEmbedUnimplementedTcpDataServiceServer()
 }
 
-func RegisterSkeletonKvServiceServer(s grpc.ServiceRegistrar, srv SkeletonKvServiceServer) {
-	// If the following call panics, it indicates UnimplementedSkeletonKvServiceServer was
+func RegisterTcpDataServiceServer(s grpc.ServiceRegistrar, srv TcpDataServiceServer) {
+	// If the following call panics, it indicates UnimplementedTcpDataServiceServer was
 	// embedded by pointer and is nil.  This will cause panics if an
 	// unimplemented method is ever invoked, so we test this at initialization
 	// time to prevent it from happening at runtime later due to I/O.
 	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
 		t.testEmbeddedByValue()
 	}
-	s.RegisterService(&SkeletonKvService_ServiceDesc, srv)
+	s.RegisterService(&TcpDataService_ServiceDesc, srv)
 }
 
-func _SkeletonKvService_PutBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _TcpDataService_PutBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PutBlocksRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SkeletonKvServiceServer).PutBlocks(ctx, in)
+		return srv.(TcpDataServiceServer).PutBlocks(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SkeletonKvService_PutBlocks_FullMethodName,
+		FullMethod: TcpDataService_PutBlocks_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SkeletonKvServiceServer).PutBlocks(ctx, req.(*PutBlocksRequest))
+		return srv.(TcpDataServiceServer).PutBlocks(ctx, req.(*PutBlocksRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SkeletonKvService_GetBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _TcpDataService_GetBlocks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetBlocksRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SkeletonKvServiceServer).GetBlocks(ctx, in)
+		return srv.(TcpDataServiceServer).GetBlocks(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SkeletonKvService_GetBlocks_FullMethodName,
+		FullMethod: TcpDataService_GetBlocks_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SkeletonKvServiceServer).GetBlocks(ctx, req.(*GetBlocksRequest))
+		return srv.(TcpDataServiceServer).GetBlocks(ctx, req.(*GetBlocksRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// SkeletonKvService_ServiceDesc is the grpc.ServiceDesc for SkeletonKvService service.
+// TcpDataService_ServiceDesc is the grpc.ServiceDesc for TcpDataService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var SkeletonKvService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "lake.SkeletonKvService",
-	HandlerType: (*SkeletonKvServiceServer)(nil),
+var TcpDataService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "lake.TcpDataService",
+	HandlerType: (*TcpDataServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "PutBlocks",
-			Handler:    _SkeletonKvService_PutBlocks_Handler,
+			Handler:    _TcpDataService_PutBlocks_Handler,
 		},
 		{
 			MethodName: "GetBlocks",
-			Handler:    _SkeletonKvService_GetBlocks_Handler,
+			Handler:    _TcpDataService_GetBlocks_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -1007,7 +1019,7 @@ const (
 // WorkerService — 计算层 Generate。
 //
 //	生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-//	P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//	P3/P4:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + TcpDataService。
 //	    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
 type WorkerServiceClient interface {
 	Generate(ctx context.Context, in *GenerateRequest, opts ...grpc.CallOption) (*GenerateResponse, error)
@@ -1038,7 +1050,7 @@ func (c *workerServiceClient) Generate(ctx context.Context, in *GenerateRequest,
 // WorkerService — 计算层 Generate。
 //
 //	生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-//	P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//	P3/P4:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + TcpDataService。
 //	    执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
 type WorkerServiceServer interface {
 	Generate(context.Context, *GenerateRequest) (*GenerateResponse, error)

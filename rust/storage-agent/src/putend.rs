@@ -75,7 +75,8 @@ impl PutEndSession {
                         tier: Tier::L2 as i32,
                         node_id: self.node_id.clone(),
                         // TODO(P5): real segment_id/offset from NVMe placement
-                        // (#20 P4.3 review §4.3 / P4.4·P5；内存站位无 segment map).
+                        // (#20 P4.3 review §4.3；P4.4 已有 TcpTransport 段 arena，
+                        // 真介质 placement 权威仍在 P5)。
                         segment_id: 1,
                         offset: 0,
                     });

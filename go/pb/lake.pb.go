@@ -1222,6 +1222,8 @@ func (x *PlaceBlocksRequest) GetTargetNodeId() string {
 }
 
 // --- 传输(边7/8 控制信令) ---
+// 对齐 Mooncake Transport::TransferRequest{source,target_id,target_offset,length}
+// (opcode 默认 WRITE;READ 语义由 Pull 覆盖,不进本消息)。
 type TransferBatchRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Reqs          []*TransferRequest     `protobuf:"bytes,1,rep,name=reqs,proto3" json:"reqs,omitempty"`
@@ -1268,8 +1270,8 @@ func (x *TransferBatchRequest) GetReqs() []*TransferRequest {
 
 type TransferRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	Source          *Location              `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`                                             // 源位置(L0/L1/L2 段式)
-	TargetSegmentId uint64                 `protobuf:"varint,2,opt,name=target_segment_id,json=targetSegmentId,proto3" json:"target_segment_id,omitempty"` // 目标段
+	Source          *Location              `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`                                             // 源位置(**tier∈{L0,L1,L2}**,拒绝 L3)
+	TargetSegmentId uint64                 `protobuf:"varint,2,opt,name=target_segment_id,json=targetSegmentId,proto3" json:"target_segment_id,omitempty"` // 目标段(仿 Mooncake SegmentID)
 	TargetOffset    uint64                 `protobuf:"varint,3,opt,name=target_offset,json=targetOffset,proto3" json:"target_offset,omitempty"`
 	Length          uint64                 `protobuf:"varint,4,opt,name=length,proto3" json:"length,omitempty"`
 	unknownFields   protoimpl.UnknownFields
@@ -2310,8 +2312,8 @@ const file_lake_proto_rawDesc = "" +
 	"\x0eSubmitTransfer\x12\x1a.lake.TransferBatchRequest\x1a\x16.lake.TransferBatchAck\x12N\n" +
 	"\x11GetTransferStatus\x12\x1b.lake.TransferStatusRequest\x1a\x1c.lake.TransferStatusResponse\x12-\n" +
 	"\x04Pull\x12\x11.lake.PullRequest\x1a\x12.lake.PullResponse\x12*\n" +
-	"\aPublish\x12\x14.lake.PublishRequest\x1a\t.lake.Ack2\x81\x01\n" +
-	"\x11SkeletonKvService\x12.\n" +
+	"\aPublish\x12\x14.lake.PublishRequest\x1a\t.lake.Ack2~\n" +
+	"\x0eTcpDataService\x12.\n" +
 	"\tPutBlocks\x12\x16.lake.PutBlocksRequest\x1a\t.lake.Ack\x12<\n" +
 	"\tGetBlocks\x12\x16.lake.GetBlocksRequest\x1a\x17.lake.GetBlocksResponse2J\n" +
 	"\rWorkerService\x129\n" +
@@ -2418,8 +2420,8 @@ var file_lake_proto_depIdxs = []int32{
 	24, // 39: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
 	26, // 40: lake.TransferService.Pull:input_type -> lake.PullRequest
 	28, // 41: lake.TransferService.Publish:input_type -> lake.PublishRequest
-	31, // 42: lake.SkeletonKvService.PutBlocks:input_type -> lake.PutBlocksRequest
-	33, // 43: lake.SkeletonKvService.GetBlocks:input_type -> lake.GetBlocksRequest
+	31, // 42: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
+	33, // 43: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
 	35, // 44: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
 	6,  // 45: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
 	9,  // 46: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
@@ -2435,8 +2437,8 @@ var file_lake_proto_depIdxs = []int32{
 	25, // 56: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
 	27, // 57: lake.TransferService.Pull:output_type -> lake.PullResponse
 	30, // 58: lake.TransferService.Publish:output_type -> lake.Ack
-	30, // 59: lake.SkeletonKvService.PutBlocks:output_type -> lake.Ack
-	34, // 60: lake.SkeletonKvService.GetBlocks:output_type -> lake.GetBlocksResponse
+	30, // 59: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
+	34, // 60: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
 	36, // 61: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
 	45, // [45:62] is the sub-list for method output_type
 	28, // [28:45] is the sub-list for method input_type

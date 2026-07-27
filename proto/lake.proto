@@ -14,7 +14,9 @@ import "schema.proto";
 // 3 个 service 按通信边划分:
 //   ControlPlaneService — 边3/4/5:Router+agent ↔ 存储控制面(控制面进程实现)
 //   AgentService        — 边10:Router/控制面 → agent(agent 进程实现)
-//   TransferService     — 边7/8:RDMA 传输的控制信令(数据旁路;**agent / KV Node agent 实现,非控制面**)
+//   TransferService     — 边7/8:传输控制信令(字节旁路;**agent / KV Node agent 实现,非控制面**)
+//                         P4:TcpTransport(gRPC 字节走 TcpDataService);P5:RdmaTransport
+//   TcpDataService      — TCP 退化数据面(Put/Get bytes;对齐 Mooncake MC_FORCE_TCP fallback)
 //
 // 参考:
 //   - Dynamo protocols.rs::RouterRequest/RouterResponse/Placement(路由协议 + 命中量化)
@@ -82,10 +84,14 @@ service AgentService {
 }
 
 // =============================================================================
-// TransferService — 边7/8:RDMA 传输的控制信令(字节走 RDMA 旁路)
+// TransferService — 边7/8:传输控制信令(字节走数据面旁路)
 // =============================================================================
+// P4.4:接线 TcpTransport(单进程本地拷贝 / gRPC TcpDataService 字节搬运)。
+// P5:同 API 换 RdmaTransport(Mooncake FFI),业务零改。
 service TransferService {
-  // 仿 Mooncake:allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus。
+  // 仿 Mooncake TransferEngine:
+  //   allocateBatchID → submitTransfer(batch,{TransferRequest}) → getTransferStatus → freeBatchID。
+  // SubmitTransfer = allocate + submit(返回 batch_id);task_id = 批内下标。
   rpc SubmitTransfer(TransferBatchRequest) returns (TransferBatchAck);
   rpc GetTransferStatus(TransferStatusRequest) returns (TransferStatusResponse);
 
@@ -209,12 +215,14 @@ message PlaceBlocksRequest {
 }
 
 // --- 传输(边7/8 控制信令) ---
+// 对齐 Mooncake Transport::TransferRequest{source,target_id,target_offset,length}
+// (opcode 默认 WRITE;READ 语义由 Pull 覆盖,不进本消息)。
 message TransferBatchRequest {
   repeated TransferRequest reqs = 1;
 }
 message TransferRequest {
-  lake.Location source            = 1;   // 源位置(L0/L1/L2 段式)
-  uint64 target_segment_id        = 2;   // 目标段
+  lake.Location source            = 1;   // 源位置(**tier∈{L0,L1,L2}**,拒绝 L3)
+  uint64 target_segment_id        = 2;   // 目标段(仿 Mooncake SegmentID)
   uint64 target_offset            = 3;
   uint64 length                   = 4;
 }
@@ -266,14 +274,14 @@ message Ack {
 }
 
 // =============================================================================
-// P3 skeleton-only services(验证三语言联通;生产路径见上方注释)
+// TcpDataService — TCP 退化数据面(P4.4 正名自 P3 SkeletonKvService)
 // =============================================================================
 //
-// SkeletonKvService — mock KV **字节**走 gRPC。
-//   生产:字节走 RDMA 旁路(边7/8),proto 只有控制信令。
-//   P3:无 RDMA/PyO3 时用本 service 把不透明 bytes 写入 Rust 内存池,验证跨语言 KV 流转。
-//   P4 起由 TransferService + 数据面取代,本 service 可删或留 debug。
-service SkeletonKvService {
+// 对齐 Mooncake `MC_FORCE_TCP` / `installTransport("tcp")` fallback:
+//   无 RDMA 时 KV **字节**走 gRPC Put/Get(CPU 拷贝,非零拷贝)。
+//   TransferService 控制信令 + TcpTransport 可经本 service 搬字节;
+//   P5 真 RDMA 旁路后本 service 仍作 TCP 退化路径保留。
+service TcpDataService {
   rpc PutBlocks(PutBlocksRequest) returns (Ack);
   rpc GetBlocks(GetBlocksRequest) returns (GetBlocksResponse);
 }
@@ -295,7 +303,7 @@ message GetBlocksResponse {
 
 // WorkerService — 计算层 Generate。
 //   生产:Router Dispatch(边10)→ agent → FFI(边6)调引擎;token 流经 agent/SSE 回 Router。
-//   P3:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + SkeletonKv。
+//   P3/P4:Router 先 AgentService.Dispatch(ack 占位)再调本 service;worker 内调 ControlPlane + TcpDataService。
 //       执行仍在本 service(非 agent 组 batch);prefill/decode 同进程 mock;**mode 固定 COLOCATED**。
 service WorkerService {
   rpc Generate(GenerateRequest) returns (GenerateResponse);

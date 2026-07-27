@@ -1,4 +1,4 @@
-"""P3：ControlPlane + SkeletonKv 实现的 StorageAgent（同步 mock）。"""
+"""P3/P4：ControlPlane + TcpDataService 实现的 StorageAgent（同步 mock）。"""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class GrpcSkeletonAgent:
     def __init__(
         self,
         cp: lake_pb2_grpc.ControlPlaneServiceStub,
-        kv: lake_pb2_grpc.SkeletonKvServiceStub,
+        kv: lake_pb2_grpc.TcpDataServiceStub,
     ) -> None:
         self._cp = cp
         self._kv = kv

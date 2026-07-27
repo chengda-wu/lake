@@ -1,7 +1,8 @@
 //! 存储池 agent。
 //!
 //! P3:Dispatch 占位。P4.3:PutEnd COMPLETE + `TierPipeline`/`apply_location_events`。
-//! 参考:Mooncake PutEnd;`hiradix_cache.py::_evict_write_back`/`lock_ref`;
+//! P4.4:`TransferService` 由 `main` 挂 `lake_transfer::TransferServer`(TcpTransport)。
+//! 参考:Mooncake PutEnd / transfer-engine;`hiradix_cache.py::_evict_write_back`/`lock_ref`;
 //! Dynamo `offload/pipeline.rs` settlement→presence。
 
 mod cp_port;
@@ -84,7 +85,8 @@ pub mod kvnode {
 #[allow(dead_code)]
 type _AgentServer = lake_proto::lake::agent_service_server::AgentServiceServer<()>;
 #[allow(dead_code)]
-type _TransferServer = lake_proto::lake::transfer_service_server::TransferServiceServer<()>;
+type _TransferServer =
+    lake_proto::lake::transfer_service_server::TransferServiceServer<lake_transfer::TransferServer>;
 #[allow(dead_code)]
 const _ANCHOR: fn() = || {
     let _ = DispatchRequest::default();
