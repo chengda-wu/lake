@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lake"
 version = "0.0.0"
+requires-python = ">=3.12"
 # 版本下限对齐生成 stub:lake_pb2.py 校验 protobuf runtime ≥ 7.35.0(major 7),
 # lake_pb2_grpc.py 校验 grpcio ≥ 1.82.1。低于此 import 即炸,故钉到生成版本。
 dependencies = [
@@ -15,6 +16,15 @@ dependencies = [
 # 已定技术选型 Python+Triton；C3 TinyLM 不强制。安装：pip install -e ".[cuda]"
 [project.optional-dependencies]
 cuda = ["torch", "triton"]
+dev = [
+    "grpcio-tools==1.82.1",
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+# uv 仅用于开发期 Python 环境管理；Rust/Go 仍分别用 cargo / go。
+package = true
 
 [tool.setuptools.packages.find]
 # 白名单(非 find_packages 自动发现):新增 python/ 顶层包必须改这里,否则

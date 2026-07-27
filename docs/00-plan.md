@@ -132,6 +132,13 @@ P7  性能建模与验证   → 量化各假设，回填设计
 | 控制面存储 | 元数据权威 | **控制面进程内存**（强一致）+ etcd（降频 checkpoint + lease） | 强一致权威在进程内存（满块注册高频写不压 etcd）；etcd 只存低频 checkpoint + 节点 lease，非强一致位置表。详见 [`architecture/control-plane.md`](architecture/control-plane.md)「位置视图权威的归属」 |
 | 跨语言通信 | 统一 RPC | **gRPC + Protobuf** | Rust/Go/Python 都有一等支持；数据平面大块 KV 走 RDMA/共享内存旁路 gRPC |
 
+### 开发环境约定
+
+- **Python 开发环境用 `uv` 管理**：从仓库根执行 `uv venv --python 3.12`、`source .venv/bin/activate`、`uv pip install -e "./python[dev]"`。
+- **边界**：`uv` 只管 Python 开发依赖与本地测试环境；Rust / Go 仍分别使用 `cargo` / `go`，三语言构建入口不合并到 uv。
+- **CUDA/Triton**：默认 dev 环境不强制安装 Torch/Triton；需要真 CUDA 路径时执行 `uv pip install -e "./python[dev,cuda]"`。
+- **参考取向**：vLLM 更偏 uv-first（推荐 `uv venv`、`uv pip install ... --torch-backend=auto`）；SGLang 也推荐 uv 并在 CI/Docker 中使用，但保留平台 fallback。lake 采用其开发环境管理经验，不改变既定语言技术选型。
+
 ### 模块与目录划分
 
 > 与 [#3](https://github.com/chengda-wu/lake/issues/3) / [`control-plane.md`](architecture/control-plane.md) 对齐：**位置视图权威在 Rust 存储控制面**；**集群级调度归 Go Router 内**（不拆独立 Scheduler 进程）；节点级 scheduler 在计算节点（Python，后续）；入口 Gateway 用外部 Bifrost。空壳落地见 [PR #17](https://github.com/chengda-wu/lake/pull/17)。
