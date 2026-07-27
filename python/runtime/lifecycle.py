@@ -35,6 +35,9 @@ class CapacitySignal:
     state: WorkerState
     role: str
     model_backend: str
+    model_id: str = ""
+    model_loaded: bool = False
+    model_warmed: bool = False
 
     @property
     def remaining_slots(self) -> int:

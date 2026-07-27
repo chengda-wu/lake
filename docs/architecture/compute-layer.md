@@ -626,6 +626,8 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 
 **C11 状态（2026-07-27）**：已落 Python 版固定 buffer 镜像（`InputBuffers`）+ `AttentionMetadata` v2（`block_table_tensor` / `slot_mapping` / `positions`）+ `ReadyHandle.slot_mapping_by_req`；`InMemoryAgent` 已返回逻辑 block table / slot mapping 供单测。真 device tensor / CUDA graph capture 仍归 C12+ 后续生产化。
 
+**C12 状态（2026-07-27）**：已落 `ModelRunner.load_model` / `warmup` / `ModelRunnerStatus`，`WorkerEngine.start()` 在 Warm 阶段执行 load+warmup，`CapacitySignal` 上报 `model_id` / loaded / warmed；权重 pin 以回调形式接入，保持权重所有权在池侧。warmup 复用 `dummy_run()`，不触发 `pool.prepare_step` / `pool.done`。
+
 #### 本轮不做
 
 - 不接 vLLM `BlockPool` / `KVCacheManager` / runner 内 `RequestState`，这些与池权威冲突。

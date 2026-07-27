@@ -89,15 +89,26 @@ class WorkerEngine:
             state=self._life.state,
             role=self._role.role.value,
             model_backend=self._role.model_backend,
+            model_id=self._runner.model_id,
+            model_loaded=self._runner.model_loaded,
+            model_warmed=self._runner.model_warmed,
         )
 
     def start(self) -> None:
         with self._lock:
             if self._started or self._thread.is_alive():
                 return
-            # C10：Boot→Warm→Ready→Serving（权重 pin / 池放置挂点，骨架仅状态）
+            # C12：Boot→Warm(load/warmup)→Ready→Serving。
             self._life.advance(WorkerState.BOOT)
             self._life.warm()
+            self._runner.load_model(
+                model_id=self._role.model_id,
+                revision=self._role.model_revision,
+            )
+            self._runner.warmup(
+                num_reqs=self._role.warmup_num_reqs,
+                tokens_per_req=self._role.warmup_tokens_per_req,
+            )
             self._life.ready()
             self._life.serve()
             self._started = True

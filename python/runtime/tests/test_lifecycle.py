@@ -51,6 +51,9 @@ def test_engine_capacity_signal() -> None:
         assert sig.remaining_slots == 8
         assert sig.inflight_reqs == 0
         assert sig.role == "hybrid"
+        assert sig.model_id == "mock-llm"
+        assert sig.model_loaded is True
+        assert sig.model_warmed is True
     finally:
         eng.stop()
     assert eng.lifecycle.state == WorkerState.TERMINATE

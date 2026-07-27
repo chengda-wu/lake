@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
-from engine.model_runner import ModelRunner
+from engine.model_runner import ModelLoadInfo, ModelRunner
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan
 from runtime.scheduler_output import ForwardMode, ReqIoSet
@@ -59,3 +59,28 @@ def test_dummy_run_skips_pool_done() -> None:
     assert out.step_id == 42
     assert ag.done_calls == 0
     assert ag.prepare_calls == 0
+
+
+def test_load_model_pins_weights_and_warmup_skips_pool() -> None:
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    pins: list[ModelLoadInfo] = []
+    runner = ModelRunner(
+        pool,
+        model_backend="tiny_lm",
+        weight_pin_callback=pins.append,
+    )
+    info = runner.load_model(model_id="tiny", revision="r1")
+    assert info.model_id == "tiny"
+    assert info.revision == "r1"
+    assert info.weight_pinned is True
+    assert pins == [info]
+    assert runner.model_loaded is True
+    assert runner.model_warmed is False
+
+    out = runner.warmup(num_reqs=2, tokens_per_req=1)
+    assert out.step_id == -1
+    assert runner.model_warmed is True
+    assert ag.done_calls == 0
+    assert ag.prepare_calls == 0
+    assert runner.status().model_id == "tiny"

@@ -8,7 +8,7 @@ C8：`prepare_inputs` / `prepare_attn` / `sample_tokens` 拆步；残差 query �
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from engine.attn.metadata import AttentionMetadata, build_attn_metadata
 from engine.drafter.tiny_mtp import TinyMTPDrafter
@@ -30,6 +30,24 @@ class ModelRunnerOutput:
     model_backend: str = "mock"
 
 
+@dataclass(frozen=True)
+class ModelLoadInfo:
+    model_id: str
+    revision: str
+    backend: str
+    load_dummy_weights: bool = False
+    weight_pinned: bool = False
+
+
+@dataclass(frozen=True)
+class ModelRunnerStatus:
+    model_id: str
+    revision: str
+    backend: str
+    loaded: bool
+    warmed: bool
+
+
 class ModelRunner:
     def __init__(
         self,
@@ -40,6 +58,7 @@ class ModelRunner:
         enable_drafter: bool = False,
         num_draft_tokens: int = 2,
         drafter: Optional[TinyMTPDrafter] = None,
+        weight_pin_callback: Optional[Callable[[ModelLoadInfo], None]] = None,
     ) -> None:
         self._pool = pool
         self._input_batch = InputBatch()
@@ -47,17 +66,96 @@ class ModelRunner:
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
         self._tiny: Optional[TinyLM] = tiny_lm
-        if model_backend == "tiny_lm" and self._tiny is None:
-            self._tiny = TinyLM()
         self.enable_drafter = enable_drafter
+        self._num_draft_tokens = num_draft_tokens
         self._drafter: Optional[TinyMTPDrafter] = drafter
-        if enable_drafter and self._drafter is None and self._tiny is not None:
+        self._weight_pin_callback = weight_pin_callback
+        self._model_id = ""
+        self._model_revision = ""
+        self._model_loaded = False
+        self._model_warmed = False
+        self._ensure_backend_initialized()
+
+    @property
+    def model_loaded(self) -> bool:
+        return self._model_loaded
+
+    @property
+    def model_warmed(self) -> bool:
+        return self._model_warmed
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    def status(self) -> ModelRunnerStatus:
+        return ModelRunnerStatus(
+            model_id=self._model_id,
+            revision=self._model_revision,
+            backend=self.model_backend,
+            loaded=self._model_loaded,
+            warmed=self._model_warmed,
+        )
+
+    def _ensure_backend_initialized(self) -> None:
+        if self.model_backend == "tiny_lm" and self._tiny is None:
+            self._tiny = TinyLM()
+        if self.enable_drafter and self._drafter is None and self._tiny is not None:
             self._drafter = TinyMTPDrafter(
-                num_draft_tokens=num_draft_tokens,
+                num_draft_tokens=self._num_draft_tokens,
                 vocab_size=self._tiny.vocab_size,
                 d_model=self._tiny.d_model,
                 n_heads=self._tiny.n_heads,
             )
+
+    def load_model(
+        self,
+        *,
+        model_id: str = "mock-llm",
+        revision: str = "",
+        load_dummy_weights: bool = False,
+        pin_weights: bool = True,
+    ) -> ModelLoadInfo:
+        """C12：真实模型加载骨架。
+
+        对齐 vLLM `GPUModelRunner.load_model` 的阶段边界：先建立模型对象，
+        再初始化依赖模型的执行组件。lake 只记录状态并触发权重 pin 回调；
+        权重所有权仍归存储池。
+        """
+
+        self._ensure_backend_initialized()
+        self._model_id = model_id or "mock-llm"
+        self._model_revision = revision
+        self._model_loaded = True
+        self._model_warmed = False
+        info = ModelLoadInfo(
+            model_id=self._model_id,
+            revision=self._model_revision,
+            backend=self.model_backend,
+            load_dummy_weights=load_dummy_weights,
+            weight_pinned=pin_weights,
+        )
+        if pin_weights and self._weight_pin_callback is not None:
+            self._weight_pin_callback(info)
+        return info
+
+    def warmup(
+        self,
+        *,
+        num_reqs: int = 1,
+        tokens_per_req: int = 1,
+    ) -> ModelRunnerOutput:
+        """C12：warmup 复用生产 dummy 入口，但跳过 pool.done。"""
+
+        if not self._model_loaded:
+            self.load_model(model_id=self._model_id or "mock-llm")
+        out = self.dummy_run(
+            num_reqs=num_reqs,
+            tokens_per_req=tokens_per_req,
+            step_id=-1,
+        )
+        self._model_warmed = True
+        return out
 
     def prepare_inputs(
         self,
