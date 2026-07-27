@@ -2,13 +2,17 @@
 //!
 //! P4.2:Dynamo `BlockRegistry` + `PositionalRadixTree` + `InactiveIndex` 薄驱动。
 //! P4.5:`RegisterModel` / `DeregisterModel`——每 `(model_id, revision)` 一命名空间。
+//! P4.6:按命名空间软/硬配额 + 借用 + `BackpressureSignal`(触硬上报,不请求 shedding)。
 //! 参考:`registry/mod.rs::register_sequence_hash` / `match_sequence_hash`；
-//! `InactiveIndex` + `LineageBackend::with_frequency`（叶子 + TinyLFU）。
+//! `InactiveIndex` + `LineageBackend::with_frequency`（叶子 + TinyLFU）；
+//! Mooncake `ReserveTenantQuota`；LMCache `QuotaManager::set_quota`。
 //! 关键差异:不用 BlockManager/BlockStore；EventsManager 不接线；
-//! presence 与 Authority 同锁 → 进程内线性一致；命名空间显式注册(非懒建)。
+//! presence 与 Authority 同锁 → 进程内线性一致；命名空间显式注册(非懒建)；
+//! 配额是 soft+hard+borrow(非 Mooncake 单 ceiling / LMCache 单 limit)。
 
 mod authority;
 mod hash_chain;
+mod quota;
 mod tier;
 
 use std::pin::Pin;
@@ -18,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub use authority::{Authority, NamespaceKey};
+pub use authority::{Authority, NamespaceKey, RegisterStatus};
 pub use lake_proto::lake::*;
 
 use control_plane_service_server::ControlPlaneService;
@@ -79,11 +83,24 @@ impl ControlPlaneService for ControlPlane {
         let req = request.into_inner();
         let mut auth = self.inner.lock().unwrap();
         match auth.register(&req.node_id, &req.prefix_hashes, req.blocks) {
-            Ok(()) => Ok(Response::new(Ack {
+            Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
-            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+            Ok(RegisterStatus::RejectedHardQuota(bp)) => Ok(Response::new(Ack {
+                ok: false,
+                err: format!(
+                    "RegisterBlocks: hard quota exceeded (deficit={})",
+                    bp.deficit_bytes
+                ),
+                backpressure: Some(bp),
+            })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
         }
     }
 
@@ -101,8 +118,13 @@ impl ControlPlaneService for ControlPlane {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
-            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
         }
     }
 
@@ -117,8 +139,13 @@ impl ControlPlaneService for ControlPlane {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
-            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
         }
     }
 
@@ -144,6 +171,7 @@ impl ControlPlaneService for ControlPlane {
             return Ok(Response::new(Ack {
                 ok: false,
                 err: "RegisterModel: model required".into(),
+                backpressure: None,
             }));
         };
         let mut auth = self.inner.lock().unwrap();
@@ -151,8 +179,13 @@ impl ControlPlaneService for ControlPlane {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
-            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
         }
     }
 
@@ -166,8 +199,59 @@ impl ControlPlaneService for ControlPlane {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
-            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
+        }
+    }
+
+    async fn set_model_quota(
+        &self,
+        request: Request<SetModelQuotaRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let Some(quota) = req.quota else {
+            return Ok(Response::new(Ack {
+                ok: false,
+                err: "SetModelQuota: quota required".into(),
+                backpressure: None,
+            }));
+        };
+        let mut auth = self.inner.lock().unwrap();
+        match auth.set_model_quota(&req.model_id, &req.revision, quota) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+                backpressure: None,
+            })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
+        }
+    }
+
+    async fn get_model_quota(
+        &self,
+        request: Request<GetModelQuotaRequest>,
+    ) -> Result<Response<GetModelQuotaResponse>, Status> {
+        let req = request.into_inner();
+        let auth = self.inner.lock().unwrap();
+        match auth.get_model_quota(&req.model_id, &req.revision) {
+            Ok(resp) => Ok(Response::new(resp)),
+            Err(e) => Ok(Response::new(GetModelQuotaResponse {
+                quota: None,
+                used_bytes: 0,
+                borrowed_bytes: 0,
+                backpressure: None,
+                ok: false,
+                err: e,
+            })),
         }
     }
 }
@@ -180,6 +264,9 @@ const _ANCHOR: fn() = || {
     let _ = LookupPrefixRequest::default();
     let _ = RegisterModelRequest::default();
     let _ = DeregisterModelRequest::default();
+    let _ = SetModelQuotaRequest::default();
+    let _ = GetModelQuotaRequest::default();
+    let _ = BackpressureSignal::default();
     let _ = RefDelta::default();
 };
 
@@ -806,5 +893,160 @@ mod tests {
         let (_, d_hit, _) = auth.lookup_prefix("m", "", PoolKind::Draft as i32, &full, "n0");
         assert_eq!(t_hit, 0, "target evicted");
         assert_eq!(d_hit, 1, "draft untouched");
+    }
+
+    // --- P4.6: soft/hard quota + borrow + backpressure ---
+
+    fn ensure_model_quota(
+        auth: &mut Authority,
+        model: &str,
+        soft: i64,
+        hard: i64,
+        borrow: bool,
+        bpb: u64,
+    ) {
+        auth.register_model(ModelDescriptor {
+            model_id: model.into(),
+            revision: String::new(),
+            num_layers: 32,
+            block_spec: Some(BlockSpec {
+                block_tokens: 128,
+                bytes_per_block: bpb,
+            }),
+            hash_algo: HashAlgo::HashSha256256 as i32,
+            quota: Some(Quota {
+                soft_bytes: soft,
+                hard_bytes: hard,
+                borrow_enabled: borrow,
+            }),
+        })
+        .unwrap();
+    }
+
+    /// A hits hard quota → RejectedHardQuota; B unaffected.
+    #[test]
+    fn p46_hard_quota_a_does_not_affect_b() {
+        let mut auth = Authority::default();
+        ensure_model_quota(&mut auth, "A", 100, 200, false, 100);
+        ensure_model_quota(&mut auth, "B", 100, 200, false, 100);
+
+        // A: 2 blocks = 200 = hard; third rejected
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a0"]), vec![meta("A", b"a0")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a1"]), vec![meta("A", b"a1")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        match auth
+            .register("n0", &prefix(&[b"a2"]), vec![meta("A", b"a2")])
+            .unwrap()
+        {
+            RegisterStatus::RejectedHardQuota(bp) => {
+                assert_eq!(bp.model_id, "A");
+                assert_eq!(bp.reason, "HARD_QUOTA");
+                assert!(bp.deficit_bytes > 0);
+            }
+            other => panic!("expected RejectedHardQuota, got {other:?}"),
+        }
+        assert_eq!(auth.used_bytes("A", ""), 200);
+        assert_eq!(auth.block_count("A", ""), 2);
+
+        // B still writes
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"b0"]), vec![meta("B", b"b0")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        assert_eq!(auth.used_bytes("B", ""), 100);
+        let (_, hit, _) =
+            auth.lookup_prefix("B", "", PoolKind::Target as i32, &prefix(&[b"b0"]), "n0");
+        assert_eq!(hit, 1);
+    }
+
+    /// Borrow over soft from pool free; reclaim when another borrower needs space.
+    #[test]
+    fn p46_borrow_and_reclaim() {
+        let mut auth = Authority::default();
+        auth.set_pool_capacity_bytes(300);
+        // Both may borrow; capacity forces reclaim of A's over-soft bytes for B.
+        ensure_model_quota(&mut auth, "A", 100, 300, true, 100);
+        ensure_model_quota(&mut auth, "B", 100, 300, true, 100);
+
+        // A: soft + one borrowed block (used=200)
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a0"]), vec![meta("A", b"a0")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a1"]), vec![meta("A", b"a1")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        let snap = auth.get_model_quota("A", "").unwrap();
+        assert_eq!(snap.used_bytes, 200);
+        assert_eq!(snap.borrowed_bytes, 100);
+
+        // Make A's borrowed block inactive (reclaimable)
+        auth.report_ref(&delta("A", b"a1", 1)).unwrap();
+        auth.report_ref(&delta("A", b"a1", -1)).unwrap();
+
+        // B takes soft (pool free → 0)
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"b0"]), vec![meta("B", b"b0")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        // B second block needs borrow but free=0 → reclaim A's over-soft
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"b1"]), vec![meta("B", b"b1")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        assert!(auth.used_bytes("A", "") <= 100, "A borrow reclaimed");
+        assert_eq!(auth.used_bytes("B", ""), 200);
+        let (_, a_hit, _) =
+            auth.lookup_prefix("A", "", PoolKind::Target as i32, &prefix(&[b"a1"]), "n0");
+        assert_eq!(a_hit, 0, "reclaimed a1");
+    }
+
+    /// SetModelQuota / GetModelQuota + hard backpressure on RegisterBlocks.
+    #[test]
+    fn p46_set_get_quota_and_backpressure_signal() {
+        let mut auth = Authority::default();
+        ensure_model_quota(&mut auth, "m", 0, 0, false, 50); // unlimited initially
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"x"]), vec![meta("m", b"x")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        auth.set_model_quota(
+            "m",
+            "",
+            Quota {
+                soft_bytes: 50,
+                hard_bytes: 50,
+                borrow_enabled: false,
+            },
+        )
+        .unwrap();
+        let g = auth.get_model_quota("m", "").unwrap();
+        assert_eq!(g.used_bytes, 50);
+        assert_eq!(g.quota.as_ref().unwrap().hard_bytes, 50);
+
+        match auth
+            .register("n0", &prefix(&[b"y"]), vec![meta("m", b"y")])
+            .unwrap()
+        {
+            RegisterStatus::RejectedHardQuota(bp) => {
+                assert_eq!(bp.reason, "HARD_QUOTA");
+                assert_eq!(bp.hard_bytes, 50);
+            }
+            other => panic!("expected backpressure reject, got {other:?}"),
+        }
     }
 }

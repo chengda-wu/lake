@@ -10,8 +10,10 @@
 //!
 //! P4.5:显式 `RegisterModel` / `DeregisterModel`；禁止懒建命名空间。
 //! 下线 = 整表 drop（强句柄释放 → radix Weak 失效 ≈ 按命名空间剪枝）。
+//! P4.6:软/硬配额 + 借用 + 触硬 `BackpressureSignal`（RegisterBlocks 拒扩容写入）。
 //! **关键差异**(相对 Dynamo):lake 一等 `(model_id, revision)` + `TARGET|DRAFT` 同池寻址，
 //! 不能共用单 registry 的 flat→entry 表。
+//! **关键差异**(相对 Mooncake tenant quota / LMCache QuotaManager):见 `quota.rs`。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +24,17 @@ use kvbm_logical::{
 };
 
 use crate::hash_chain::lineage_from_prefix;
+use crate::quota::{self, AdmitWrite};
 use crate::tier::{TierL0, TierL1, TierL2};
 use lake_proto::lake::*;
+
+/// Result of [`Authority::register`] after quota admission.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegisterStatus {
+    Accepted,
+    /// Hard quota would be exceeded — write rejected; signal for gateway.
+    RejectedHardQuota(BackpressureSignal),
+}
 
 const INACTIVE_CAP: usize = 4096;
 /// Same threshold shape as `MultiLruBackend` / Frequency LeafPolicy.
@@ -133,6 +144,8 @@ struct Namespace {
     /// `pool_kind` → independent radix / inactive / refs.
     pools: HashMap<i32, PoolView>,
     inactive_cap: usize,
+    /// Authoritative durable-byte usage for this namespace (all pool_kinds).
+    used_bytes: i64,
 }
 
 impl Namespace {
@@ -141,6 +154,7 @@ impl Namespace {
             descriptor,
             pools: HashMap::new(),
             inactive_cap: inactive_cap.max(1),
+            used_bytes: 0,
         }
     }
 
@@ -157,6 +171,45 @@ impl Namespace {
 
     fn block_count(&self) -> usize {
         self.pools.values().map(|p| p.by_flat.len()).sum()
+    }
+
+    fn bytes_per_block(&self) -> i64 {
+        self.descriptor
+            .block_spec
+            .as_ref()
+            .map(|s| s.bytes_per_block as i64)
+            .unwrap_or(0)
+            .max(1)
+    }
+
+    fn quota(&self) -> Quota {
+        quota::quota_or_default(self.descriptor.quota.as_ref())
+    }
+
+    /// Evict up to `n` inactive victims across all pool_kinds; returns blocks removed.
+    fn evict_inactive_n(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        let bpb = self.bytes_per_block();
+        let mut left = n;
+        let mut removed = 0;
+        // Stable order: TARGET then DRAFT then others.
+        let mut kinds: Vec<i32> = self.pools.keys().copied().collect();
+        kinds.sort_unstable();
+        for pk in kinds {
+            if left == 0 {
+                break;
+            }
+            let Some(pool) = self.pools.get_mut(&pk) else {
+                continue;
+            };
+            let n_here = pool.drop_inactive_victims(left);
+            removed += n_here;
+            left = left.saturating_sub(n_here);
+        }
+        self.used_bytes = (self.used_bytes - (removed as i64) * bpb).max(0);
+        removed
     }
 }
 
@@ -175,6 +228,9 @@ pub struct Authority {
     inactive_cap: usize,
     /// Completed request barriers: `(request_id, node_id)`.
     completed_barriers: HashMap<String, String>,
+    /// P4.6 mock pool durable capacity for borrow accounting.
+    /// `0` = unlimited free (borrow always available until per-model hard).
+    pool_capacity_bytes: i64,
 }
 
 impl Default for Authority {
@@ -189,7 +245,28 @@ impl Authority {
             namespaces: HashMap::new(),
             inactive_cap: inactive_cap.max(1),
             completed_barriers: HashMap::new(),
+            pool_capacity_bytes: 0,
         }
+    }
+
+    /// Set total pool capacity used for borrow free-space checks (P4.6 tests).
+    pub fn set_pool_capacity_bytes(&mut self, bytes: i64) {
+        self.pool_capacity_bytes = bytes.max(0);
+    }
+
+    pub fn pool_capacity_bytes(&self) -> i64 {
+        self.pool_capacity_bytes
+    }
+
+    fn total_used_bytes(&self) -> i64 {
+        self.namespaces.values().map(|n| n.used_bytes).sum()
+    }
+
+    fn free_bytes(&self) -> i64 {
+        if self.pool_capacity_bytes <= 0 {
+            return i64::MAX / 4; // "unlimited" free for borrow
+        }
+        (self.pool_capacity_bytes - self.total_used_bytes()).max(0)
     }
 
     /// P4.5: register `(model_id, revision)` namespace.
@@ -210,7 +287,7 @@ impl Authority {
                     desc.model_id, desc.revision
                 ));
             }
-            // Same identity → allow quota refresh (P4.6 enforcement later).
+            // Same identity → allow quota refresh.
             ns.descriptor.quota = desc.quota;
             return Ok(());
         }
@@ -231,6 +308,73 @@ impl Authority {
             ));
         }
         Ok(())
+    }
+
+    /// P4.6: update soft/hard/borrow for an existing namespace.
+    pub fn set_model_quota(
+        &mut self,
+        model_id: &str,
+        revision: &str,
+        quota: Quota,
+    ) -> Result<(), String> {
+        if model_id.is_empty() {
+            return Err("SetModelQuota: model_id required".into());
+        }
+        if quota.soft_bytes < 0 || quota.hard_bytes < 0 {
+            return Err("SetModelQuota: soft/hard_bytes must be non-negative".into());
+        }
+        if quota.hard_bytes > 0 && quota.soft_bytes > quota.hard_bytes {
+            return Err("SetModelQuota: soft_bytes must be <= hard_bytes when hard>0".into());
+        }
+        let ns = self.ns_mut(model_id, revision).ok_or_else(|| {
+            format!("SetModelQuota: unknown namespace ({model_id}, rev={revision:?})")
+        })?;
+        ns.descriptor.quota = Some(quota);
+        Ok(())
+    }
+
+    /// P4.6: snapshot quota + usage (+ backpressure if currently over hard).
+    pub fn get_model_quota(
+        &self,
+        model_id: &str,
+        revision: &str,
+    ) -> Result<GetModelQuotaResponse, String> {
+        if model_id.is_empty() {
+            return Err("GetModelQuota: model_id required".into());
+        }
+        let ns = self.ns(model_id, revision).ok_or_else(|| {
+            format!("GetModelQuota: unknown namespace ({model_id}, rev={revision:?})")
+        })?;
+        let q = ns.quota();
+        let used = ns.used_bytes;
+        let borrowed = quota::borrowed_bytes(used, q.soft_bytes);
+        let backpressure = if q.hard_bytes > 0 && used > q.hard_bytes {
+            Some(BackpressureSignal {
+                model_id: model_id.into(),
+                revision: revision.into(),
+                used_bytes: used,
+                soft_bytes: q.soft_bytes,
+                hard_bytes: q.hard_bytes,
+                deficit_bytes: used - q.hard_bytes,
+                reason: "HARD_QUOTA".into(),
+            })
+        } else {
+            None
+        };
+        Ok(GetModelQuotaResponse {
+            quota: Some(q),
+            used_bytes: used,
+            borrowed_bytes: borrowed,
+            backpressure,
+            ok: true,
+            err: String::new(),
+        })
+    }
+
+    pub fn used_bytes(&self, model_id: &str, revision: &str) -> i64 {
+        self.ns(model_id, revision)
+            .map(|n| n.used_bytes)
+            .unwrap_or(0)
     }
 
     pub fn has_namespace(&self, model_id: &str, revision: &str) -> bool {
@@ -261,14 +405,18 @@ impl Authority {
 
     /// Register durable blocks. One `RegisterBlocks` batch = one `pool_kind`
     /// contiguous segment of `prefix_hashes`.
+    ///
+    /// P4.6: charges per-namespace quota. New flats only. Soft overflow → own
+    /// inactive eviction + optional borrow/reclaim; hard overflow →
+    /// [`RegisterStatus::RejectedHardQuota`] (no mutation).
     pub fn register(
         &mut self,
         node_id: &str,
         prefix_hashes: &[Vec<u8>],
         metas: Vec<BlockMeta>,
-    ) -> Result<(), String> {
+    ) -> Result<RegisterStatus, String> {
         if metas.is_empty() {
-            return Ok(());
+            return Ok(RegisterStatus::Accepted);
         }
         let model_id = metas
             .iter()
@@ -346,11 +494,38 @@ impl Authority {
             ));
         }
 
+        // Count new unique flats (idempotent re-register of existing = 0 charge).
+        let new_block_count = {
+            let ns = self.ns(&model_id, &revision).expect("checked");
+            let pool = ns.pool(pool_kind);
+            let mut seen = std::collections::HashSet::new();
+            let mut n = 0usize;
+            for meta in &metas {
+                let Some(id) = meta.id.as_ref() else { continue };
+                if !seen.insert(id.block_hash.clone()) {
+                    continue;
+                }
+                let exists = pool
+                    .map(|p| p.by_flat.contains_key(&id.block_hash))
+                    .unwrap_or(false);
+                if !exists {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        if let Some(rejected) = self.admit_register_bytes(&model_id, &revision, new_block_count)? {
+            return Ok(rejected);
+        }
+
         let lineage = lineage_from_prefix(prefix_hashes);
         let ns = self
             .ns_mut(&model_id, &revision)
             .expect("checked has_namespace");
+        let bpb = ns.bytes_per_block();
         let pool = ns.pool_mut(pool_kind);
+        let mut charged = 0i64;
 
         for mut meta in metas {
             let Some(id) = meta.id.clone() else { continue };
@@ -372,6 +547,8 @@ impl Authority {
                     loc.node_id = node_id.to_string();
                 }
             }
+
+            let is_new = !pool.by_flat.contains_key(&flat);
 
             let handle = pool.registry.register_sequence_hash(seq);
             for loc in &meta.locations {
@@ -399,8 +576,147 @@ impl Authority {
                     block_id,
                 },
             );
+            if is_new {
+                charged += bpb;
+            }
         }
-        Ok(())
+        ns.used_bytes = ns.used_bytes.saturating_add(charged);
+        Ok(RegisterStatus::Accepted)
+    }
+
+    /// Soft eviction + borrow reclaim, then hard check. `Ok(None)` = admit.
+    fn admit_register_bytes(
+        &mut self,
+        model_id: &str,
+        revision: &str,
+        new_blocks: usize,
+    ) -> Result<Option<RegisterStatus>, String> {
+        if new_blocks == 0 {
+            return Ok(None);
+        }
+        let key = NamespaceKey::new(model_id, revision);
+        let (bpb, soft, hard, borrow_enabled, mut used) = {
+            let ns = self.ns(model_id, revision).ok_or_else(|| {
+                format!("admit: unknown namespace ({model_id}, rev={revision:?})")
+            })?;
+            let q = ns.quota();
+            (
+                ns.bytes_per_block(),
+                q.soft_bytes,
+                q.hard_bytes,
+                q.borrow_enabled,
+                ns.used_bytes,
+            )
+        };
+        let delta = (new_blocks as i64).saturating_mul(bpb);
+        let q = Quota {
+            soft_bytes: soft,
+            hard_bytes: hard,
+            borrow_enabled,
+        };
+
+        // Soft path: try own inactive eviction until under soft or stuck.
+        if soft > 0 {
+            let mut guard = 0;
+            while used.saturating_add(delta) > soft && guard < 64 {
+                guard += 1;
+                let need = used.saturating_add(delta) - soft;
+                let want_blocks = ((need + bpb - 1) / bpb).max(1) as usize;
+                let removed = self
+                    .ns_mut(model_id, revision)
+                    .map(|n| n.evict_inactive_n(want_blocks))
+                    .unwrap_or(0);
+                if removed == 0 {
+                    break;
+                }
+                used = self.used_bytes(model_id, revision);
+            }
+        }
+
+        // Borrow: if still over soft and borrow enabled, reclaim others if pool tight.
+        if borrow_enabled && soft > 0 {
+            let projected = used.saturating_add(delta);
+            if projected > soft {
+                let need_borrow = projected - soft;
+                let free = self.free_bytes();
+                if free < need_borrow {
+                    let want = need_borrow - free;
+                    self.reclaim_borrowed_bytes(&key, want);
+                    used = self.used_bytes(model_id, revision);
+                }
+                // After reclaim, if still not enough free and still under hard,
+                // allow (soft is soft). Hard check below is authoritative reject.
+                let free_after = self.free_bytes();
+                let projected_after = used.saturating_add(delta);
+                let need_after = (projected_after - soft).max(0);
+                if self.pool_capacity_bytes > 0
+                    && need_after > free_after
+                    && hard > 0
+                    && projected_after <= hard
+                {
+                    // Pool full of non-reclaimable (ref>0) bytes — treat as hard pressure.
+                    let bp = AdmitWrite::HardQuota {
+                        used_bytes: used,
+                        soft_bytes: soft,
+                        hard_bytes: hard,
+                        deficit_bytes: need_after - free_after,
+                    }
+                    .backpressure(model_id, revision)
+                    .expect("HardQuota");
+                    return Ok(Some(RegisterStatus::RejectedHardQuota(bp)));
+                }
+            }
+        }
+
+        match quota::classify_write(used, delta, &q) {
+            r @ AdmitWrite::HardQuota { .. } => {
+                let bp = r.backpressure(model_id, revision).expect("HardQuota");
+                Ok(Some(RegisterStatus::RejectedHardQuota(bp)))
+            }
+            AdmitWrite::WithinSoft | AdmitWrite::OverSoft => Ok(None),
+        }
+    }
+
+    /// Evict inactive blocks from other namespaces that are over soft (borrowers).
+    fn reclaim_borrowed_bytes(&mut self, except: &NamespaceKey, want_bytes: i64) -> i64 {
+        if want_bytes <= 0 {
+            return 0;
+        }
+        let mut freed = 0i64;
+        let mut keys: Vec<NamespaceKey> = self
+            .namespaces
+            .iter()
+            .filter(|(k, ns)| {
+                *k != except && quota::borrowed_bytes(ns.used_bytes, ns.quota().soft_bytes) > 0
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.sort_by(|a, b| {
+            a.model_id
+                .cmp(&b.model_id)
+                .then(a.revision.cmp(&b.revision))
+        });
+
+        for key in keys {
+            if freed >= want_bytes {
+                break;
+            }
+            let Some(ns) = self.namespaces.get_mut(&key) else {
+                continue;
+            };
+            let soft = ns.quota().soft_bytes;
+            let bpb = ns.bytes_per_block();
+            let over = quota::borrowed_bytes(ns.used_bytes, soft);
+            if over <= 0 {
+                continue;
+            }
+            let still = want_bytes - freed;
+            let target = still.min(over);
+            let want_blocks = ((target + bpb - 1) / bpb).max(1) as usize;
+            let removed = ns.evict_inactive_n(want_blocks);
+            freed += (removed as i64) * bpb;
+        }
+        freed
     }
 
     /// Prefix lookup in one `pool_kind` domain.
@@ -564,10 +880,15 @@ impl Authority {
         let Some(ns) = self.ns_mut(model_id, revision) else {
             return 0;
         };
-        let Some(pool) = ns.pools.get_mut(&pk) else {
-            return 0;
+        let bpb = ns.bytes_per_block();
+        let removed = {
+            let Some(pool) = ns.pools.get_mut(&pk) else {
+                return 0;
+            };
+            pool.drop_inactive_victims(n)
         };
-        pool.drop_inactive_victims(n)
+        ns.used_bytes = (ns.used_bytes - (removed as i64) * bpb).max(0);
+        removed
     }
 
     pub fn inactive_len(&self, model_id: &str, revision: &str, pool_kind: i32) -> usize {

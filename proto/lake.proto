@@ -67,9 +67,14 @@ service ControlPlaneService {
 
   // P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
   //   下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
-  //   配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
   rpc RegisterModel(RegisterModelRequest) returns (Ack);
   rpc DeregisterModel(DeregisterModelRequest) returns (Ack);
+
+  // P4.6:按模型软/硬配额 + 借用 + 背压(F11)。配额挂 (model_id, revision) 命名空间。
+  //   触硬配额 → Ack.backpressure 上报;请求级 shedding 仍归 gateway,池内不拒请求。
+  //   RegisterBlocks 触硬时 ok=false + backpressure(拒绝本次写入扩容,非请求 shedding)。
+  rpc SetModelQuota(SetModelQuotaRequest) returns (Ack);
+  rpc GetModelQuota(GetModelQuotaRequest) returns (GetModelQuotaResponse);
 }
 
 // =============================================================================
@@ -162,11 +167,24 @@ enum HashAlgo {
   HASH_SHA256_128       = 2;
   HASH_BLAKE3_128       = 3;
 }
-// P4.5 只存骨架;触硬配额 / 借用 / BackpressureSignal → P4.6。
+// P4.6:软/硬配额 + 借用。soft/hard_bytes=0 → 该侧不限(兼容 P4.5 未配配额)。
+//   soft 内自由写;超 soft → 本模型冷块淘汰腾位,并可闲时借用池全局空闲;
+//   触 hard → BackpressureSignal(写入背压上报 gateway)。
 message Quota {
   int64 soft_bytes     = 1;
   int64 hard_bytes     = 2;
   bool  borrow_enabled = 3;
+}
+// 写入背压信号:触硬配额时填入 Ack.backpressure / GetModelQuotaResponse。
+//   lake 只上报;请求级 shedding 归 gateway(见 features/slo.md「过载控制」)。
+message BackpressureSignal {
+  string model_id      = 1;
+  string revision      = 2;
+  int64  used_bytes    = 3;
+  int64  soft_bytes    = 4;
+  int64  hard_bytes    = 5;
+  int64  deficit_bytes = 6;  // projected - hard(触硬时 >0)
+  string reason        = 7;  // 初版固定 "HARD_QUOTA"
 }
 message ModelDescriptor {
   string    model_id   = 1;
@@ -174,7 +192,7 @@ message ModelDescriptor {
   uint32    num_layers = 3;
   BlockSpec block_spec = 4;
   HashAlgo  hash_algo  = 5;
-  Quota     quota      = 6;  // 登记用;执行 → P4.6
+  Quota     quota      = 6;  // P4.6:登记即可执行;亦可事后 SetModelQuota
 }
 message RegisterModelRequest {
   ModelDescriptor model = 1;
@@ -182,6 +200,23 @@ message RegisterModelRequest {
 message DeregisterModelRequest {
   string model_id = 1;
   string revision = 2;  // 与 RegisterModel 同键;级联删该命名空间
+}
+message SetModelQuotaRequest {
+  string model_id = 1;
+  string revision = 2;
+  Quota  quota    = 3;
+}
+message GetModelQuotaRequest {
+  string model_id = 1;
+  string revision = 2;
+}
+message GetModelQuotaResponse {
+  Quota              quota          = 1;
+  int64              used_bytes     = 2;
+  int64              borrowed_bytes = 3;  // max(0, used - soft);soft=0 时为 0
+  BackpressureSignal backpressure   = 4;  // 当前 used>hard 时填(罕见;正常触硬已拒写)
+  bool               ok             = 5;
+  string             err            = 6;
 }
 message LookupPrefixResponse {
   repeated ReusableBlock blocks = 1;  // 沿前缀匹配的连续 block 列表
@@ -333,6 +368,8 @@ message LayerSlice {
 message Ack {
   bool ok    = 1;
   string err = 2;
+  // P4.6:触硬配额时附带;其它错误可不填。gateway 据此做请求级 shedding。
+  BackpressureSignal backpressure = 3;
 }
 
 // =============================================================================

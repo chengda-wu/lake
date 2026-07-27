@@ -28,6 +28,8 @@ const (
 	ControlPlaneService_Lease_FullMethodName           = "/lake.ControlPlaneService/Lease"
 	ControlPlaneService_RegisterModel_FullMethodName   = "/lake.ControlPlaneService/RegisterModel"
 	ControlPlaneService_DeregisterModel_FullMethodName = "/lake.ControlPlaneService/DeregisterModel"
+	ControlPlaneService_SetModelQuota_FullMethodName   = "/lake.ControlPlaneService/SetModelQuota"
+	ControlPlaneService_GetModelQuota_FullMethodName   = "/lake.ControlPlaneService/GetModelQuota"
 )
 
 // ControlPlaneServiceClient is the client API for ControlPlaneService service.
@@ -77,9 +79,14 @@ type ControlPlaneServiceClient interface {
 	// P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
 	//
 	//	下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
-	//	配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
 	RegisterModel(ctx context.Context, in *RegisterModelRequest, opts ...grpc.CallOption) (*Ack, error)
 	DeregisterModel(ctx context.Context, in *DeregisterModelRequest, opts ...grpc.CallOption) (*Ack, error)
+	// P4.6:按模型软/硬配额 + 借用 + 背压(F11)。配额挂 (model_id, revision) 命名空间。
+	//
+	//	触硬配额 → Ack.backpressure 上报;请求级 shedding 仍归 gateway,池内不拒请求。
+	//	RegisterBlocks 触硬时 ok=false + backpressure(拒绝本次写入扩容,非请求 shedding)。
+	SetModelQuota(ctx context.Context, in *SetModelQuotaRequest, opts ...grpc.CallOption) (*Ack, error)
+	GetModelQuota(ctx context.Context, in *GetModelQuotaRequest, opts ...grpc.CallOption) (*GetModelQuotaResponse, error)
 }
 
 type controlPlaneServiceClient struct {
@@ -195,6 +202,26 @@ func (c *controlPlaneServiceClient) DeregisterModel(ctx context.Context, in *Der
 	return out, nil
 }
 
+func (c *controlPlaneServiceClient) SetModelQuota(ctx context.Context, in *SetModelQuotaRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_SetModelQuota_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) GetModelQuota(ctx context.Context, in *GetModelQuotaRequest, opts ...grpc.CallOption) (*GetModelQuotaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetModelQuotaResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_GetModelQuota_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServiceServer is the server API for ControlPlaneService service.
 // All implementations must embed UnimplementedControlPlaneServiceServer
 // for forward compatibility.
@@ -242,9 +269,14 @@ type ControlPlaneServiceServer interface {
 	// P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
 	//
 	//	下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
-	//	配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
 	RegisterModel(context.Context, *RegisterModelRequest) (*Ack, error)
 	DeregisterModel(context.Context, *DeregisterModelRequest) (*Ack, error)
+	// P4.6:按模型软/硬配额 + 借用 + 背压(F11)。配额挂 (model_id, revision) 命名空间。
+	//
+	//	触硬配额 → Ack.backpressure 上报;请求级 shedding 仍归 gateway,池内不拒请求。
+	//	RegisterBlocks 触硬时 ok=false + backpressure(拒绝本次写入扩容,非请求 shedding)。
+	SetModelQuota(context.Context, *SetModelQuotaRequest) (*Ack, error)
+	GetModelQuota(context.Context, *GetModelQuotaRequest) (*GetModelQuotaResponse, error)
 	mustEmbedUnimplementedControlPlaneServiceServer()
 }
 
@@ -281,6 +313,12 @@ func (UnimplementedControlPlaneServiceServer) RegisterModel(context.Context, *Re
 }
 func (UnimplementedControlPlaneServiceServer) DeregisterModel(context.Context, *DeregisterModelRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeregisterModel not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) SetModelQuota(context.Context, *SetModelQuotaRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetModelQuota not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) GetModelQuota(context.Context, *GetModelQuotaRequest) (*GetModelQuotaResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetModelQuota not implemented")
 }
 func (UnimplementedControlPlaneServiceServer) mustEmbedUnimplementedControlPlaneServiceServer() {}
 func (UnimplementedControlPlaneServiceServer) testEmbeddedByValue()                             {}
@@ -436,6 +474,42 @@ func _ControlPlaneService_DeregisterModel_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlaneService_SetModelQuota_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetModelQuotaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).SetModelQuota(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_SetModelQuota_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).SetModelQuota(ctx, req.(*SetModelQuotaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_GetModelQuota_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetModelQuotaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).GetModelQuota(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_GetModelQuota_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).GetModelQuota(ctx, req.(*GetModelQuotaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlaneService_ServiceDesc is the grpc.ServiceDesc for ControlPlaneService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -466,6 +540,14 @@ var ControlPlaneService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeregisterModel",
 			Handler:    _ControlPlaneService_DeregisterModel_Handler,
+		},
+		{
+			MethodName: "SetModelQuota",
+			Handler:    _ControlPlaneService_SetModelQuota_Handler,
+		},
+		{
+			MethodName: "GetModelQuota",
+			Handler:    _ControlPlaneService_GetModelQuota_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

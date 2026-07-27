@@ -437,9 +437,18 @@ mod tests {
         }
         impl ControlPlanePort for RecordingPort {
             fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
+                use lake_controlplane::RegisterStatus;
                 self.calls.push("register");
-                self.auth
-                    .register(&req.node_id, &req.prefix_hashes, req.blocks)
+                match self
+                    .auth
+                    .register(&req.node_id, &req.prefix_hashes, req.blocks)?
+                {
+                    RegisterStatus::Accepted => Ok(()),
+                    RegisterStatus::RejectedHardQuota(bp) => Err(format!(
+                        "RegisterBlocks: hard quota exceeded (deficit={})",
+                        bp.deficit_bytes
+                    )),
+                }
             }
             fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
                 let tag = if deltas.first().map(|d| d.delta >= 0).unwrap_or(true) {

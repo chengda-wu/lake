@@ -222,8 +222,8 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [x] 分层缓存引擎（RAM/NVMe，对象存储回填）（P4.3：写回只 L2；L3=demote/cap XOR；L1=demotion；`TierPipeline`/`BandwidthPool`/PutEnd COMPLETE；真 NVMe/跨机 defer P5；满块顺便写 L1 留 P7。[PR #31](https://github.com/chengda-wu/lake/pull/31)）
 - [x] gRPC 接口 + RDMA 数据平面（先 TCP 后 RDMA）（传输面复用 A；P4.4：`Transport`+`TcpTransport`+`TcpDataService` 正名自 SkeletonKv；`TransferService` 接线；真 RDMA → P5）
 - [ ] 一致性哈希分片 + KV Node 扩缩时的 block 重分布
-- [~] **多模型生命周期**：模型注册/下线级联删、revision 失效（F11；P4.5：`RegisterModel`/`DeregisterModel` + `(model_id,revision)` 命名空间，见 #20）
-- [ ] **按模型配额与空间分配**（软/硬配额 + 借用 + 背压信号）
+- [~] **多模型生命周期**：模型注册/下线级联删、revision 失效（F11；P4.5：`RegisterModel`/`DeregisterModel` + `(model_id,revision)` 命名空间，见 #20；PR #33 待合）
+- [~] **按模型配额与空间分配**（软/硬配额 + 借用 + 背压信号；P4.6：`SetModelQuota`/`GetModelQuota` + `BackpressureSignal`，见 #20）
 - [ ] **GC**：冷块/孤儿块回收 + 崩溃 reconcile（P4.3 review 遗留详见 [#20](https://github.com/chengda-wu/lake/issues/20) P4.7 + 评论「PR #31 review 遗留」：barrier 失败 inactive 窗口、WRITEBACK−1 失败永久冻结、`apply_location_events` 非原子等）
 - [ ] **碎片整理**：逻辑共置 + 物理压实，后台节流可暂停
 

@@ -309,10 +309,10 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 
 总容量 = 各 KV Node 的 DRAM+NVMe 之和,按**配额**在模型间分配:
 
-- 每模型设软配额(常态上限)与硬配额(绝对上限)。
-  - 软配额内自由写入;超软配额按该模型 LRU 淘汰冷块腾位。
-  - 闲时借用池全局空闲空间(best-effort,遇压力可回收)。
-  - 触硬配额 → 返回写入背压信号向上传播(请求级 shedding 仍归 gateway,见 [`../features/slo.md`](../features/slo.md))。
+- 每 `(model_id, revision)` 设软配额(常态上限)与硬配额(绝对上限)(P4.6:`SetModelQuota`/`GetModelQuota`;亦可随 `RegisterModel` 登记)。
+  - 软配额内自由写入;超软配额按该模型冷块(inactive/`LineageBackend`)淘汰腾位。
+  - 闲时借用池全局空闲空间(best-effort,遇压力可从超软借用方回收)。
+  - 触硬配额 → `Ack.backpressure`(`BackpressureSignal`,reason=`HARD_QUOTA`)向上传播;本次 `RegisterBlocks` 拒扩容写入。请求级 shedding 仍归 gateway,见 [`../features/slo.md`](../features/slo.md)。
 - 配额权重按模型负载/命中率动态调整(调度器决策,控制面下发)。
 - **扩容**:加入 KV Node,按一致性哈希重分布,仅迁移落在新节点区间的 block。
 - **缩容**:Drain 目标 Node(block 迁出或下沉 L3)再下线。

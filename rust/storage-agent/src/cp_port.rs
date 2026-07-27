@@ -41,8 +41,17 @@ pub struct AuthorityPort<'a> {
 
 impl ControlPlanePort for AuthorityPort<'_> {
     fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
-        self.auth
-            .register(&req.node_id, &req.prefix_hashes, req.blocks)
+        use lake_controlplane::RegisterStatus;
+        match self
+            .auth
+            .register(&req.node_id, &req.prefix_hashes, req.blocks)?
+        {
+            RegisterStatus::Accepted => Ok(()),
+            RegisterStatus::RejectedHardQuota(bp) => Err(format!(
+                "RegisterBlocks: hard quota exceeded (deficit={})",
+                bp.deficit_bytes
+            )),
+        }
     }
 
     fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
