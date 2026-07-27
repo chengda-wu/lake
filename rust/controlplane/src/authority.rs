@@ -1,4 +1,5 @@
-//! 位置视图权威：每 `(model_id, revision)` 一个 `BlockRegistry` + 强句柄 + InactiveIndex。
+//! 位置视图权威：每 `(model_id, revision)` 一个命名空间；
+//! 其内按 `pool_kind`(TARGET/DRAFT) 各持一棵 `BlockRegistry`（schema 寻址含 pool_kind）。
 //!
 //! 参考:Dynamo `BlockRegistry` / `InactiveIndex`；驱逐主路径 =
 //! `LineageBackend::with_frequency`（只驱叶子 ≈ 前缀亲和 + TinyLFU 冷叶优先 ≈ LFU-Aging）。
@@ -9,6 +10,8 @@
 //!
 //! P4.5:显式 `RegisterModel` / `DeregisterModel`；禁止懒建命名空间。
 //! 下线 = 整表 drop（强句柄释放 → radix Weak 失效 ≈ 按命名空间剪枝）。
+//! **关键差异**(相对 Dynamo):lake 一等 `(model_id, revision)` + `TARGET|DRAFT` 同池寻址，
+//! 不能共用单 registry 的 flat→entry 表。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +29,8 @@ const INACTIVE_CAP: usize = 4096;
 /// Same threshold shape as `MultiLruBackend` / Frequency LeafPolicy.
 const FREQ_THRESHOLDS: [u8; 3] = [3, 8, 15];
 
-/// Control-plane namespace key = `(model_id, revision)`.
+/// Control-plane model namespace key = `(model_id, revision)`.
+/// Block identity within = `(pool_kind, block_hash)` → separate [`PoolView`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NamespaceKey {
     pub model_id: String,
@@ -46,34 +50,39 @@ impl NamespaceKey {
     }
 }
 
+/// Wire `POOL_UNSPECIFIED`(0) → TARGET. Reject unknown kinds.
+pub fn resolve_pool_kind(raw: i32) -> Result<i32, String> {
+    // POOL_UNSPECIFIED = 0 → TARGET (LookupPrefix / wire default).
+    if raw == 0 {
+        return Ok(PoolKind::Target as i32);
+    }
+    if raw == PoolKind::Target as i32 || raw == PoolKind::Draft as i32 {
+        return Ok(raw);
+    }
+    Err(format!("unsupported pool_kind {raw}"))
+}
+
 struct Entry {
     seq_hash: SequenceHash,
     meta: BlockMeta,
     block_id: BlockId,
 }
 
-struct Namespace {
-    descriptor: ModelDescriptor,
+/// One Dynamo-shaped registry domain per `pool_kind`.
+struct PoolView {
     registry: BlockRegistry,
-    /// Keep strong refs so Weak entries in the radix tree stay alive.
     handles: HashMap<SequenceHash, BlockRegistrationHandle>,
-    /// Flat (content) hash → entry. Same namespace + same flat in different
-    /// lineages would overwrite; agent chained SHA256 is assumed globally unique
-    /// within a `(model_id, revision)` namespace.
+    /// Flat content hash → entry **within this pool_kind**.
     by_flat: HashMap<Vec<u8>, Entry>,
     seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
     inactive: Box<dyn InactiveIndex>,
-    /// Hard cap on inactive Real nodes (slab/`LruCache` capacity hint **and**
-    /// insert gate: at cap, `report_ref` skips insert rather than allocate).
     inactive_cap: usize,
-    /// Aggregate global refs (P4.2 skeleton: all `RefKind` summed into one
-    /// counter; `kind` on the wire is ignored). Agent local L1 + per-kind → later.
     global_refs: HashMap<SequenceHash, i64>,
     next_block_id: BlockId,
 }
 
-impl Namespace {
-    fn new(descriptor: ModelDescriptor, inactive_cap: usize) -> Self {
+impl PoolView {
+    fn new(inactive_cap: usize) -> Self {
         let cap = inactive_cap.max(1);
         let tracker = FrequencyTrackingCapacity::Small.create_tracker();
         let registry = BlockRegistry::builder()
@@ -84,7 +93,6 @@ impl Namespace {
                 .expect("Lineage+Frequency thresholds"),
         );
         Self {
-            descriptor,
             registry,
             handles: HashMap::new(),
             by_flat: HashMap::new(),
@@ -102,9 +110,6 @@ impl Namespace {
         id
     }
 
-    /// Drop up to `n` inactive victims from the location view.
-    /// Pressure path only — mirrors Dynamo `BlockStore::allocate_atomic`
-    /// (evict when a new slot is needed), never called from `report_ref`.
     fn drop_inactive_victims(&mut self, n: usize) -> usize {
         let victims = self.inactive.allocate(n);
         let mut removed = 0;
@@ -123,13 +128,52 @@ impl Namespace {
     }
 }
 
+struct Namespace {
+    descriptor: ModelDescriptor,
+    /// `pool_kind` → independent radix / inactive / refs.
+    pools: HashMap<i32, PoolView>,
+    inactive_cap: usize,
+}
+
+impl Namespace {
+    fn new(descriptor: ModelDescriptor, inactive_cap: usize) -> Self {
+        Self {
+            descriptor,
+            pools: HashMap::new(),
+            inactive_cap: inactive_cap.max(1),
+        }
+    }
+
+    fn pool_mut(&mut self, pool_kind: i32) -> &mut PoolView {
+        let cap = self.inactive_cap;
+        self.pools
+            .entry(pool_kind)
+            .or_insert_with(|| PoolView::new(cap))
+    }
+
+    fn pool(&self, pool_kind: i32) -> Option<&PoolView> {
+        self.pools.get(&pool_kind)
+    }
+
+    fn block_count(&self) -> usize {
+        self.pools.values().map(|p| p.by_flat.len()).sum()
+    }
+}
+
+/// Immutable identity of a registered model (quota is mutable).
+fn descriptor_identity_eq(a: &ModelDescriptor, b: &ModelDescriptor) -> bool {
+    a.model_id == b.model_id
+        && a.revision == b.revision
+        && a.num_layers == b.num_layers
+        && a.hash_algo == b.hash_algo
+        && a.block_spec == b.block_spec
+}
+
 /// Process-local authority state.
 pub struct Authority {
     namespaces: HashMap<NamespaceKey, Namespace>,
     inactive_cap: usize,
     /// Completed request barriers: `(request_id, node_id)`.
-    /// P4.3: agent flushes L2 + `ReportRef(WRITEBACK,-1)` **before** this RPC;
-    /// CP records completion for observability / future directory updates.
     completed_barriers: HashMap<String, String>,
 }
 
@@ -140,7 +184,6 @@ impl Default for Authority {
 }
 
 impl Authority {
-    /// Construct with a custom inactive hard cap (tests use a small value).
     pub fn with_inactive_cap(inactive_cap: usize) -> Self {
         Self {
             namespaces: HashMap::new(),
@@ -149,15 +192,26 @@ impl Authority {
         }
     }
 
-    /// P4.5: register `(model_id, revision)` namespace. Idempotent — re-register
-    /// updates descriptor metadata only (radix / locations kept).
+    /// P4.5: register `(model_id, revision)` namespace.
+    ///
+    /// Idempotent only when immutable fields match (`num_layers` / `block_spec` /
+    /// `hash_algo` / ids). Re-register may update **quota** only; other changes
+    /// require a new `revision`.
     pub fn register_model(&mut self, desc: ModelDescriptor) -> Result<(), String> {
         if desc.model_id.is_empty() {
             return Err("RegisterModel: model_id required".into());
         }
         let key = NamespaceKey::new(desc.model_id.clone(), desc.revision.clone());
         if let Some(ns) = self.namespaces.get_mut(&key) {
-            ns.descriptor = desc;
+            if !descriptor_identity_eq(&ns.descriptor, &desc) {
+                return Err(format!(
+                    "RegisterModel: immutable fields changed for ({}, rev={:?}); use a new revision \
+                     (num_layers/block_spec/hash_algo must match)",
+                    desc.model_id, desc.revision
+                ));
+            }
+            // Same identity → allow quota refresh (P4.6 enforcement later).
+            ns.descriptor.quota = desc.quota;
             return Ok(());
         }
         let cap = self.inactive_cap;
@@ -165,11 +219,7 @@ impl Authority {
         Ok(())
     }
 
-    /// P4.5: cascade-delete one namespace (radix handles + locations + inactive).
-    /// Byte payloads in kv-pool are not touched here (GC → P4.7).
-    ///
-    /// Production drain / F4 in-flight finish-before-delete is deferred; this
-    /// slice force-drops the view (F11 级联删原型).
+    /// Cascade-delete one namespace (all pool_kinds). Bytes → P4.7.
     pub fn deregister_model(&mut self, model_id: &str, revision: &str) -> Result<(), String> {
         if model_id.is_empty() {
             return Err("DeregisterModel: model_id required".into());
@@ -194,10 +244,9 @@ impl Authority {
             .map(|n| &n.descriptor)
     }
 
-    /// Number of blocks still in the location view (tests / cascade checks).
     pub fn block_count(&self, model_id: &str, revision: &str) -> usize {
         self.ns(model_id, revision)
-            .map(|n| n.by_flat.len())
+            .map(|n| n.block_count())
             .unwrap_or(0)
     }
 
@@ -210,11 +259,8 @@ impl Authority {
         self.namespaces.get(&NamespaceKey::new(model_id, revision))
     }
 
-    /// Register durable blocks. `prefix_hashes` must be the full ordered chain;
-    /// `metas` must be a **contiguous segment** of that chain (miss suffix or
-    /// initial prefix — not an arbitrary subset).
-    ///
-    /// Namespace must already exist via [`Self::register_model`].
+    /// Register durable blocks. One `RegisterBlocks` batch = one `pool_kind`
+    /// contiguous segment of `prefix_hashes`.
     pub fn register(
         &mut self,
         node_id: &str,
@@ -232,6 +278,13 @@ impl Authority {
             .iter()
             .find_map(|m| m.id.as_ref().map(|i| i.revision.clone()))
             .unwrap_or_default();
+        let pool_kind = {
+            let raw = metas
+                .iter()
+                .find_map(|m| m.id.as_ref().map(|i| i.pool_kind))
+                .unwrap_or(PoolKind::Target as i32);
+            resolve_pool_kind(raw)?
+        };
 
         if prefix_hashes.is_empty() {
             return Err("RegisterBlocks: prefix_hashes required (P4.2 lineage)".into());
@@ -258,6 +311,12 @@ impl Authority {
                 return Err(format!(
                     "RegisterBlocks: mixed revision {:?} vs {:?}",
                     revision, id.revision
+                ));
+            }
+            let pk = resolve_pool_kind(id.pool_kind)?;
+            if pk != pool_kind {
+                return Err(format!(
+                    "RegisterBlocks: mixed pool_kind {pk} vs {pool_kind}"
                 ));
             }
             let Some(&pos) = index_of.get(id.block_hash.as_slice()) else {
@@ -291,15 +350,18 @@ impl Authority {
         let ns = self
             .ns_mut(&model_id, &revision)
             .expect("checked has_namespace");
+        let pool = ns.pool_mut(pool_kind);
 
         for mut meta in metas {
             let Some(id) = meta.id.clone() else { continue };
+            // Normalize unspecified → TARGET on stored identity.
+            if let Some(ref mut mid) = meta.id {
+                mid.pool_kind = pool_kind;
+            }
             let flat = id.block_hash.clone();
             let pos = *index_of.get(flat.as_slice()).expect("checked");
             let seq = lineage[pos];
 
-            // Refuse invented COMPLETE (Mooncake Get-only-COMPLETE): no empty
-            // locations unless l3_present. Callers must pass settle-accurate metas.
             if meta.locations.is_empty() && !meta.l3_present {
                 return Err(
                     "RegisterBlocks: need L2 location or l3_present (durable first)".into(),
@@ -311,7 +373,7 @@ impl Authority {
                 }
             }
 
-            let handle = ns.registry.register_sequence_hash(seq);
+            let handle = pool.registry.register_sequence_hash(seq);
             for loc in &meta.locations {
                 if loc.tier == Tier::L0 as i32 {
                     handle.mark_present::<TierL0>();
@@ -321,18 +383,15 @@ impl Authority {
                     handle.mark_present::<TierL2>();
                 }
             }
-            ns.handles.insert(seq, handle);
+            pool.handles.insert(seq, handle);
 
-            let block_id = if let Some(prev) = ns.by_flat.get(&flat) {
+            let block_id = if let Some(prev) = pool.by_flat.get(&flat) {
                 prev.block_id
             } else {
-                ns.alloc_block_id()
+                pool.alloc_block_id()
             };
-            // Fresh register: not inactive candidate while ref unknown; start refs at 0
-            // until ReportRef. Agent historically set ref_count=1 on meta — keep field
-            // for Locate display but global_refs drives eviction.
-            ns.seq_to_flat.insert(seq, flat.clone());
-            ns.by_flat.insert(
+            pool.seq_to_flat.insert(seq, flat.clone());
+            pool.by_flat.insert(
                 flat,
                 Entry {
                     seq_hash: seq,
@@ -344,30 +403,31 @@ impl Authority {
         Ok(())
     }
 
-    /// Prefix lookup + soft touch. `&mut self` because of **lazy handle repair**
-    /// (`handles.insert` when a flat is in `by_flat` but missing from the registry
-    /// index) and TinyLFU `match_sequence_hash(..., touch=true)`.
+    /// Prefix lookup in one `pool_kind` domain.
     ///
-    /// Unknown / unregistered namespace → miss (no lazy create; P4.5).
-    ///
-    /// P4.3: fine under a single `Mutex<Authority>`. P6 HA / 读写分锁时：懒修复
-    /// 应挪到 register 路径，lookup 热路径只读 + 可选无锁 touch，避免永远写锁
-    ///（#20；PR #31 review §4.6）。
+    /// `pool_kind == UNSPECIFIED` → TARGET (P4.5 default; draft prefix opt-in).
     pub fn lookup_prefix(
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         prefix_hashes: &[Vec<u8>],
         requester: &str,
     ) -> (Vec<ReusableBlock>, u32, bool) {
         if prefix_hashes.is_empty() {
             return (Vec::new(), 0, false);
         }
-        let Some(_) = self.ns(model_id, revision) else {
+        let Ok(pool_kind) = resolve_pool_kind(pool_kind) else {
             return (Vec::new(), 0, false);
         };
+        if self.ns(model_id, revision).is_none() {
+            return (Vec::new(), 0, false);
+        }
         let lineage = lineage_from_prefix(prefix_hashes);
         let ns = self.ns_mut(model_id, revision).expect("checked");
+        let Some(pool) = ns.pools.get_mut(&pool_kind) else {
+            return (Vec::new(), 0, false);
+        };
 
         let mut out = Vec::new();
         let mut hit = 0u32;
@@ -375,20 +435,17 @@ impl Authority {
 
         for (i, flat) in prefix_hashes.iter().enumerate() {
             let seq = lineage[i];
-            let Some(entry) = ns.by_flat.get(flat) else {
+            let Some(entry) = pool.by_flat.get(flat) else {
                 all_local = false;
                 break;
             };
-            // Wrong-chain registration must not silently hit (same flat, different lineage).
             if entry.seq_hash != seq {
                 all_local = false;
                 break;
             }
-            // Lazy repair: presence markers **only** from meta.locations —
-            // never invent TierL2 for L3-only blocks.
             let meta = entry.meta.clone();
-            if !ns.handles.contains_key(&seq) {
-                let handle = ns.registry.register_sequence_hash(seq);
+            if !pool.handles.contains_key(&seq) {
+                let handle = pool.registry.register_sequence_hash(seq);
                 for loc in &meta.locations {
                     if loc.tier == Tier::L0 as i32 {
                         handle.mark_present::<TierL0>();
@@ -398,9 +455,9 @@ impl Authority {
                         handle.mark_present::<TierL2>();
                     }
                 }
-                ns.handles.insert(seq, handle);
+                pool.handles.insert(seq, handle);
             } else {
-                let _ = ns.registry.match_sequence_hash(seq, true);
+                let _ = pool.registry.match_sequence_hash(seq, true);
             }
 
             let local = meta
@@ -426,45 +483,51 @@ impl Authority {
     pub fn locate(&self, ids: &[KvBlockId]) -> Vec<BlockMeta> {
         let mut blocks = Vec::new();
         for id in ids {
+            let Ok(pk) = resolve_pool_kind(id.pool_kind) else {
+                continue;
+            };
             if let Some(ns) = self.ns(&id.model_id, &id.revision) {
-                if let Some(entry) = ns.by_flat.get(&id.block_hash) {
-                    blocks.push(entry.meta.clone());
+                if let Some(pool) = ns.pool(pk) {
+                    if let Some(entry) = pool.by_flat.get(&id.block_hash) {
+                        blocks.push(entry.meta.clone());
+                    }
                 }
             }
         }
         blocks
     }
 
-    /// Validate a ref delta can be applied (block known). Does not mutate.
     pub fn check_report_ref(&self, delta: &RefDelta) -> Result<(), String> {
         let id = delta
             .id
             .as_ref()
             .ok_or_else(|| "RefDelta missing id".to_string())?;
+        let pk = resolve_pool_kind(id.pool_kind)?;
         let ns = self
             .ns(&id.model_id, &id.revision)
             .ok_or_else(|| format!("unknown namespace ({}, rev={:?})", id.model_id, id.revision))?;
-        if !ns.by_flat.contains_key(&id.block_hash) {
+        let pool = ns
+            .pool(pk)
+            .ok_or_else(|| format!("RefDelta: unknown pool_kind {pk}"))?;
+        if !pool.by_flat.contains_key(&id.block_hash) {
             return Err("RefDelta: unknown block_hash".to_string());
         }
         Ok(())
     }
 
-    /// Apply one ref delta (sum into `global_refs`). Returns error if block unknown.
-    ///
-    /// P4.2: `delta.kind` is intentionally ignored (合账骨架). Per-kind buckets
-    /// and agent `ReportRef` producers land in a later slice.
     pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
         self.check_report_ref(delta)?;
         let id = delta.id.as_ref().expect("checked");
+        let pk = resolve_pool_kind(id.pool_kind).expect("checked");
         let key = NamespaceKey::from_id(id);
         let ns = self.namespaces.get_mut(&key).expect("checked");
-        let entry = ns.by_flat.get(&id.block_hash).expect("checked");
+        let pool = ns.pools.get_mut(&pk).expect("checked");
+        let entry = pool.by_flat.get(&id.block_hash).expect("checked");
         let seq = entry.seq_hash;
         let block_id = entry.block_id;
-        let _kind = delta.kind; // reserved; not booked separately in P4.2
+        let _kind = delta.kind;
 
-        let cur = ns.global_refs.entry(seq).or_insert(0);
+        let cur = pool.global_refs.entry(seq).or_insert(0);
         let before = *cur;
         *cur = cur.saturating_add(i64::from(delta.delta));
         if *cur < 0 {
@@ -473,28 +536,15 @@ impl Authority {
         let after = *cur;
 
         if before > 0 && after == 0 {
-            // Candidate for eviction — do not delete the view (Dynamo
-            // `release_primary` → `inactive.insert` only; allocate is separate).
-            // At cap: skip insert so Frequency tiers never silently drop leaves.
-            // Skipped block stays at ref=0 out of inactive until a later
-            // 0→正→0 cycle retries insert — `evict_n` freeing a slot does
-            // **not** auto-requeue it.
-            if !ns.inactive.has(seq) && ns.inactive.len() < ns.inactive_cap {
-                ns.inactive.insert(seq, block_id);
+            if !pool.inactive.has(seq) && pool.inactive.len() < pool.inactive_cap {
+                pool.inactive.insert(seq, block_id);
             }
         } else if before == 0 && after > 0 {
-            // Frozen again — leave inactive index (take if present).
-            let _ = ns.inactive.take(seq, block_id);
+            let _ = pool.inactive.take(seq, block_id);
         }
         Ok(())
     }
 
-    /// Apply a batch atomically: validate all, then apply all.
-    /// On validation failure, state is unchanged (`ok: false` ⇒ safe to retry whole batch).
-    ///
-    /// Must not pressure-evict mid-batch: `report_ref` only inserts/skips, so a
-    /// later delta cannot see a peer deleted by an earlier one (would panic on
-    /// the post-check `expect` and break all-or-nothing).
     pub fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
         for (i, d) in deltas.iter().enumerate() {
             self.check_report_ref(d)
@@ -507,38 +557,45 @@ impl Authority {
         Ok(())
     }
 
-    /// Test / pressure hook: evict up to `n` inactive (ref==0) blocks.
-    /// Returns number of blocks removed from the location view.
-    ///
-    /// Production pressure-driven `allocate` (and agent `ReportRef` feeding) → later slice.
-    pub fn evict_n(&mut self, model_id: &str, revision: &str, n: usize) -> usize {
+    pub fn evict_n(&mut self, model_id: &str, revision: &str, pool_kind: i32, n: usize) -> usize {
+        let Ok(pk) = resolve_pool_kind(pool_kind) else {
+            return 0;
+        };
         let Some(ns) = self.ns_mut(model_id, revision) else {
             return 0;
         };
-        ns.drop_inactive_victims(n)
+        let Some(pool) = ns.pools.get_mut(&pk) else {
+            return 0;
+        };
+        pool.drop_inactive_victims(n)
     }
 
-    /// Inactive index size (tests).
-    pub fn inactive_len(&self, model_id: &str, revision: &str) -> usize {
+    pub fn inactive_len(&self, model_id: &str, revision: &str, pool_kind: i32) -> usize {
+        let Ok(pk) = resolve_pool_kind(pool_kind) else {
+            return 0;
+        };
         self.ns(model_id, revision)
-            .map(|n| n.inactive.len())
+            .and_then(|n| n.pool(pk))
+            .map(|p| p.inactive.len())
             .unwrap_or(0)
     }
 
-    pub fn global_ref(&self, model_id: &str, revision: &str, flat: &[u8]) -> i64 {
+    pub fn global_ref(&self, model_id: &str, revision: &str, pool_kind: i32, flat: &[u8]) -> i64 {
+        let Ok(pk) = resolve_pool_kind(pool_kind) else {
+            return 0;
+        };
         let Some(ns) = self.ns(model_id, revision) else {
             return 0;
         };
-        let Some(entry) = ns.by_flat.get(flat) else {
+        let Some(pool) = ns.pool(pk) else {
             return 0;
         };
-        ns.global_refs.get(&entry.seq_hash).copied().unwrap_or(0)
+        let Some(entry) = pool.by_flat.get(flat) else {
+            return 0;
+        };
+        pool.global_refs.get(&entry.seq_hash).copied().unwrap_or(0)
     }
 
-    /// Record a completed request-end barrier (`consistency.md` §3).
-    ///
-    /// Agent contract: durable flush + `ReportRef(WRITEBACK,-1)` already applied
-    /// so radix blocks are no longer writeback-frozen. Idempotent per request_id.
     pub fn complete_barrier(&mut self, request_id: &str, node_id: &str) -> Result<(), String> {
         if request_id.is_empty() {
             return Err("RequestBarrier: request_id required".into());
@@ -555,26 +612,29 @@ impl Authority {
         self.completed_barriers.contains_key(request_id)
     }
 
-    /// Publish / revoke a tier location on the view + presence markers.
-    ///
-    /// P4.3: agent promote/demote calls this after local byte moves.
     pub fn publish_location(
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         flat: &[u8],
         tier: Tier,
         node_id: &str,
         present: bool,
     ) -> Result<(), String> {
+        let pk = resolve_pool_kind(pool_kind)?;
         let ns = self
             .ns_mut(model_id, revision)
             .ok_or_else(|| format!("unknown namespace ({model_id}, rev={revision:?})"))?;
-        let entry = ns
+        let pool = ns
+            .pools
+            .get_mut(&pk)
+            .ok_or_else(|| format!("publish_location: unknown pool_kind {pk}"))?;
+        let entry = pool
             .by_flat
             .get_mut(flat)
             .ok_or_else(|| "publish_location: unknown block".to_string())?;
-        let handle = ns
+        let handle = pool
             .handles
             .get(&entry.seq_hash)
             .ok_or_else(|| "publish_location: missing handle".to_string())?;
@@ -618,13 +678,19 @@ impl Authority {
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         flat: &[u8],
         present: bool,
     ) -> Result<(), String> {
+        let pk = resolve_pool_kind(pool_kind)?;
         let ns = self
             .ns_mut(model_id, revision)
             .ok_or_else(|| format!("unknown namespace ({model_id}, rev={revision:?})"))?;
-        let entry = ns
+        let pool = ns
+            .pools
+            .get_mut(&pk)
+            .ok_or_else(|| format!("set_l3_present: unknown pool_kind {pk}"))?;
+        let entry = pool
             .by_flat
             .get_mut(flat)
             .ok_or_else(|| "set_l3_present: unknown block".to_string())?;
@@ -632,9 +698,20 @@ impl Authority {
         Ok(())
     }
 
-    pub fn has_l0_on(&self, model_id: &str, revision: &str, flat: &[u8], node_id: &str) -> bool {
+    pub fn has_l0_on(
+        &self,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+        flat: &[u8],
+        node_id: &str,
+    ) -> bool {
+        let Ok(pk) = resolve_pool_kind(pool_kind) else {
+            return false;
+        };
         self.ns(model_id, revision)
-            .and_then(|n| n.by_flat.get(flat))
+            .and_then(|n| n.pool(pk))
+            .and_then(|p| p.by_flat.get(flat))
             .map(|e| {
                 e.meta
                     .locations

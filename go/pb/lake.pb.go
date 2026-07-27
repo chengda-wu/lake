@@ -514,8 +514,12 @@ type LookupPrefixRequest struct {
 	PrefixHashes    [][]byte               `protobuf:"bytes,2,rep,name=prefix_hashes,json=prefixHashes,proto3" json:"prefix_hashes,omitempty"`            // 前缀 block hash 链(沿 radix 匹配)
 	RequesterNodeId string                 `protobuf:"bytes,3,opt,name=requester_node_id,json=requesterNodeId,proto3" json:"requester_node_id,omitempty"` // 判定 local_hit 用
 	Revision        string                 `protobuf:"bytes,4,opt,name=revision,proto3" json:"revision,omitempty"`                                        // P4.5:(model_id, revision) 命名空间;空串=默认
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// P4.5:查哪个 pool_kind 的 radix。UNSPECIFIED/缺省 → TARGET。
+	//
+	//	draft 前缀复用须显式填 DRAFT(与 TARGET 索引域隔离)。
+	PoolKind      PoolKind `protobuf:"varint,5,opt,name=pool_kind,json=poolKind,proto3,enum=lake.PoolKind" json:"pool_kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LookupPrefixRequest) Reset() {
@@ -574,6 +578,13 @@ func (x *LookupPrefixRequest) GetRevision() string {
 		return x.Revision
 	}
 	return ""
+}
+
+func (x *LookupPrefixRequest) GetPoolKind() PoolKind {
+	if x != nil {
+		return x.PoolKind
+	}
+	return PoolKind_POOL_UNSPECIFIED
 }
 
 // --- 多模型生命周期(P4.5 / F11) ---
@@ -2651,12 +2662,13 @@ const file_lake_proto_rawDesc = "" +
 	"\n" +
 	"REGISTERED\x10\x00\x12\x0f\n" +
 	"\vINVALIDATED\x10\x01\x12\t\n" +
-	"\x05MOVED\x10\x02\"\x9d\x01\n" +
+	"\x05MOVED\x10\x02\"\xca\x01\n" +
 	"\x13LookupPrefixRequest\x12\x19\n" +
 	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12#\n" +
 	"\rprefix_hashes\x18\x02 \x03(\fR\fprefixHashes\x12*\n" +
 	"\x11requester_node_id\x18\x03 \x01(\tR\x0frequesterNodeId\x12\x1a\n" +
-	"\brevision\x18\x04 \x01(\tR\brevision\"V\n" +
+	"\brevision\x18\x04 \x01(\tR\brevision\x12+\n" +
+	"\tpool_kind\x18\x05 \x01(\x0e2\x0e.lake.PoolKindR\bpoolKind\"V\n" +
 	"\tBlockSpec\x12!\n" +
 	"\fblock_tokens\x18\x01 \x01(\rR\vblockTokens\x12&\n" +
 	"\x0fbytes_per_block\x18\x02 \x01(\x04R\rbytesPerBlock\"l\n" +
@@ -2923,7 +2935,8 @@ var file_lake_proto_goTypes = []any{
 	(*KVBlockID)(nil),                 // 47: lake.KVBlockID
 	(*Location)(nil),                  // 48: lake.Location
 	(BlockKind)(0),                    // 49: lake.BlockKind
-	(*BlockMeta)(nil),                 // 50: lake.BlockMeta
+	(PoolKind)(0),                     // 50: lake.PoolKind
+	(*BlockMeta)(nil),                 // 51: lake.BlockMeta
 }
 var file_lake_proto_depIdxs = []int32{
 	8,  // 0: lake.ViewUpdate.events:type_name -> lake.ViewEvent
@@ -2931,82 +2944,83 @@ var file_lake_proto_depIdxs = []int32{
 	47, // 2: lake.ViewEvent.id:type_name -> lake.KVBlockID
 	48, // 3: lake.ViewEvent.locations:type_name -> lake.Location
 	49, // 4: lake.ViewEvent.block_kind:type_name -> lake.BlockKind
-	10, // 5: lake.ModelDescriptor.block_spec:type_name -> lake.BlockSpec
-	0,  // 6: lake.ModelDescriptor.hash_algo:type_name -> lake.HashAlgo
-	11, // 7: lake.ModelDescriptor.quota:type_name -> lake.Quota
-	12, // 8: lake.RegisterModelRequest.model:type_name -> lake.ModelDescriptor
-	16, // 9: lake.LookupPrefixResponse.blocks:type_name -> lake.ReusableBlock
-	47, // 10: lake.ReusableBlock.id:type_name -> lake.KVBlockID
-	50, // 11: lake.ReusableBlock.meta:type_name -> lake.BlockMeta
-	47, // 12: lake.LocateRequest.ids:type_name -> lake.KVBlockID
-	50, // 13: lake.LocateResponse.blocks:type_name -> lake.BlockMeta
-	50, // 14: lake.RegisterBlocksRequest.blocks:type_name -> lake.BlockMeta
-	47, // 15: lake.RefDelta.id:type_name -> lake.KVBlockID
-	1,  // 16: lake.RefDelta.kind:type_name -> lake.RefKind
-	4,  // 17: lake.LeaseHeartbeat.op:type_name -> lake.LeaseHeartbeat.Op
-	47, // 18: lake.DispatchRequest.reuse_blocks:type_name -> lake.KVBlockID
-	46, // 19: lake.DispatchRequest.hints:type_name -> lake.DispatchRequest.HintsEntry
-	47, // 20: lake.PlaceBlocksRequest.ids:type_name -> lake.KVBlockID
-	28, // 21: lake.TransferBatchRequest.reqs:type_name -> lake.TransferRequest
-	48, // 22: lake.TransferRequest.source:type_name -> lake.Location
-	5,  // 23: lake.TransferStatusResponse.state:type_name -> lake.TransferStatusResponse.State
-	47, // 24: lake.PullRequest.ids:type_name -> lake.KVBlockID
-	2,  // 25: lake.PullRequest.policy:type_name -> lake.PullPolicy
-	38, // 26: lake.PublishRequest.slices:type_name -> lake.LayerSlice
-	47, // 27: lake.LayerSlice.id:type_name -> lake.KVBlockID
-	41, // 28: lake.PutBlocksRequest.blocks:type_name -> lake.OpaqueBlock
-	47, // 29: lake.OpaqueBlock.id:type_name -> lake.KVBlockID
-	47, // 30: lake.GetBlocksRequest.ids:type_name -> lake.KVBlockID
-	41, // 31: lake.GetBlocksResponse.blocks:type_name -> lake.OpaqueBlock
-	6,  // 32: lake.ControlPlaneService.SubscribeView:input_type -> lake.SubscribeRequest
-	9,  // 33: lake.ControlPlaneService.LookupPrefix:input_type -> lake.LookupPrefixRequest
-	17, // 34: lake.ControlPlaneService.Locate:input_type -> lake.LocateRequest
-	19, // 35: lake.ControlPlaneService.RegisterBlocks:input_type -> lake.RegisterBlocksRequest
-	20, // 36: lake.ControlPlaneService.ReportRef:input_type -> lake.RefDelta
-	21, // 37: lake.ControlPlaneService.RequestBarrier:input_type -> lake.RequestBarrierRequest
-	22, // 38: lake.ControlPlaneService.Lease:input_type -> lake.LeaseHeartbeat
-	13, // 39: lake.ControlPlaneService.RegisterModel:input_type -> lake.RegisterModelRequest
-	14, // 40: lake.ControlPlaneService.DeregisterModel:input_type -> lake.DeregisterModelRequest
-	24, // 41: lake.AgentService.Dispatch:input_type -> lake.DispatchRequest
-	25, // 42: lake.AgentService.ReportLoad:input_type -> lake.LoadReport
-	26, // 43: lake.AgentService.PlaceBlocks:input_type -> lake.PlaceBlocksRequest
-	27, // 44: lake.TransferService.SubmitTransfer:input_type -> lake.TransferBatchRequest
-	30, // 45: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
-	32, // 46: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
-	33, // 47: lake.TransferService.Pull:input_type -> lake.PullRequest
-	35, // 48: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
-	36, // 49: lake.TransferService.Publish:input_type -> lake.PublishRequest
-	37, // 50: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
-	40, // 51: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
-	42, // 52: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
-	44, // 53: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
-	7,  // 54: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
-	15, // 55: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
-	18, // 56: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
-	39, // 57: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
-	39, // 58: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
-	39, // 59: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
-	23, // 60: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
-	39, // 61: lake.ControlPlaneService.RegisterModel:output_type -> lake.Ack
-	39, // 62: lake.ControlPlaneService.DeregisterModel:output_type -> lake.Ack
-	39, // 63: lake.AgentService.Dispatch:output_type -> lake.Ack
-	39, // 64: lake.AgentService.ReportLoad:output_type -> lake.Ack
-	39, // 65: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
-	29, // 66: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
-	31, // 67: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
-	39, // 68: lake.TransferService.FreeBatch:output_type -> lake.Ack
-	34, // 69: lake.TransferService.Pull:output_type -> lake.PullResponse
-	39, // 70: lake.TransferService.FreePull:output_type -> lake.Ack
-	39, // 71: lake.TransferService.Publish:output_type -> lake.Ack
-	39, // 72: lake.TransferService.FreePublish:output_type -> lake.Ack
-	39, // 73: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
-	43, // 74: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
-	45, // 75: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
-	54, // [54:76] is the sub-list for method output_type
-	32, // [32:54] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	50, // 5: lake.LookupPrefixRequest.pool_kind:type_name -> lake.PoolKind
+	10, // 6: lake.ModelDescriptor.block_spec:type_name -> lake.BlockSpec
+	0,  // 7: lake.ModelDescriptor.hash_algo:type_name -> lake.HashAlgo
+	11, // 8: lake.ModelDescriptor.quota:type_name -> lake.Quota
+	12, // 9: lake.RegisterModelRequest.model:type_name -> lake.ModelDescriptor
+	16, // 10: lake.LookupPrefixResponse.blocks:type_name -> lake.ReusableBlock
+	47, // 11: lake.ReusableBlock.id:type_name -> lake.KVBlockID
+	51, // 12: lake.ReusableBlock.meta:type_name -> lake.BlockMeta
+	47, // 13: lake.LocateRequest.ids:type_name -> lake.KVBlockID
+	51, // 14: lake.LocateResponse.blocks:type_name -> lake.BlockMeta
+	51, // 15: lake.RegisterBlocksRequest.blocks:type_name -> lake.BlockMeta
+	47, // 16: lake.RefDelta.id:type_name -> lake.KVBlockID
+	1,  // 17: lake.RefDelta.kind:type_name -> lake.RefKind
+	4,  // 18: lake.LeaseHeartbeat.op:type_name -> lake.LeaseHeartbeat.Op
+	47, // 19: lake.DispatchRequest.reuse_blocks:type_name -> lake.KVBlockID
+	46, // 20: lake.DispatchRequest.hints:type_name -> lake.DispatchRequest.HintsEntry
+	47, // 21: lake.PlaceBlocksRequest.ids:type_name -> lake.KVBlockID
+	28, // 22: lake.TransferBatchRequest.reqs:type_name -> lake.TransferRequest
+	48, // 23: lake.TransferRequest.source:type_name -> lake.Location
+	5,  // 24: lake.TransferStatusResponse.state:type_name -> lake.TransferStatusResponse.State
+	47, // 25: lake.PullRequest.ids:type_name -> lake.KVBlockID
+	2,  // 26: lake.PullRequest.policy:type_name -> lake.PullPolicy
+	38, // 27: lake.PublishRequest.slices:type_name -> lake.LayerSlice
+	47, // 28: lake.LayerSlice.id:type_name -> lake.KVBlockID
+	41, // 29: lake.PutBlocksRequest.blocks:type_name -> lake.OpaqueBlock
+	47, // 30: lake.OpaqueBlock.id:type_name -> lake.KVBlockID
+	47, // 31: lake.GetBlocksRequest.ids:type_name -> lake.KVBlockID
+	41, // 32: lake.GetBlocksResponse.blocks:type_name -> lake.OpaqueBlock
+	6,  // 33: lake.ControlPlaneService.SubscribeView:input_type -> lake.SubscribeRequest
+	9,  // 34: lake.ControlPlaneService.LookupPrefix:input_type -> lake.LookupPrefixRequest
+	17, // 35: lake.ControlPlaneService.Locate:input_type -> lake.LocateRequest
+	19, // 36: lake.ControlPlaneService.RegisterBlocks:input_type -> lake.RegisterBlocksRequest
+	20, // 37: lake.ControlPlaneService.ReportRef:input_type -> lake.RefDelta
+	21, // 38: lake.ControlPlaneService.RequestBarrier:input_type -> lake.RequestBarrierRequest
+	22, // 39: lake.ControlPlaneService.Lease:input_type -> lake.LeaseHeartbeat
+	13, // 40: lake.ControlPlaneService.RegisterModel:input_type -> lake.RegisterModelRequest
+	14, // 41: lake.ControlPlaneService.DeregisterModel:input_type -> lake.DeregisterModelRequest
+	24, // 42: lake.AgentService.Dispatch:input_type -> lake.DispatchRequest
+	25, // 43: lake.AgentService.ReportLoad:input_type -> lake.LoadReport
+	26, // 44: lake.AgentService.PlaceBlocks:input_type -> lake.PlaceBlocksRequest
+	27, // 45: lake.TransferService.SubmitTransfer:input_type -> lake.TransferBatchRequest
+	30, // 46: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
+	32, // 47: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
+	33, // 48: lake.TransferService.Pull:input_type -> lake.PullRequest
+	35, // 49: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
+	36, // 50: lake.TransferService.Publish:input_type -> lake.PublishRequest
+	37, // 51: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
+	40, // 52: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
+	42, // 53: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
+	44, // 54: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
+	7,  // 55: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
+	15, // 56: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
+	18, // 57: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
+	39, // 58: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
+	39, // 59: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
+	39, // 60: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
+	23, // 61: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
+	39, // 62: lake.ControlPlaneService.RegisterModel:output_type -> lake.Ack
+	39, // 63: lake.ControlPlaneService.DeregisterModel:output_type -> lake.Ack
+	39, // 64: lake.AgentService.Dispatch:output_type -> lake.Ack
+	39, // 65: lake.AgentService.ReportLoad:output_type -> lake.Ack
+	39, // 66: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
+	29, // 67: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
+	31, // 68: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
+	39, // 69: lake.TransferService.FreeBatch:output_type -> lake.Ack
+	34, // 70: lake.TransferService.Pull:output_type -> lake.PullResponse
+	39, // 71: lake.TransferService.FreePull:output_type -> lake.Ack
+	39, // 72: lake.TransferService.Publish:output_type -> lake.Ack
+	39, // 73: lake.TransferService.FreePublish:output_type -> lake.Ack
+	39, // 74: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
+	43, // 75: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
+	45, // 76: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
+	55, // [55:77] is the sub-list for method output_type
+	33, // [33:55] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_lake_proto_init() }

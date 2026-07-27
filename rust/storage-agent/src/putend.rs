@@ -143,6 +143,13 @@ impl PutEndSession {
         self.blocks.iter().all(|b| b.durable)
     }
 
+    fn pool_kind(&self) -> i32 {
+        self.blocks
+            .first()
+            .map(|b| b.id.pool_kind)
+            .unwrap_or(PoolKind::Target as i32)
+    }
+
     pub fn commit_through<P: ControlPlanePort>(
         &mut self,
         store: &mut LocalTierEngine,
@@ -168,9 +175,11 @@ impl PutEndSession {
         // Cap demotions of prior blocks: L2→L3 XOR sync on CP.
         for h in &demoted {
             if !self.blocks.iter().any(|b| b.id.block_hash == *h) {
+                let pk = self.pool_kind();
                 if let Err(e) = cp.publish_location(
                     &self.model_id,
                     &self.revision,
+                    pk,
                     h,
                     Tier::L2,
                     &self.node_id,
@@ -179,7 +188,7 @@ impl PutEndSession {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
-                if let Err(e) = cp.set_l3_present(&self.model_id, &self.revision, h, true) {
+                if let Err(e) = cp.set_l3_present(&self.model_id, &self.revision, pk, h, true) {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
@@ -191,11 +200,12 @@ impl PutEndSession {
             unpin_all(store, &self.blocks);
             return Err(e);
         }
+        let pk = self.pool_kind();
         for b in &self.blocks {
             let h = b.id.block_hash.as_slice();
             // Self may have been cap-demoted to L3-only during flush.
             if store.l3_present(h) {
-                if let Err(e) = cp.set_l3_present(&self.model_id, &self.revision, h, true) {
+                if let Err(e) = cp.set_l3_present(&self.model_id, &self.revision, pk, h, true) {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
@@ -204,6 +214,7 @@ impl PutEndSession {
                 if let Err(e) = cp.publish_location(
                     &self.model_id,
                     &self.revision,
+                    pk,
                     h,
                     Tier::L2,
                     &self.node_id,
@@ -306,7 +317,7 @@ mod tests {
         let mut d0 = d;
         d0.delta = -1;
         auth.report_ref(&d0).unwrap();
-        assert_eq!(auth.evict_n("m", "", 1), 1);
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
     }
 
     #[test]
@@ -320,11 +331,11 @@ mod tests {
             let mut port = AuthorityPort { auth: &mut auth };
             sess.commit_through(&mut store, &mut port).unwrap();
             store.promote_to_l0(b"p").unwrap();
-            port.publish_location("m", "", b"p", Tier::L0, "n0", true)
+            port.publish_location("m", "", PoolKind::Target as i32, b"p", Tier::L0, "n0", true)
                 .unwrap();
         }
         assert_eq!(store.local_tier(b"p"), Some(LocalTier::L0));
-        assert!(auth.has_l0_on("m", "", b"p", "n0"));
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"p", "n0"));
     }
 
     #[test]
@@ -357,7 +368,7 @@ mod tests {
         assert!(!store.l3_present(b"y"));
 
         let meta_x = auth
-            .lookup_prefix("m", "", &[b"x".to_vec()], "n0")
+            .lookup_prefix("m", "", PoolKind::Target as i32, &[b"x".to_vec()], "n0")
             .0
             .into_iter()
             .next()
@@ -381,7 +392,8 @@ mod tests {
             let mut port = AuthorityPort { auth: &mut auth };
             sess.commit_through(&mut store, &mut port).unwrap();
         }
-        let (metas, _hit, _all) = auth.lookup_prefix("m", "", &[b"h0".to_vec()], "n0");
+        let (metas, _hit, _all) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &[b"h0".to_vec()], "n0");
         let meta = metas
             .into_iter()
             .next()
@@ -446,6 +458,7 @@ mod tests {
                 &mut self,
                 model_id: &str,
                 revision: &str,
+                pool_kind: i32,
                 flat: &[u8],
                 tier: Tier,
                 node_id: &str,
@@ -453,17 +466,19 @@ mod tests {
             ) -> Result<(), String> {
                 self.calls.push("publish");
                 self.auth
-                    .publish_location(model_id, revision, flat, tier, node_id, present)
+                    .publish_location(model_id, revision, pool_kind, flat, tier, node_id, present)
             }
             fn set_l3_present(
                 &mut self,
                 model_id: &str,
                 revision: &str,
+                pool_kind: i32,
                 flat: &[u8],
                 present: bool,
             ) -> Result<(), String> {
                 self.calls.push("l3");
-                self.auth.set_l3_present(model_id, revision, flat, present)
+                self.auth
+                    .set_l3_present(model_id, revision, pool_kind, flat, present)
             }
         }
 
@@ -518,9 +533,9 @@ mod tests {
         assert_eq!(n, 1);
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            apply_location_events(&mut port, "m", "", "n0", &ev).unwrap();
+            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev).unwrap();
         }
-        assert!(auth.has_l0_on("m", "", b"a", "n0"));
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"a", "n0"));
 
         pipe.enqueue(PipelineAction::Promote {
             hash: b"b".to_vec(),
@@ -529,11 +544,12 @@ mod tests {
         assert_eq!(n2, 1);
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            apply_location_events(&mut port, "m", "", "n0", &ev2).unwrap();
+            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev2).unwrap();
         }
-        assert!(auth.has_l0_on("m", "", b"b", "n0"));
-        assert!(!auth.has_l0_on("m", "", b"a", "n0"));
-        let (_, _, all_local_a) = auth.lookup_prefix("m", "", &[b"a".to_vec()], "n0");
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"b", "n0"));
+        assert!(!auth.has_l0_on("m", "", PoolKind::Target as i32, b"a", "n0"));
+        let (_, _, all_local_a) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &[b"a".to_vec()], "n0");
         assert!(!all_local_a);
     }
 }

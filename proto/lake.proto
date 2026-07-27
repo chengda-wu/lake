@@ -145,6 +145,9 @@ message LookupPrefixRequest {
   repeated bytes prefix_hashes = 2;   // 前缀 block hash 链(沿 radix 匹配)
   string requester_node_id    = 3;   // 判定 local_hit 用
   string revision             = 4;   // P4.5:(model_id, revision) 命名空间;空串=默认
+  // P4.5:查哪个 pool_kind 的 radix。UNSPECIFIED/缺省 → TARGET。
+  //   draft 前缀复用须显式填 DRAFT(与 TARGET 索引域隔离)。
+  lake.PoolKind pool_kind     = 5;
 }
 
 // --- 多模型生命周期(P4.5 / F11) ---

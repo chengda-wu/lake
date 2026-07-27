@@ -51,6 +51,7 @@ impl ControlPlaneService for ControlPlane {
         let (blocks, hit_length, all_local_hit) = auth.lookup_prefix(
             &req.model_id,
             &req.revision,
+            req.pool_kind,
             &req.prefix_hashes,
             &req.requester_node_id,
         );
@@ -268,8 +269,13 @@ mod tests {
             vec![meta("m", b"h0"), meta("m", b"h1"), meta("m", b"h2")],
         )
         .unwrap();
-        let (blocks, hit, local) =
-            auth.lookup_prefix("m", "", &prefix(&[b"h0", b"gap", b"h2"]), "n0");
+        let (blocks, hit, local) = auth.lookup_prefix(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[b"h0", b"gap", b"h2"]),
+            "n0",
+        );
         assert_eq!(hit, 1);
         assert_eq!(blocks.len(), 1);
         assert!(!local);
@@ -282,7 +288,7 @@ mod tests {
         let full = prefix(&[b"a", b"b"]);
         auth.register("n0", &full, vec![meta("m", b"a"), meta("m", b"b")])
             .unwrap();
-        let (_, hit, local) = auth.lookup_prefix("m", "", &full, "n0");
+        let (_, hit, local) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 2);
         assert!(!local);
     }
@@ -297,11 +303,17 @@ mod tests {
             .unwrap();
         auth.register("n0", &full, vec![meta("m2", b"shared")])
             .unwrap();
-        let (_, hit1, _) = auth.lookup_prefix("m1", "", &full, "n0");
-        let (_, hit2, _) = auth.lookup_prefix("m2", "", &full, "n0");
+        let (_, hit1, _) = auth.lookup_prefix("m1", "", PoolKind::Target as i32, &full, "n0");
+        let (_, hit2, _) = auth.lookup_prefix("m2", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit1, 1);
         assert_eq!(hit2, 1);
-        let (_, miss, _) = auth.lookup_prefix("m1", "", &prefix(&[b"other"]), "n0");
+        let (_, miss, _) = auth.lookup_prefix(
+            "m1",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[b"other"]),
+            "n0",
+        );
         assert_eq!(miss, 0);
     }
 
@@ -331,7 +343,7 @@ mod tests {
         auth.register("n0", &full, vec![meta("m", b"h0"), meta("m", b"h1")])
             .unwrap();
         auth.register("n0", &full, vec![meta("m", b"h2")]).unwrap();
-        let (_, hit, _) = auth.lookup_prefix("m", "", &full, "n0");
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 3);
     }
 
@@ -353,7 +365,8 @@ mod tests {
         let chain = prefix(&[b"A", b"B"]);
         auth.register("n0", &chain, vec![meta("m", b"A"), meta("m", b"B")])
             .unwrap();
-        let (blocks, hit, _) = auth.lookup_prefix("m", "", &prefix(&[b"B"]), "n0");
+        let (blocks, hit, _) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &prefix(&[b"B"]), "n0");
         assert_eq!(hit, 0);
         assert!(blocks.is_empty());
     }
@@ -367,23 +380,23 @@ mod tests {
 
         let d = delta("m", b"x", 1);
         auth.report_ref(&d).unwrap();
-        assert_eq!(auth.global_ref("m", "", b"x"), 1);
-        assert_eq!(auth.inactive_len("m", ""), 0);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"x"), 1);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
 
         let mut d0 = d.clone();
         d0.delta = -1;
         auth.report_ref(&d0).unwrap();
-        assert_eq!(auth.global_ref("m", "", b"x"), 0);
-        assert_eq!(auth.inactive_len("m", ""), 1);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"x"), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
 
         auth.report_ref(&d).unwrap();
-        assert_eq!(auth.inactive_len("m", ""), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
         auth.report_ref(&d0).unwrap();
-        assert_eq!(auth.inactive_len("m", ""), 1);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
 
-        let n = auth.evict_n("m", "", 1);
+        let n = auth.evict_n("m", "", PoolKind::Target as i32, 1);
         assert_eq!(n, 1);
-        let (_, hit, _) = auth.lookup_prefix("m", "", &full, "n0");
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 0);
     }
 
@@ -395,7 +408,7 @@ mod tests {
         auth.register("n0", &full, vec![meta("m", b"p")]).unwrap();
         let plus = delta("m", b"p", 1);
         auth.report_ref(&plus).unwrap();
-        assert_eq!(auth.global_ref("m", "", b"p"), 1);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"p"), 1);
 
         let mut minus = plus.clone();
         minus.delta = -1;
@@ -403,7 +416,7 @@ mod tests {
         let err = auth.report_refs(&[minus, unknown]).unwrap_err();
         assert!(err.contains("unknown block_hash") || err.contains("batch"));
         assert_eq!(
-            auth.global_ref("m", "", b"p"),
+            auth.global_ref("m", "", PoolKind::Target as i32, b"p"),
             1,
             "failed batch must not apply prefix deltas"
         );
@@ -416,8 +429,8 @@ mod tests {
         let full = prefix(&[b"y"]);
         auth.register("n0", &full, vec![meta("m", b"y")]).unwrap();
         auth.report_ref(&delta("m", b"y", 1)).unwrap();
-        assert_eq!(auth.evict_n("m", "", 10), 0);
-        let (_, hit, _) = auth.lookup_prefix("m", "", &full, "n0");
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 10), 0);
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 1);
     }
 
@@ -431,16 +444,16 @@ mod tests {
             .unwrap();
         auth.register("n0", &hot, vec![meta("m", b"hot")]).unwrap();
         for _ in 0..64 {
-            let _ = auth.lookup_prefix("m", "", &hot, "n0");
+            let _ = auth.lookup_prefix("m", "", PoolKind::Target as i32, &hot, "n0");
         }
         for flat in [b"cold".as_slice(), b"hot".as_slice()] {
             auth.report_ref(&delta("m", flat, 1)).unwrap();
             auth.report_ref(&delta("m", flat, -1)).unwrap();
         }
-        assert_eq!(auth.inactive_len("m", ""), 2);
-        assert_eq!(auth.evict_n("m", "", 1), 1);
-        let (_, cold_hit, _) = auth.lookup_prefix("m", "", &cold, "n0");
-        let (_, hot_hit, _) = auth.lookup_prefix("m", "", &hot, "n0");
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 2);
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, cold_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &cold, "n0");
+        let (_, hot_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &hot, "n0");
         assert_eq!(cold_hit, 0, "colder leaf should be Frequency victim");
         assert_eq!(hot_hit, 1, "touched hot leaf should survive first allocate");
     }
@@ -460,10 +473,16 @@ mod tests {
             auth.report_ref(&delta("m", flat, 1)).unwrap();
             auth.report_ref(&delta("m", flat, -1)).unwrap();
         }
-        assert_eq!(auth.evict_n("m", "", 1), 1);
-        let (_, parent_only, _) = auth.lookup_prefix("m", "", &prefix(&[b"parent"]), "n0");
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, parent_only, _) = auth.lookup_prefix(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[b"parent"]),
+            "n0",
+        );
         assert_eq!(parent_only, 1, "prefix parent must survive first evict");
-        let (_, chain_hit, _) = auth.lookup_prefix("m", "", &chain, "n0");
+        let (_, chain_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &chain, "n0");
         assert_eq!(chain_hit, 1, "leaf gone → gap after parent");
     }
 
@@ -482,16 +501,22 @@ mod tests {
             auth.report_ref(&delta("m", &flat, -1)).unwrap();
             flats.push(flat);
             assert!(
-                auth.inactive_len("m", "") <= cap,
+                auth.inactive_len("m", "", PoolKind::Target as i32) <= cap,
                 "inactive must stay ≤ cap after insert #{i}"
             );
         }
-        assert_eq!(auth.inactive_len("m", ""), cap);
-        let (_, early_hit, _) = auth.lookup_prefix("m", "", &prefix(&[flats[0].as_slice()]), "n0");
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), cap);
+        let (_, early_hit, _) = auth.lookup_prefix(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[flats[0].as_slice()]),
+            "n0",
+        );
         assert_eq!(early_hit, 1, "skip-insert must not drop view entries");
-        let removed = auth.evict_n("m", "", cap);
+        let removed = auth.evict_n("m", "", PoolKind::Target as i32, cap);
         assert_eq!(removed, cap, "allocate must clear all inactive at cap");
-        assert_eq!(auth.inactive_len("m", ""), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
     }
 
     #[test]
@@ -508,16 +533,28 @@ mod tests {
         auth.report_ref(&delta("m", b"cand", 1)).unwrap();
         auth.report_ref(&delta("m", b"cand", -1)).unwrap();
         auth.report_ref(&delta("m", b"held", 1)).unwrap();
-        assert_eq!(auth.inactive_len("m", ""), 1);
-        assert_eq!(auth.global_ref("m", "", b"held"), 1);
-        assert_eq!(auth.global_ref("m", "", b"cand"), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"held"),
+            1
+        );
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"cand"),
+            0
+        );
 
         auth.report_refs(&[delta("m", b"held", -1), delta("m", b"cand", 1)])
             .unwrap();
-        assert_eq!(auth.global_ref("m", "", b"held"), 0);
-        assert_eq!(auth.global_ref("m", "", b"cand"), 1);
-        assert_eq!(auth.inactive_len("m", ""), 0);
-        let (_, cand_hit, _) = auth.lookup_prefix("m", "", &cand, "n0");
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"held"),
+            0
+        );
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"cand"),
+            1
+        );
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
+        let (_, cand_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &cand, "n0");
         assert_eq!(cand_hit, 1, "peer must not be pressure-evicted mid-batch");
     }
 
@@ -530,16 +567,20 @@ mod tests {
         let mut plus = delta("m", b"wb0", 1);
         plus.kind = RefKind::Writeback as i32;
         auth.report_ref(&plus).unwrap();
-        assert_eq!(auth.global_ref("m", "", b"wb0"), 1);
-        assert_eq!(auth.evict_n("m", "", 10), 0, "writeback must freeze");
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"wb0"), 1);
+        assert_eq!(
+            auth.evict_n("m", "", PoolKind::Target as i32, 10),
+            0,
+            "writeback must freeze"
+        );
 
         let mut minus = plus.clone();
         minus.delta = -1;
         auth.report_ref(&minus).unwrap();
         auth.complete_barrier("req-wb", "n0").unwrap();
         assert!(auth.barrier_completed("req-wb"));
-        assert_eq!(auth.evict_n("m", "", 1), 1);
-        let (_, hit, _) = auth.lookup_prefix("m", "", &full, "n0");
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 0);
     }
 
@@ -566,14 +607,30 @@ mod tests {
         ensure_model(&mut auth, "m");
         let full = prefix(&[b"loc"]);
         auth.register("n0", &full, vec![meta("m", b"loc")]).unwrap();
-        auth.publish_location("m", "", b"loc", Tier::L0, "n0", true)
-            .unwrap();
-        assert!(auth.has_l0_on("m", "", b"loc", "n0"));
-        let (_, _, all_local) = auth.lookup_prefix("m", "", &full, "n0");
+        auth.publish_location(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"loc",
+            Tier::L0,
+            "n0",
+            true,
+        )
+        .unwrap();
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"loc", "n0"));
+        let (_, _, all_local) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert!(all_local);
-        auth.publish_location("m", "", b"loc", Tier::L0, "n0", false)
-            .unwrap();
-        let (_, _, all_local) = auth.lookup_prefix("m", "", &full, "n0");
+        auth.publish_location(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"loc",
+            Tier::L0,
+            "n0",
+            false,
+        )
+        .unwrap();
+        let (_, _, all_local) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert!(!all_local);
     }
 
@@ -587,17 +644,17 @@ mod tests {
         auth.register("n0", &full, vec![meta("llama", b"samehash")])
             .unwrap();
         // qwen has no blocks yet
-        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", &full, "n0");
+        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit_q, 0);
         auth.register("n0", &full, vec![meta("qwen", b"samehash")])
             .unwrap();
-        let (_, hit_l, _) = auth.lookup_prefix("llama", "", &full, "n0");
-        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", &full, "n0");
+        let (_, hit_l, _) = auth.lookup_prefix("llama", "", PoolKind::Target as i32, &full, "n0");
+        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit_l, 1);
         assert_eq!(hit_q, 1);
         auth.deregister_model("llama", "").unwrap();
-        let (_, hit_l, _) = auth.lookup_prefix("llama", "", &full, "n0");
-        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", &full, "n0");
+        let (_, hit_l, _) = auth.lookup_prefix("llama", "", PoolKind::Target as i32, &full, "n0");
+        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit_l, 0, "llama cascaded away");
         assert_eq!(hit_q, 1, "qwen untouched");
     }
@@ -614,12 +671,13 @@ mod tests {
         auth.deregister_model("m", "").unwrap();
         assert!(!auth.has_namespace("m", ""));
         assert_eq!(auth.block_count("m", ""), 0);
-        let (_, hit, _) = auth.lookup_prefix("m", "", &full, "n0");
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 0);
         // re-register model + blocks works on a fresh namespace
         ensure_model(&mut auth, "m");
         auth.register("n0", &full, vec![meta("m", b"a")]).unwrap();
-        let (_, hit, _) = auth.lookup_prefix("m", "", &prefix(&[b"a"]), "n0");
+        let (_, hit, _) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &prefix(&[b"a"]), "n0");
         assert_eq!(hit, 1);
     }
 
@@ -634,16 +692,16 @@ mod tests {
             .unwrap();
         auth.register("n0", &full, vec![meta_rev("m", "r2", b"pfx")])
             .unwrap();
-        let (_, h1, _) = auth.lookup_prefix("m", "r1", &full, "n0");
-        let (_, h2, _) = auth.lookup_prefix("m", "r2", &full, "n0");
+        let (_, h1, _) = auth.lookup_prefix("m", "r1", PoolKind::Target as i32, &full, "n0");
+        let (_, h2, _) = auth.lookup_prefix("m", "r2", PoolKind::Target as i32, &full, "n0");
         assert_eq!(h1, 1);
         assert_eq!(h2, 1);
         // miss across revision
-        let (_, h_cross, _) = auth.lookup_prefix("m", "r1", &full, "n0");
+        let (_, h_cross, _) = auth.lookup_prefix("m", "r1", PoolKind::Target as i32, &full, "n0");
         assert_eq!(h_cross, 1);
         auth.deregister_model("m", "r1").unwrap();
-        let (_, h1, _) = auth.lookup_prefix("m", "r1", &full, "n0");
-        let (_, h2, _) = auth.lookup_prefix("m", "r2", &full, "n0");
+        let (_, h1, _) = auth.lookup_prefix("m", "r1", PoolKind::Target as i32, &full, "n0");
+        let (_, h2, _) = auth.lookup_prefix("m", "r2", PoolKind::Target as i32, &full, "n0");
         assert_eq!(h1, 0, "r1 invalidated");
         assert_eq!(h2, 1, "r2 still live");
         assert!(auth.has_namespace("m", "r2"));
@@ -657,14 +715,96 @@ mod tests {
         let full = prefix(&[b"keep"]);
         auth.register("n0", &full, vec![meta("m", b"keep")])
             .unwrap();
-        ensure_model(&mut auth, "m"); // re-register
-        let (_, hit, _) = auth.lookup_prefix("m", "", &full, "n0");
+        // Same identity + quota bump is ok.
+        auth.register_model(ModelDescriptor {
+            model_id: "m".into(),
+            revision: String::new(),
+            num_layers: 32,
+            block_spec: Some(BlockSpec {
+                block_tokens: 128,
+                bytes_per_block: 0,
+            }),
+            hash_algo: HashAlgo::HashSha256256 as i32,
+            quota: Some(Quota {
+                soft_bytes: 1,
+                hard_bytes: 2,
+                borrow_enabled: true,
+            }),
+        })
+        .unwrap();
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 1);
-        assert_eq!(
-            auth.model_descriptor("m", "")
-                .map(|d| d.num_layers)
-                .unwrap(),
-            32
-        );
+        let q = auth
+            .model_descriptor("m", "")
+            .and_then(|d| d.quota.clone())
+            .unwrap();
+        assert_eq!(q.soft_bytes, 1);
+        assert_eq!(q.hard_bytes, 2);
+        assert!(q.borrow_enabled);
+    }
+
+    #[test]
+    fn register_model_rejects_immutable_change() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let err = auth
+            .register_model(ModelDescriptor {
+                model_id: "m".into(),
+                revision: String::new(),
+                num_layers: 64, // changed
+                block_spec: Some(BlockSpec {
+                    block_tokens: 128,
+                    bytes_per_block: 0,
+                }),
+                hash_algo: HashAlgo::HashSha256256 as i32,
+                quota: None,
+            })
+            .unwrap_err();
+        assert!(err.contains("immutable") || err.contains("new revision"));
+        // blocks still addressable under original descriptor
+        let full = prefix(&[b"x"]);
+        auth.register("n0", &full, vec![meta("m", b"x")]).unwrap();
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1);
+    }
+
+    /// Same (model, revision, hash) under TARGET vs DRAFT must not crosstalk.
+    #[test]
+    fn p45_target_draft_same_hash_no_crosstalk() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"shared"]);
+        auth.register("n0", &full, vec![meta("m", b"shared")])
+            .unwrap();
+        let mut draft = meta("m", b"shared");
+        draft.id.as_mut().unwrap().pool_kind = PoolKind::Draft as i32;
+        auth.register("n0", &full, vec![draft]).unwrap();
+
+        let (_, t_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        let (_, d_hit, _) = auth.lookup_prefix("m", "", PoolKind::Draft as i32, &full, "n0");
+        assert_eq!(t_hit, 1);
+        assert_eq!(d_hit, 1);
+
+        // Locate by pool_kind
+        let t_id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"shared".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+        let mut d_id = t_id.clone();
+        d_id.pool_kind = PoolKind::Draft as i32;
+        assert_eq!(auth.locate(&[t_id.clone()]).len(), 1);
+        assert_eq!(auth.locate(&[d_id.clone()]).len(), 1);
+
+        // Evict TARGET only
+        auth.report_ref(&delta("m", b"shared", 1)).unwrap();
+        auth.report_ref(&delta("m", b"shared", -1)).unwrap();
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, t_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        let (_, d_hit, _) = auth.lookup_prefix("m", "", PoolKind::Draft as i32, &full, "n0");
+        assert_eq!(t_hit, 0, "target evicted");
+        assert_eq!(d_hit, 1, "draft untouched");
     }
 }

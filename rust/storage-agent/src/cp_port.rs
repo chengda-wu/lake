@@ -17,6 +17,7 @@ pub trait ControlPlanePort {
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         flat: &[u8],
         tier: Tier,
         node_id: &str,
@@ -26,6 +27,7 @@ pub trait ControlPlanePort {
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         flat: &[u8],
         present: bool,
     ) -> Result<(), String>;
@@ -54,23 +56,26 @@ impl ControlPlanePort for AuthorityPort<'_> {
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         flat: &[u8],
         tier: Tier,
         node_id: &str,
         present: bool,
     ) -> Result<(), String> {
         self.auth
-            .publish_location(model_id, revision, flat, tier, node_id, present)
+            .publish_location(model_id, revision, pool_kind, flat, tier, node_id, present)
     }
 
     fn set_l3_present(
         &mut self,
         model_id: &str,
         revision: &str,
+        pool_kind: i32,
         flat: &[u8],
         present: bool,
     ) -> Result<(), String> {
-        self.auth.set_l3_present(model_id, revision, flat, present)
+        self.auth
+            .set_l3_present(model_id, revision, pool_kind, flat, present)
     }
 }
 
@@ -83,35 +88,71 @@ pub fn apply_location_events<P: ControlPlanePort>(
     cp: &mut P,
     model_id: &str,
     revision: &str,
+    pool_kind: i32,
     node_id: &str,
     events: &[LocationEvent],
 ) -> Result<(), String> {
     for ev in events {
         match ev {
             LocationEvent::Present { hash, tier } => match tier {
-                LocalTier::L0 => {
-                    cp.publish_location(model_id, revision, hash, Tier::L0, node_id, true)?
-                }
-                // Reserved: no P4.3 producer emits L1 (see `ensure_l1_room`).
-                LocalTier::L1 => {
-                    cp.publish_location(model_id, revision, hash, Tier::L1, node_id, true)?
-                }
-                LocalTier::L2 => {
-                    cp.publish_location(model_id, revision, hash, Tier::L2, node_id, true)?
-                }
-                LocalTier::L3 => cp.set_l3_present(model_id, revision, hash, true)?,
+                LocalTier::L0 => cp.publish_location(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    Tier::L0,
+                    node_id,
+                    true,
+                )?,
+                LocalTier::L1 => cp.publish_location(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    Tier::L1,
+                    node_id,
+                    true,
+                )?,
+                LocalTier::L2 => cp.publish_location(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    Tier::L2,
+                    node_id,
+                    true,
+                )?,
+                LocalTier::L3 => cp.set_l3_present(model_id, revision, pool_kind, hash, true)?,
             },
             LocationEvent::Absent { hash, tier } => match tier {
-                LocalTier::L0 => {
-                    cp.publish_location(model_id, revision, hash, Tier::L0, node_id, false)?
-                }
-                LocalTier::L1 => {
-                    cp.publish_location(model_id, revision, hash, Tier::L1, node_id, false)?
-                }
-                LocalTier::L2 => {
-                    cp.publish_location(model_id, revision, hash, Tier::L2, node_id, false)?
-                }
-                LocalTier::L3 => cp.set_l3_present(model_id, revision, hash, false)?,
+                LocalTier::L0 => cp.publish_location(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    Tier::L0,
+                    node_id,
+                    false,
+                )?,
+                LocalTier::L1 => cp.publish_location(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    Tier::L1,
+                    node_id,
+                    false,
+                )?,
+                LocalTier::L2 => cp.publish_location(
+                    model_id,
+                    revision,
+                    pool_kind,
+                    hash,
+                    Tier::L2,
+                    node_id,
+                    false,
+                )?,
+                LocalTier::L3 => cp.set_l3_present(model_id, revision, pool_kind, hash, false)?,
             },
         }
     }

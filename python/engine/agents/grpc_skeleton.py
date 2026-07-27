@@ -98,6 +98,7 @@ class GrpcSkeletonAgent:
                     prefix_hashes=hashes,
                     requester_node_id=req.node_id,
                     revision="",
+                    pool_kind=schema_pb2.TARGET,  # P4.5:缺省 TARGET；draft 前缀须显式 DRAFT
                 )
             )
         except grpc.RpcError as e:
@@ -189,6 +190,7 @@ class GrpcSkeletonAgent:
                 prefix_hashes=hashes,
                 requester_node_id=req.node_id,
                 revision="",
+                pool_kind=schema_pb2.TARGET,
             )
         )
         reused = int(lookup.hit_length)
