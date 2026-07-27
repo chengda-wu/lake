@@ -48,6 +48,9 @@ pub trait Transport: Send + Sync {
     /// 打开/分配一段可寻址缓冲区(仿 Mooncake `openSegment` + 本地 register)。
     fn open_segment(&self, name: &str, capacity: usize) -> Result<SegmentId>;
 
+    /// 释放段(Pull dest / 临时缓冲);对齐 batch 的 freeBatchID 生命周期。
+    fn free_segment(&self, segment_id: SegmentId) -> Result<()>;
+
     /// 把字节写入段内 offset(仿 registerLocalMemory 后的本地填充 / TCP payload 落点)。
     fn write_segment(&self, segment_id: SegmentId, offset: u64, data: &[u8]) -> Result<()>;
 

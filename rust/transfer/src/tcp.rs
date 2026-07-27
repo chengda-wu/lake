@@ -70,6 +70,11 @@ impl TcpTransport {
     pub fn batch_count(&self) -> usize {
         self.batches.lock().unwrap().len()
     }
+
+    /// 观测用:当前未 free 的 segment 数(Pull dest 泄漏回归测)。
+    pub fn segment_count(&self) -> usize {
+        self.segments.lock().unwrap().len()
+    }
 }
 
 impl Transport for TcpTransport {
@@ -84,6 +89,13 @@ impl Transport for TcpTransport {
             },
         );
         Ok(id)
+    }
+
+    fn free_segment(&self, segment_id: SegmentId) -> Result<()> {
+        let mut segs = self.segments.lock().unwrap();
+        segs.remove(&segment_id)
+            .map(|_| ())
+            .ok_or(TransferError::UnknownSegment(segment_id))
     }
 
     fn write_segment(&self, segment_id: SegmentId, offset: u64, data: &[u8]) -> Result<()> {

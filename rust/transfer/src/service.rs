@@ -18,12 +18,13 @@ use crate::location::validate_location_tier;
 use crate::tcp::TcpTransport;
 use crate::transport::{TaskState, TransferOp, Transport};
 
-/// Pull 会话(handle → 结果);后续 GetPullStatus / cancel 会读这些字段。
-#[allow(dead_code)]
+/// Pull 会话(handle → 结果);用毕须 FreePull(释放 handle + dest segment)。
 struct PullHandle {
+    #[allow(dead_code)]
     pulled_length: u32,
+    #[allow(dead_code)]
     completed: bool,
-    /// Pull 落入的 requester L0 段。
+    /// Pull 落入的 requester L0 段;FreePull 时 `free_segment`。
     dest_segment: u64,
 }
 
@@ -74,6 +75,11 @@ impl TransferServer {
     /// 观测用:未 FreePublish 的 request 桶数(防泄漏回归测)。
     pub fn publish_stream_count(&self) -> usize {
         self.publish.lock().unwrap().len()
+    }
+
+    /// 观测用:未 FreePull 的 handle 数。
+    pub fn pull_handle_count(&self) -> usize {
+        self.pulls.lock().unwrap().len()
     }
 
     fn task_state_to_proto(s: TaskState) -> i32 {
@@ -223,6 +229,31 @@ impl TransferService for TransferServer {
             pulled_length: pulled,
             completed,
         }))
+    }
+
+    async fn free_pull(&self, request: Request<FreePullRequest>) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let Some(h) = self.pulls.lock().unwrap().remove(&req.handle) else {
+            return Ok(Response::new(Ack {
+                ok: false,
+                err: format!("unknown pull handle={}", req.handle),
+            }));
+        };
+        // 段可能已被外部 free;仍尽量回收 arena。
+        match self.transport.free_segment(h.dest_segment) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+            })),
+            Err(TransferError::UnknownSegment(_)) => Ok(Response::new(Ack {
+                ok: true,
+                err: format!(
+                    "pull handle={} freed; dest segment {} already gone",
+                    req.handle, h.dest_segment
+                ),
+            })),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn publish(&self, request: Request<PublishRequest>) -> Result<Response<Ack>, Status> {
@@ -383,8 +414,9 @@ mod tests {
         let b1 = block(b"h1");
         bytes.put(&b0, b"AAA".to_vec());
         bytes.put(&b1, b"BBBB".to_vec());
-        let svc = TransferServer::new(transport, bytes);
+        let svc = TransferServer::new(transport.clone(), bytes);
 
+        let segs_before = transport.segment_count();
         let resp = svc
             .pull(Request::new(PullRequest {
                 ids: vec![b0.clone(), b1.clone()],
@@ -398,6 +430,8 @@ mod tests {
         assert_eq!(resp.pulled_length, 2);
         assert!(resp.completed);
         assert!(resp.handle > 0);
+        assert_eq!(svc.pull_handle_count(), 1);
+        assert_eq!(transport.segment_count(), segs_before + 1);
 
         let ack = svc
             .publish(Request::new(PublishRequest {
@@ -495,6 +529,26 @@ mod tests {
             .ok
         );
         assert_eq!(svc.publish_stream_count(), 0);
+
+        // FreePull:回收 handle + dest segment
+        let freed = svc
+            .free_pull(Request::new(FreePullRequest {
+                handle: resp.handle,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(freed.ok);
+        assert_eq!(svc.pull_handle_count(), 0);
+        assert_eq!(transport.segment_count(), segs_before);
+        let again = svc
+            .free_pull(Request::new(FreePullRequest {
+                handle: resp.handle,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!again.ok);
     }
 
     #[tokio::test]
@@ -504,8 +558,9 @@ mod tests {
         for i in 0..5u8 {
             bytes.put(&block(&[i]), vec![i; 4]);
         }
-        let svc = TransferServer::new(transport, bytes);
+        let svc = TransferServer::new(transport.clone(), bytes);
         let ids: Vec<_> = (0..5u8).map(|i| block(&[i])).collect();
+        let segs_before = transport.segment_count();
         let resp = svc
             .pull(Request::new(PullRequest {
                 ids,
@@ -518,5 +573,52 @@ mod tests {
             .into_inner();
         assert_eq!(resp.pulled_length, 2);
         assert!(!resp.completed);
+        assert!(
+            svc.free_pull(Request::new(FreePullRequest {
+                handle: resp.handle,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .ok
+        );
+        assert_eq!(svc.pull_handle_count(), 0);
+        assert_eq!(transport.segment_count(), segs_before);
+    }
+
+    #[tokio::test]
+    async fn free_pull_reclaims_handle_and_segment() {
+        let transport = Arc::new(TcpTransport::new());
+        let bytes = Arc::new(InMemoryByteStore::new());
+        bytes.put(&block(b"x"), b"ZZ".to_vec());
+        let svc = TransferServer::new(transport.clone(), bytes);
+        assert_eq!(transport.segment_count(), 0);
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let r = svc
+                .pull(Request::new(PullRequest {
+                    ids: vec![block(b"x")],
+                    policy: PullPolicy::PullBestEffort as i32,
+                    budget_ms: 0,
+                    requester_node_id: "n".into(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            handles.push(r.handle);
+        }
+        assert_eq!(svc.pull_handle_count(), 3);
+        assert_eq!(transport.segment_count(), 3);
+        for h in handles {
+            assert!(
+                svc.free_pull(Request::new(FreePullRequest { handle: h }))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .ok
+            );
+        }
+        assert_eq!(svc.pull_handle_count(), 0);
+        assert_eq!(transport.segment_count(), 0);
     }
 }

@@ -1599,7 +1599,7 @@ func (x *PullRequest) GetRequesterNodeId() string {
 
 type PullResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Handle        uint64                 `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`                                 // agent wait ready 用
+	Handle        uint64                 `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"`                                 // agent wait ready 用;用毕须 FreePull
 	PulledLength  uint32                 `protobuf:"varint,2,opt,name=pulled_length,json=pulledLength,proto3" json:"pulled_length,omitempty"` // 实际拉到的 block 数
 	Completed     bool                   `protobuf:"varint,3,opt,name=completed,proto3" json:"completed,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1657,6 +1657,50 @@ func (x *PullResponse) GetCompleted() bool {
 	return false
 }
 
+type FreePullRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Handle        uint64                 `protobuf:"varint,1,opt,name=handle,proto3" json:"handle,omitempty"` // PullResponse.handle;释放会话 + dest segment
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FreePullRequest) Reset() {
+	*x = FreePullRequest{}
+	mi := &file_lake_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FreePullRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FreePullRequest) ProtoMessage() {}
+
+func (x *FreePullRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FreePullRequest.ProtoReflect.Descriptor instead.
+func (*FreePullRequest) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *FreePullRequest) GetHandle() uint64 {
+	if x != nil {
+		return x.Handle
+	}
+	return 0
+}
+
 type PublishRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Slices []*LayerSlice          `protobuf:"bytes,1,rep,name=slices,proto3" json:"slices,omitempty"` // 逐层增量(page_first_direct),非整块
@@ -1669,7 +1713,7 @@ type PublishRequest struct {
 
 func (x *PublishRequest) Reset() {
 	*x = PublishRequest{}
-	mi := &file_lake_proto_msgTypes[24]
+	mi := &file_lake_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1681,7 +1725,7 @@ func (x *PublishRequest) String() string {
 func (*PublishRequest) ProtoMessage() {}
 
 func (x *PublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[24]
+	mi := &file_lake_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1694,7 +1738,7 @@ func (x *PublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishRequest.ProtoReflect.Descriptor instead.
 func (*PublishRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{24}
+	return file_lake_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PublishRequest) GetSlices() []*LayerSlice {
@@ -1727,7 +1771,7 @@ type FreePublishRequest struct {
 
 func (x *FreePublishRequest) Reset() {
 	*x = FreePublishRequest{}
-	mi := &file_lake_proto_msgTypes[25]
+	mi := &file_lake_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1739,7 +1783,7 @@ func (x *FreePublishRequest) String() string {
 func (*FreePublishRequest) ProtoMessage() {}
 
 func (x *FreePublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[25]
+	mi := &file_lake_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1752,7 +1796,7 @@ func (x *FreePublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FreePublishRequest.ProtoReflect.Descriptor instead.
 func (*FreePublishRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{25}
+	return file_lake_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *FreePublishRequest) GetRequestId() string {
@@ -1774,7 +1818,7 @@ type LayerSlice struct {
 
 func (x *LayerSlice) Reset() {
 	*x = LayerSlice{}
-	mi := &file_lake_proto_msgTypes[26]
+	mi := &file_lake_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1786,7 +1830,7 @@ func (x *LayerSlice) String() string {
 func (*LayerSlice) ProtoMessage() {}
 
 func (x *LayerSlice) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[26]
+	mi := &file_lake_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1799,7 +1843,7 @@ func (x *LayerSlice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LayerSlice.ProtoReflect.Descriptor instead.
 func (*LayerSlice) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{26}
+	return file_lake_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *LayerSlice) GetId() *KVBlockID {
@@ -1841,7 +1885,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_lake_proto_msgTypes[27]
+	mi := &file_lake_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1853,7 +1897,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[27]
+	mi := &file_lake_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1866,7 +1910,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{27}
+	return file_lake_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Ack) GetOk() bool {
@@ -1893,7 +1937,7 @@ type PutBlocksRequest struct {
 
 func (x *PutBlocksRequest) Reset() {
 	*x = PutBlocksRequest{}
-	mi := &file_lake_proto_msgTypes[28]
+	mi := &file_lake_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1905,7 +1949,7 @@ func (x *PutBlocksRequest) String() string {
 func (*PutBlocksRequest) ProtoMessage() {}
 
 func (x *PutBlocksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[28]
+	mi := &file_lake_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1918,7 +1962,7 @@ func (x *PutBlocksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutBlocksRequest.ProtoReflect.Descriptor instead.
 func (*PutBlocksRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{28}
+	return file_lake_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *PutBlocksRequest) GetNodeId() string {
@@ -1945,7 +1989,7 @@ type OpaqueBlock struct {
 
 func (x *OpaqueBlock) Reset() {
 	*x = OpaqueBlock{}
-	mi := &file_lake_proto_msgTypes[29]
+	mi := &file_lake_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1957,7 +2001,7 @@ func (x *OpaqueBlock) String() string {
 func (*OpaqueBlock) ProtoMessage() {}
 
 func (x *OpaqueBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[29]
+	mi := &file_lake_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1970,7 +2014,7 @@ func (x *OpaqueBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpaqueBlock.ProtoReflect.Descriptor instead.
 func (*OpaqueBlock) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{29}
+	return file_lake_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *OpaqueBlock) GetId() *KVBlockID {
@@ -1996,7 +2040,7 @@ type GetBlocksRequest struct {
 
 func (x *GetBlocksRequest) Reset() {
 	*x = GetBlocksRequest{}
-	mi := &file_lake_proto_msgTypes[30]
+	mi := &file_lake_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2008,7 +2052,7 @@ func (x *GetBlocksRequest) String() string {
 func (*GetBlocksRequest) ProtoMessage() {}
 
 func (x *GetBlocksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[30]
+	mi := &file_lake_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2021,7 +2065,7 @@ func (x *GetBlocksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBlocksRequest.ProtoReflect.Descriptor instead.
 func (*GetBlocksRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{30}
+	return file_lake_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GetBlocksRequest) GetIds() []*KVBlockID {
@@ -2040,7 +2084,7 @@ type GetBlocksResponse struct {
 
 func (x *GetBlocksResponse) Reset() {
 	*x = GetBlocksResponse{}
-	mi := &file_lake_proto_msgTypes[31]
+	mi := &file_lake_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2052,7 +2096,7 @@ func (x *GetBlocksResponse) String() string {
 func (*GetBlocksResponse) ProtoMessage() {}
 
 func (x *GetBlocksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[31]
+	mi := &file_lake_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2065,7 +2109,7 @@ func (x *GetBlocksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBlocksResponse.ProtoReflect.Descriptor instead.
 func (*GetBlocksResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{31}
+	return file_lake_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetBlocksResponse) GetBlocks() []*OpaqueBlock {
@@ -2088,7 +2132,7 @@ type GenerateRequest struct {
 
 func (x *GenerateRequest) Reset() {
 	*x = GenerateRequest{}
-	mi := &file_lake_proto_msgTypes[32]
+	mi := &file_lake_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2100,7 +2144,7 @@ func (x *GenerateRequest) String() string {
 func (*GenerateRequest) ProtoMessage() {}
 
 func (x *GenerateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[32]
+	mi := &file_lake_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2113,7 +2157,7 @@ func (x *GenerateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateRequest.ProtoReflect.Descriptor instead.
 func (*GenerateRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{32}
+	return file_lake_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *GenerateRequest) GetRequestId() string {
@@ -2164,7 +2208,7 @@ type GenerateResponse struct {
 
 func (x *GenerateResponse) Reset() {
 	*x = GenerateResponse{}
-	mi := &file_lake_proto_msgTypes[33]
+	mi := &file_lake_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2176,7 +2220,7 @@ func (x *GenerateResponse) String() string {
 func (*GenerateResponse) ProtoMessage() {}
 
 func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[33]
+	mi := &file_lake_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2189,7 +2233,7 @@ func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateResponse.ProtoReflect.Descriptor instead.
 func (*GenerateResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{33}
+	return file_lake_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GenerateResponse) GetRequestId() string {
@@ -2347,7 +2391,9 @@ const file_lake_proto_rawDesc = "" +
 	"\fPullResponse\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\x04R\x06handle\x12#\n" +
 	"\rpulled_length\x18\x02 \x01(\rR\fpulledLength\x12\x1c\n" +
-	"\tcompleted\x18\x03 \x01(\bR\tcompleted\"k\n" +
+	"\tcompleted\x18\x03 \x01(\bR\tcompleted\")\n" +
+	"\x0fFreePullRequest\x12\x16\n" +
+	"\x06handle\x18\x01 \x01(\x04R\x06handle\"k\n" +
 	"\x0ePublishRequest\x12(\n" +
 	"\x06slices\x18\x01 \x03(\v2\x10.lake.LayerSliceR\x06slices\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\rR\x03seq\x12\x1d\n" +
@@ -2411,12 +2457,13 @@ const file_lake_proto_rawDesc = "" +
 	"\bDispatch\x12\x15.lake.DispatchRequest\x1a\t.lake.Ack\x12-\n" +
 	"\n" +
 	"ReportLoad\x12\x10.lake.LoadReport\x1a\t.lake.Ack(\x010\x01\x122\n" +
-	"\vPlaceBlocks\x12\x18.lake.PlaceBlocksRequest\x1a\t.lake.Ack2\xe6\x02\n" +
+	"\vPlaceBlocks\x12\x18.lake.PlaceBlocksRequest\x1a\t.lake.Ack2\x94\x03\n" +
 	"\x0fTransferService\x12D\n" +
 	"\x0eSubmitTransfer\x12\x1a.lake.TransferBatchRequest\x1a\x16.lake.TransferBatchAck\x12N\n" +
 	"\x11GetTransferStatus\x12\x1b.lake.TransferStatusRequest\x1a\x1c.lake.TransferStatusResponse\x12.\n" +
 	"\tFreeBatch\x12\x16.lake.FreeBatchRequest\x1a\t.lake.Ack\x12-\n" +
-	"\x04Pull\x12\x11.lake.PullRequest\x1a\x12.lake.PullResponse\x12*\n" +
+	"\x04Pull\x12\x11.lake.PullRequest\x1a\x12.lake.PullResponse\x12,\n" +
+	"\bFreePull\x12\x15.lake.FreePullRequest\x1a\t.lake.Ack\x12*\n" +
 	"\aPublish\x12\x14.lake.PublishRequest\x1a\t.lake.Ack\x122\n" +
 	"\vFreePublish\x12\x18.lake.FreePublishRequest\x1a\t.lake.Ack2~\n" +
 	"\x0eTcpDataService\x12.\n" +
@@ -2438,7 +2485,7 @@ func file_lake_proto_rawDescGZIP() []byte {
 }
 
 var file_lake_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_lake_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_lake_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_lake_proto_goTypes = []any{
 	(RefKind)(0),                      // 0: lake.RefKind
 	(PullPolicy)(0),                   // 1: lake.PullPolicy
@@ -2469,51 +2516,52 @@ var file_lake_proto_goTypes = []any{
 	(*FreeBatchRequest)(nil),          // 26: lake.FreeBatchRequest
 	(*PullRequest)(nil),               // 27: lake.PullRequest
 	(*PullResponse)(nil),              // 28: lake.PullResponse
-	(*PublishRequest)(nil),            // 29: lake.PublishRequest
-	(*FreePublishRequest)(nil),        // 30: lake.FreePublishRequest
-	(*LayerSlice)(nil),                // 31: lake.LayerSlice
-	(*Ack)(nil),                       // 32: lake.Ack
-	(*PutBlocksRequest)(nil),          // 33: lake.PutBlocksRequest
-	(*OpaqueBlock)(nil),               // 34: lake.OpaqueBlock
-	(*GetBlocksRequest)(nil),          // 35: lake.GetBlocksRequest
-	(*GetBlocksResponse)(nil),         // 36: lake.GetBlocksResponse
-	(*GenerateRequest)(nil),           // 37: lake.GenerateRequest
-	(*GenerateResponse)(nil),          // 38: lake.GenerateResponse
-	nil,                               // 39: lake.DispatchRequest.HintsEntry
-	(*KVBlockID)(nil),                 // 40: lake.KVBlockID
-	(*Location)(nil),                  // 41: lake.Location
-	(BlockKind)(0),                    // 42: lake.BlockKind
-	(*BlockMeta)(nil),                 // 43: lake.BlockMeta
+	(*FreePullRequest)(nil),           // 29: lake.FreePullRequest
+	(*PublishRequest)(nil),            // 30: lake.PublishRequest
+	(*FreePublishRequest)(nil),        // 31: lake.FreePublishRequest
+	(*LayerSlice)(nil),                // 32: lake.LayerSlice
+	(*Ack)(nil),                       // 33: lake.Ack
+	(*PutBlocksRequest)(nil),          // 34: lake.PutBlocksRequest
+	(*OpaqueBlock)(nil),               // 35: lake.OpaqueBlock
+	(*GetBlocksRequest)(nil),          // 36: lake.GetBlocksRequest
+	(*GetBlocksResponse)(nil),         // 37: lake.GetBlocksResponse
+	(*GenerateRequest)(nil),           // 38: lake.GenerateRequest
+	(*GenerateResponse)(nil),          // 39: lake.GenerateResponse
+	nil,                               // 40: lake.DispatchRequest.HintsEntry
+	(*KVBlockID)(nil),                 // 41: lake.KVBlockID
+	(*Location)(nil),                  // 42: lake.Location
+	(BlockKind)(0),                    // 43: lake.BlockKind
+	(*BlockMeta)(nil),                 // 44: lake.BlockMeta
 }
 var file_lake_proto_depIdxs = []int32{
 	7,  // 0: lake.ViewUpdate.events:type_name -> lake.ViewEvent
 	2,  // 1: lake.ViewEvent.kind:type_name -> lake.ViewEvent.Kind
-	40, // 2: lake.ViewEvent.id:type_name -> lake.KVBlockID
-	41, // 3: lake.ViewEvent.locations:type_name -> lake.Location
-	42, // 4: lake.ViewEvent.block_kind:type_name -> lake.BlockKind
+	41, // 2: lake.ViewEvent.id:type_name -> lake.KVBlockID
+	42, // 3: lake.ViewEvent.locations:type_name -> lake.Location
+	43, // 4: lake.ViewEvent.block_kind:type_name -> lake.BlockKind
 	10, // 5: lake.LookupPrefixResponse.blocks:type_name -> lake.ReusableBlock
-	40, // 6: lake.ReusableBlock.id:type_name -> lake.KVBlockID
-	43, // 7: lake.ReusableBlock.meta:type_name -> lake.BlockMeta
-	40, // 8: lake.LocateRequest.ids:type_name -> lake.KVBlockID
-	43, // 9: lake.LocateResponse.blocks:type_name -> lake.BlockMeta
-	43, // 10: lake.RegisterBlocksRequest.blocks:type_name -> lake.BlockMeta
-	40, // 11: lake.RefDelta.id:type_name -> lake.KVBlockID
+	41, // 6: lake.ReusableBlock.id:type_name -> lake.KVBlockID
+	44, // 7: lake.ReusableBlock.meta:type_name -> lake.BlockMeta
+	41, // 8: lake.LocateRequest.ids:type_name -> lake.KVBlockID
+	44, // 9: lake.LocateResponse.blocks:type_name -> lake.BlockMeta
+	44, // 10: lake.RegisterBlocksRequest.blocks:type_name -> lake.BlockMeta
+	41, // 11: lake.RefDelta.id:type_name -> lake.KVBlockID
 	0,  // 12: lake.RefDelta.kind:type_name -> lake.RefKind
 	3,  // 13: lake.LeaseHeartbeat.op:type_name -> lake.LeaseHeartbeat.Op
-	40, // 14: lake.DispatchRequest.reuse_blocks:type_name -> lake.KVBlockID
-	39, // 15: lake.DispatchRequest.hints:type_name -> lake.DispatchRequest.HintsEntry
-	40, // 16: lake.PlaceBlocksRequest.ids:type_name -> lake.KVBlockID
+	41, // 14: lake.DispatchRequest.reuse_blocks:type_name -> lake.KVBlockID
+	40, // 15: lake.DispatchRequest.hints:type_name -> lake.DispatchRequest.HintsEntry
+	41, // 16: lake.PlaceBlocksRequest.ids:type_name -> lake.KVBlockID
 	22, // 17: lake.TransferBatchRequest.reqs:type_name -> lake.TransferRequest
-	41, // 18: lake.TransferRequest.source:type_name -> lake.Location
+	42, // 18: lake.TransferRequest.source:type_name -> lake.Location
 	4,  // 19: lake.TransferStatusResponse.state:type_name -> lake.TransferStatusResponse.State
-	40, // 20: lake.PullRequest.ids:type_name -> lake.KVBlockID
+	41, // 20: lake.PullRequest.ids:type_name -> lake.KVBlockID
 	1,  // 21: lake.PullRequest.policy:type_name -> lake.PullPolicy
-	31, // 22: lake.PublishRequest.slices:type_name -> lake.LayerSlice
-	40, // 23: lake.LayerSlice.id:type_name -> lake.KVBlockID
-	34, // 24: lake.PutBlocksRequest.blocks:type_name -> lake.OpaqueBlock
-	40, // 25: lake.OpaqueBlock.id:type_name -> lake.KVBlockID
-	40, // 26: lake.GetBlocksRequest.ids:type_name -> lake.KVBlockID
-	34, // 27: lake.GetBlocksResponse.blocks:type_name -> lake.OpaqueBlock
+	32, // 22: lake.PublishRequest.slices:type_name -> lake.LayerSlice
+	41, // 23: lake.LayerSlice.id:type_name -> lake.KVBlockID
+	35, // 24: lake.PutBlocksRequest.blocks:type_name -> lake.OpaqueBlock
+	41, // 25: lake.OpaqueBlock.id:type_name -> lake.KVBlockID
+	41, // 26: lake.GetBlocksRequest.ids:type_name -> lake.KVBlockID
+	35, // 27: lake.GetBlocksResponse.blocks:type_name -> lake.OpaqueBlock
 	5,  // 28: lake.ControlPlaneService.SubscribeView:input_type -> lake.SubscribeRequest
 	8,  // 29: lake.ControlPlaneService.LookupPrefix:input_type -> lake.LookupPrefixRequest
 	11, // 30: lake.ControlPlaneService.Locate:input_type -> lake.LocateRequest
@@ -2528,32 +2576,34 @@ var file_lake_proto_depIdxs = []int32{
 	24, // 39: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
 	26, // 40: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
 	27, // 41: lake.TransferService.Pull:input_type -> lake.PullRequest
-	29, // 42: lake.TransferService.Publish:input_type -> lake.PublishRequest
-	30, // 43: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
-	33, // 44: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
-	35, // 45: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
-	37, // 46: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
-	6,  // 47: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
-	9,  // 48: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
-	12, // 49: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
-	32, // 50: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
-	32, // 51: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
-	32, // 52: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
-	17, // 53: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
-	32, // 54: lake.AgentService.Dispatch:output_type -> lake.Ack
-	32, // 55: lake.AgentService.ReportLoad:output_type -> lake.Ack
-	32, // 56: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
-	23, // 57: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
-	25, // 58: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
-	32, // 59: lake.TransferService.FreeBatch:output_type -> lake.Ack
-	28, // 60: lake.TransferService.Pull:output_type -> lake.PullResponse
-	32, // 61: lake.TransferService.Publish:output_type -> lake.Ack
-	32, // 62: lake.TransferService.FreePublish:output_type -> lake.Ack
-	32, // 63: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
-	36, // 64: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
-	38, // 65: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
-	47, // [47:66] is the sub-list for method output_type
-	28, // [28:47] is the sub-list for method input_type
+	29, // 42: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
+	30, // 43: lake.TransferService.Publish:input_type -> lake.PublishRequest
+	31, // 44: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
+	34, // 45: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
+	36, // 46: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
+	38, // 47: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
+	6,  // 48: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
+	9,  // 49: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
+	12, // 50: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
+	33, // 51: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
+	33, // 52: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
+	33, // 53: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
+	17, // 54: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
+	33, // 55: lake.AgentService.Dispatch:output_type -> lake.Ack
+	33, // 56: lake.AgentService.ReportLoad:output_type -> lake.Ack
+	33, // 57: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
+	23, // 58: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
+	25, // 59: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
+	33, // 60: lake.TransferService.FreeBatch:output_type -> lake.Ack
+	28, // 61: lake.TransferService.Pull:output_type -> lake.PullResponse
+	33, // 62: lake.TransferService.FreePull:output_type -> lake.Ack
+	33, // 63: lake.TransferService.Publish:output_type -> lake.Ack
+	33, // 64: lake.TransferService.FreePublish:output_type -> lake.Ack
+	33, // 65: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
+	37, // 66: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
+	39, // 67: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
+	48, // [48:68] is the sub-list for method output_type
+	28, // [28:48] is the sub-list for method input_type
 	28, // [28:28] is the sub-list for extension type_name
 	28, // [28:28] is the sub-list for extension extendee
 	0,  // [0:28] is the sub-list for field type_name
@@ -2571,7 +2621,7 @@ func file_lake_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lake_proto_rawDesc), len(file_lake_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   35,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   5,
 		},

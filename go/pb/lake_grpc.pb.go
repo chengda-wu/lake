@@ -607,6 +607,7 @@ const (
 	TransferService_GetTransferStatus_FullMethodName = "/lake.TransferService/GetTransferStatus"
 	TransferService_FreeBatch_FullMethodName         = "/lake.TransferService/FreeBatch"
 	TransferService_Pull_FullMethodName              = "/lake.TransferService/Pull"
+	TransferService_FreePull_FullMethodName          = "/lake.TransferService/FreePull"
 	TransferService_Publish_FullMethodName           = "/lake.TransferService/Publish"
 	TransferService_FreePublish_FullMethodName       = "/lake.TransferService/FreePublish"
 )
@@ -635,6 +636,8 @@ type TransferServiceClient interface {
 	//	跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
 	//	Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
 	Pull(ctx context.Context, in *PullRequest, opts ...grpc.CallOption) (*PullResponse, error)
+	// 释放 Pull handle + 其目标段(TcpTransport arena);不调用则 handle/段按 Pull 次数泄漏。
+	FreePull(ctx context.Context, in *FreePullRequest, opts ...grpc.CallOption) (*Ack, error)
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*Ack, error)
 	// 释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
 	//
@@ -690,6 +693,16 @@ func (c *transferServiceClient) Pull(ctx context.Context, in *PullRequest, opts 
 	return out, nil
 }
 
+func (c *transferServiceClient) FreePull(ctx context.Context, in *FreePullRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, TransferService_FreePull_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *transferServiceClient) Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*Ack, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Ack)
@@ -734,6 +747,8 @@ type TransferServiceServer interface {
 	//	跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
 	//	Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
 	Pull(context.Context, *PullRequest) (*PullResponse, error)
+	// 释放 Pull handle + 其目标段(TcpTransport arena);不调用则 handle/段按 Pull 次数泄漏。
+	FreePull(context.Context, *FreePullRequest) (*Ack, error)
 	Publish(context.Context, *PublishRequest) (*Ack, error)
 	// 释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
 	//
@@ -760,6 +775,9 @@ func (UnimplementedTransferServiceServer) FreeBatch(context.Context, *FreeBatchR
 }
 func (UnimplementedTransferServiceServer) Pull(context.Context, *PullRequest) (*PullResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Pull not implemented")
+}
+func (UnimplementedTransferServiceServer) FreePull(context.Context, *FreePullRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method FreePull not implemented")
 }
 func (UnimplementedTransferServiceServer) Publish(context.Context, *PublishRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method Publish not implemented")
@@ -860,6 +878,24 @@ func _TransferService_Pull_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TransferService_FreePull_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FreePullRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransferServiceServer).FreePull(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransferService_FreePull_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransferServiceServer).FreePull(ctx, req.(*FreePullRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TransferService_Publish_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PublishRequest)
 	if err := dec(in); err != nil {
@@ -918,6 +954,10 @@ var TransferService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Pull",
 			Handler:    _TransferService_Pull_Handler,
+		},
+		{
+			MethodName: "FreePull",
+			Handler:    _TransferService_FreePull_Handler,
 		},
 		{
 			MethodName: "Publish",

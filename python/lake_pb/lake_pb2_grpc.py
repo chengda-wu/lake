@@ -648,6 +648,11 @@ class TransferServiceStub:
                 request_serializer=lake__pb2.PullRequest.SerializeToString,
                 response_deserializer=lake__pb2.PullResponse.FromString,
                 _registered_method=True)
+        self.FreePull = channel.unary_unary(
+                '/lake.TransferService/FreePull',
+                request_serializer=lake__pb2.FreePullRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
         self.Publish = channel.unary_unary(
                 '/lake.TransferService/Publish',
                 request_serializer=lake__pb2.PublishRequest.SerializeToString,
@@ -699,6 +704,13 @@ class TransferServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def FreePull(self, request, context):
+        """释放 Pull handle + 其目标段(TcpTransport arena);不调用则 handle/段按 Pull 次数泄漏。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Publish(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -735,6 +747,11 @@ def add_TransferServiceServicer_to_server(servicer, server):
                     servicer.Pull,
                     request_deserializer=lake__pb2.PullRequest.FromString,
                     response_serializer=lake__pb2.PullResponse.SerializeToString,
+            ),
+            'FreePull': grpc.unary_unary_rpc_method_handler(
+                    servicer.FreePull,
+                    request_deserializer=lake__pb2.FreePullRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
             ),
             'Publish': grpc.unary_unary_rpc_method_handler(
                     servicer.Publish,
@@ -860,6 +877,33 @@ class TransferService:
             '/lake.TransferService/Pull',
             lake__pb2.PullRequest.SerializeToString,
             lake__pb2.PullResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FreePull(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.TransferService/FreePull',
+            lake__pb2.FreePullRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

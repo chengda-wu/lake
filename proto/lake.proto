@@ -101,6 +101,8 @@ service TransferService {
   //   跨实例控制信令;worker 本机调 agent 走 FFI(边6)不进 proto。
   //   Pull 异步 + 可中断(仿 SGLang prefetch 三策略 + 预算);Publish layer-wise(仿 SGLang on_publish + page_first_direct)。
   rpc Pull(PullRequest) returns (PullResponse);
+  // 释放 Pull handle + 其目标段(TcpTransport arena);不调用则 handle/段按 Pull 次数泄漏。
+  rpc FreePull(FreePullRequest) returns (Ack);
   rpc Publish(PublishRequest) returns (Ack);
   // 释放某 request_id 的 PublishStream(seq fence + layer 累计);对齐 FreeBatch 生命周期。
   //   不调用则按请求数常驻增长(复审 should-fix)。请求结束 / barrier 后应调一次。
@@ -260,9 +262,12 @@ enum PullPolicy {
   PULL_TIMEOUT       = 2;  // 超预算即停,返回已传
 }
 message PullResponse {
-  uint64 handle        = 1;   // agent wait ready 用
+  uint64 handle        = 1;   // agent wait ready 用;用毕须 FreePull
   uint32 pulled_length = 2;   // 实际拉到的 block 数
   bool completed       = 3;
+}
+message FreePullRequest {
+  uint64 handle = 1;  // PullResponse.handle;释放会话 + dest segment
 }
 message PublishRequest {
   repeated LayerSlice slices = 1;   // 逐层增量(page_first_direct),非整块
