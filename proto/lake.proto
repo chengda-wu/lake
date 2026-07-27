@@ -267,10 +267,17 @@ message DiscardBlocksRequest {
   repeated lake.KVBlockID ids = 1;
   string reason               = 2;
 }
+// Per-block checkpoint row: meta + lineage so restore rebuilds radix, not flat roots.
+message CheckpointBlock {
+  lake.BlockMeta meta = 1;
+  // Ordered flat hashes from root through this block (inclusive).
+  // Same semantics as RegisterBlocks.prefix_hashes[:pos+1].
+  repeated bytes prefix_chain = 2;
+}
 message CheckpointSnapshot {
   uint64 seq                        = 1;
   repeated ModelDescriptor models   = 2;
-  repeated lake.BlockMeta blocks    = 3;
+  repeated CheckpointBlock blocks   = 3;
 }
 message SaveCheckpointRequest {}
 message SaveCheckpointResponse {

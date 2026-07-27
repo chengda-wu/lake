@@ -53,7 +53,7 @@ mod tests {
                 model_id: "m".into(),
                 ..Default::default()
             }],
-            blocks: vec![],
+            blocks: Vec::new(),
         };
         store.save(snap.clone()).unwrap();
         let got = store.load().unwrap().unwrap();

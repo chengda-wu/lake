@@ -96,6 +96,9 @@ pub(crate) struct Entry {
     pub(crate) seq_hash: SequenceHash,
     pub(crate) meta: BlockMeta,
     pub(crate) block_id: BlockId,
+    /// Flat hashes from root through this block (inclusive). Checkpoint export
+    /// needs this — PLH parent fragments alone cannot rebuild content hashes.
+    pub(crate) prefix_chain: Vec<Vec<u8>>,
 }
 
 /// One Dynamo-shaped registry domain per `pool_kind`.
@@ -559,67 +562,82 @@ impl Authority {
         }
 
         let lineage = lineage_from_prefix(prefix_hashes);
-        let ns = self
-            .ns_mut(&model_id, &revision)
-            .expect("checked has_namespace");
-        let bpb = ns.bytes_per_block();
-        let pool = ns.pool_mut(pool_kind);
-        let mut charged = 0i64;
+        let mut clear_orphans = Vec::new();
+        {
+            let ns = self
+                .ns_mut(&model_id, &revision)
+                .expect("checked has_namespace");
+            let bpb = ns.bytes_per_block();
+            let pool = ns.pool_mut(pool_kind);
+            let mut charged = 0i64;
 
-        for mut meta in metas {
-            let Some(id) = meta.id.clone() else { continue };
-            // Normalize unspecified → TARGET on stored identity.
-            if let Some(ref mut mid) = meta.id {
-                mid.pool_kind = pool_kind;
-            }
-            let flat = id.block_hash.clone();
-            let pos = *index_of.get(flat.as_slice()).expect("checked");
-            let seq = lineage[pos];
+            for mut meta in metas {
+                let Some(id) = meta.id.clone() else { continue };
+                // Normalize unspecified → TARGET on stored identity.
+                if let Some(ref mut mid) = meta.id {
+                    mid.pool_kind = pool_kind;
+                }
+                let flat = id.block_hash.clone();
+                let pos = *index_of.get(flat.as_slice()).expect("checked");
+                let seq = lineage[pos];
 
-            if meta.locations.is_empty() && !meta.l3_present {
-                return Err(
-                    "RegisterBlocks: need L2 location or l3_present (durable first)".into(),
+                if meta.locations.is_empty() && !meta.l3_present {
+                    return Err(
+                        "RegisterBlocks: need L2 location or l3_present (durable first)".into(),
+                    );
+                }
+                for loc in &mut meta.locations {
+                    if loc.node_id.is_empty() {
+                        loc.node_id = node_id.to_string();
+                    }
+                }
+
+                let is_new = !pool.by_flat.contains_key(&flat);
+
+                let handle = pool.registry.register_sequence_hash(seq);
+                for loc in &meta.locations {
+                    if loc.tier == Tier::L0 as i32 {
+                        handle.mark_present::<TierL0>();
+                    } else if loc.tier == Tier::L1 as i32 {
+                        handle.mark_present::<TierL1>();
+                    } else if loc.tier == Tier::L2 as i32 {
+                        handle.mark_present::<TierL2>();
+                    }
+                }
+                pool.handles.insert(seq, handle);
+
+                let block_id = if let Some(prev) = pool.by_flat.get(&flat) {
+                    prev.block_id
+                } else {
+                    pool.alloc_block_id()
+                };
+                pool.seq_to_flat.insert(seq, flat.clone());
+                let prefix_chain = prefix_hashes[..=pos].to_vec();
+                pool.by_flat.insert(
+                    flat.clone(),
+                    Entry {
+                        seq_hash: seq,
+                        meta,
+                        block_id,
+                        prefix_chain,
+                    },
                 );
-            }
-            for loc in &mut meta.locations {
-                if loc.node_id.is_empty() {
-                    loc.node_id = node_id.to_string();
+                // Successful PutEnd clears any stale orphan mark for this flat.
+                clear_orphans.push(crate::reconcile::BlockKey {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    pool_kind,
+                    flat,
+                });
+                if is_new {
+                    charged += bpb;
                 }
             }
-
-            let is_new = !pool.by_flat.contains_key(&flat);
-
-            let handle = pool.registry.register_sequence_hash(seq);
-            for loc in &meta.locations {
-                if loc.tier == Tier::L0 as i32 {
-                    handle.mark_present::<TierL0>();
-                } else if loc.tier == Tier::L1 as i32 {
-                    handle.mark_present::<TierL1>();
-                } else if loc.tier == Tier::L2 as i32 {
-                    handle.mark_present::<TierL2>();
-                }
-            }
-            pool.handles.insert(seq, handle);
-
-            let block_id = if let Some(prev) = pool.by_flat.get(&flat) {
-                prev.block_id
-            } else {
-                pool.alloc_block_id()
-            };
-            pool.seq_to_flat.insert(seq, flat.clone());
-            pool.by_flat.insert(
-                flat,
-                Entry {
-                    seq_hash: seq,
-                    meta,
-                    block_id,
-                },
-            );
-            if is_new {
-                charged += bpb;
-            }
+            ns.used_bytes = ns.used_bytes.saturating_add(charged);
         }
-        ns.used_bytes = ns.used_bytes.saturating_add(charged);
+        for k in clear_orphans {
+            self.orphans.remove(&k);
+        }
         Ok(RegisterStatus::Accepted)
     }
 

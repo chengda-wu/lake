@@ -7,7 +7,6 @@
 //! 关键差异:lake 不做会话级 PutStart TTL;writeback 泄漏靠 **节点级** reconcile
 //! (心跳过期 → 清该节点 ref + 摘 L0)。
 
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lake_proto::lake::*;
@@ -78,6 +77,7 @@ impl Authority {
     }
 
     /// Record agent-reported incomplete writes.
+    /// Skip ids already present in the location view (completed PutEnd).
     pub fn report_orphans(&mut self, reports: &[OrphanReport]) -> Result<(), String> {
         let now = self.now_ms();
         for r in reports {
@@ -88,6 +88,11 @@ impl Authority {
             };
             for id in &r.ids {
                 let key = BlockKey::from_id(id);
+                if self.block_in_view(&key) {
+                    // Already registered — stale report; do not re-arm TTL kill.
+                    self.orphans.remove(&key);
+                    continue;
+                }
                 self.orphans.insert(
                     key.clone(),
                     OrphanEntry {
@@ -99,6 +104,15 @@ impl Authority {
             }
         }
         Ok(())
+    }
+
+    fn block_in_view(&self, key: &BlockKey) -> bool {
+        let pk = resolve_pool_kind(key.pool_kind).unwrap_or(PoolKind::Target as i32);
+        self.namespaces
+            .get(&NamespaceKey::new(&key.model_id, &key.revision))
+            .and_then(|ns| ns.pools.get(&pk))
+            .map(|p| p.by_flat.contains_key(&key.flat))
+            .unwrap_or(false)
     }
 
     /// Explicit metadata discard (bytes deleted by caller after).
@@ -166,8 +180,11 @@ impl Authority {
         let mut stripped = Vec::new();
         let mut discarded_keys = Vec::new();
         let mut full_remove = Vec::new();
+        // Durable peel consumes inactive via allocate; must re-insert so later
+        // GC / hard-quota reclaim still see ref=0 L2/L3 blocks.
+        let mut reinsert = Vec::new();
 
-        for (seq, _bid) in victims {
+        for (seq, bid) in victims {
             if pool.global_refs.get(&seq).copied().unwrap_or(0) > 0 {
                 continue;
             }
@@ -215,6 +232,7 @@ impl Authority {
                 .retain(|l| l.tier != Tier::L0 as i32 && l.tier != Tier::L1 as i32);
             if durable {
                 stripped.push(id);
+                reinsert.push((seq, bid));
             } else {
                 full_remove.push((seq, flat, id));
             }
@@ -231,6 +249,16 @@ impl Authority {
                     let _ = pool.inactive.take(seq, bid);
                     ns.used_bytes = (ns.used_bytes - bpb).max(0);
                     discarded_keys.push(id);
+                }
+            }
+        }
+        if let Some(pool) = ns.pools.get_mut(&pk) {
+            for (seq, bid) in reinsert {
+                if pool.global_refs.get(&seq).copied().unwrap_or(0) > 0 {
+                    continue;
+                }
+                if !pool.inactive.has(seq) && pool.inactive.len() < pool.inactive_cap {
+                    pool.inactive.insert(seq, bid);
                 }
             }
         }
@@ -334,8 +362,13 @@ impl Authority {
         let mut discarded = Vec::new();
         for k in expired {
             let id = k.to_id();
-            // Orphans may never have been registered — just drop the mark,
-            // or discard if present in view.
+            // Defense: if PutEnd won the race and the block is in view, only
+            // drop the stale mark — never discard a completed registration.
+            if self.block_in_view(&k) {
+                self.orphans.remove(&k);
+                continue;
+            }
+            // Never registered (or already gone) — drop mark; discard if present.
             if self.discard_one(&id).unwrap_or(false) {
                 discarded.push(id);
             } else {
@@ -378,7 +411,7 @@ impl Authority {
         })
     }
 
-    /// Export authority snapshot for checkpoint.
+    /// Export authority snapshot for checkpoint (meta + prefix lineage).
     pub fn export_snapshot(&self, seq: u64) -> CheckpointSnapshot {
         let mut models = Vec::new();
         let mut blocks = Vec::new();
@@ -400,10 +433,45 @@ impl Authority {
                     continue;
                 };
                 for entry in pool.by_flat.values() {
-                    blocks.push(entry.meta.clone());
+                    let chain = if entry.prefix_chain.is_empty() {
+                        // Legacy / defensive: single-hash root if chain missing.
+                        entry
+                            .meta
+                            .id
+                            .as_ref()
+                            .map(|i| vec![i.block_hash.clone()])
+                            .unwrap_or_default()
+                    } else {
+                        entry.prefix_chain.clone()
+                    };
+                    blocks.push(CheckpointBlock {
+                        meta: Some(entry.meta.clone()),
+                        prefix_chain: chain,
+                    });
                 }
             }
         }
+        // Shorter chains first so restore can register ancestors before children.
+        blocks.sort_by(|a, b| {
+            a.prefix_chain
+                .len()
+                .cmp(&b.prefix_chain.len())
+                .then_with(|| {
+                    let ah = a
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.id.as_ref())
+                        .map(|i| i.block_hash.as_slice())
+                        .unwrap_or(&[]);
+                    let bh = b
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.id.as_ref())
+                        .map(|i| i.block_hash.as_slice())
+                        .unwrap_or(&[]);
+                    ah.cmp(bh)
+                })
+        });
         CheckpointSnapshot {
             seq,
             models,
@@ -412,6 +480,7 @@ impl Authority {
     }
 
     /// Replace authority from snapshot (metadata rebuild; bytes stay in pool).
+    /// Restores radix lineage via each block's `prefix_chain` (not flat roots).
     pub fn import_snapshot(&mut self, snap: &CheckpointSnapshot) -> Result<(), String> {
         self.namespaces.clear();
         self.orphans.clear();
@@ -422,40 +491,43 @@ impl Authority {
         for m in &snap.models {
             self.register_model(m.clone())?;
         }
-        // Group blocks by (model, rev, pool) and register with synthetic prefix chain.
-        let mut groups: HashMap<(String, String, i32), Vec<BlockMeta>> = HashMap::new();
-        for b in &snap.blocks {
-            let Some(id) = b.id.as_ref() else { continue };
+
+        let mut rows: Vec<&CheckpointBlock> = snap.blocks.iter().collect();
+        rows.sort_by_key(|b| b.prefix_chain.len());
+
+        for cb in rows {
+            let Some(meta) = cb.meta.clone() else {
+                continue;
+            };
+            let Some(id) = meta.id.as_ref() else {
+                continue;
+            };
             let pk = resolve_pool_kind(id.pool_kind).unwrap_or(PoolKind::Target as i32);
-            groups
-                .entry((id.model_id.clone(), id.revision.clone(), pk))
-                .or_default()
-                .push(b.clone());
-        }
-        for ((model, rev, pk), metas) in groups {
-            // Register one-by-one with single-hash prefix (lineage root each).
-            for meta in metas {
-                let flat = meta
-                    .id
-                    .as_ref()
-                    .map(|i| i.block_hash.clone())
-                    .unwrap_or_default();
-                let node = meta
-                    .locations
-                    .iter()
-                    .find(|l| l.tier == Tier::L2 as i32)
-                    .map(|l| l.node_id.clone())
-                    .unwrap_or_else(|| "restore".into());
-                let mut m = meta;
-                if let Some(ref mut id) = m.id {
-                    id.pool_kind = pk;
-                }
-                match self.register(&node, &[flat], vec![m]) {
-                    Ok(_) => {}
-                    Err(e) => return Err(format!("import_snapshot register: {e}")),
-                }
+            let mut chain = cb.prefix_chain.clone();
+            if chain.is_empty() {
+                // Backward-compat: treat as lineage root (single-block only safe).
+                chain = vec![id.block_hash.clone()];
             }
-            let _ = (model, rev); // keyed already
+            if !chain.iter().any(|h| h == &id.block_hash) {
+                return Err(format!(
+                    "import_snapshot: block hash not in prefix_chain (len={})",
+                    chain.len()
+                ));
+            }
+            let node = meta
+                .locations
+                .iter()
+                .find(|l| l.tier == Tier::L2 as i32)
+                .map(|l| l.node_id.clone())
+                .unwrap_or_else(|| "restore".into());
+            let mut m = meta;
+            if let Some(ref mut mid) = m.id {
+                mid.pool_kind = pk;
+            }
+            match self.register(&node, &chain, vec![m]) {
+                Ok(_) => {}
+                Err(e) => return Err(format!("import_snapshot register: {e}")),
+            }
         }
         Ok(())
     }

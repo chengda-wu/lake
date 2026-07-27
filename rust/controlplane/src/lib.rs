@@ -1457,4 +1457,99 @@ mod tests {
         let (_, hit, _) = auth2.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 1);
     }
+
+    /// Multi-block prefix lineage survives checkpoint restore (not flat-root register).
+    #[test]
+    fn p47_checkpoint_multilineage_restore() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"h0", b"h1"]);
+        auth.register(
+            "n0",
+            &full,
+            vec![meta("m", b"h0"), meta("m", b"h1")],
+        )
+        .unwrap();
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 2);
+
+        let snap = auth.export_snapshot(2);
+        assert_eq!(snap.blocks.len(), 2);
+        assert!(
+            snap.blocks.iter().any(|b| b.prefix_chain.len() == 2),
+            "child block must export full prefix_chain"
+        );
+
+        let mut auth2 = Authority::default();
+        auth2.import_snapshot(&snap).unwrap();
+        let (_, hit2, _) = auth2.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit2, 2, "restore must keep seq_hash lineage for h0→h1");
+    }
+
+    /// Durable cold peel re-inserts into inactive for later reclaim accounting.
+    #[test]
+    fn p47_cold_gc_reinserts_durable_inactive() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"c0"]);
+        auth.register("n0", &full, vec![meta_l0_l2("m", b"c0")])
+            .unwrap();
+        auth.report_ref(&delta("m", b"c0", 1)).unwrap();
+        auth.report_ref(&delta("m", b"c0", -1)).unwrap();
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+
+        let (stripped, discarded) = auth.gc_cold("m", "", PoolKind::Target as i32, 1).unwrap();
+        assert_eq!(stripped.len(), 1);
+        assert!(discarded.is_empty());
+        assert_eq!(
+            auth.inactive_len("m", "", PoolKind::Target as i32),
+            1,
+            "durable victim must return to inactive after L0/L1 peel"
+        );
+        // Second GC still sees the block (no-op peel; still reclaimable).
+        let (stripped2, _) = auth.gc_cold("m", "", PoolKind::Target as i32, 1).unwrap();
+        assert_eq!(stripped2.len(), 1);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+    }
+
+    /// Stale orphan mark must not TTL-kill a block that later registered.
+    #[test]
+    fn p47_orphan_cleared_on_register() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NOW: AtomicU64 = AtomicU64::new(1_000);
+        fn fake_now() -> u64 {
+            NOW.load(Ordering::SeqCst)
+        }
+
+        let mut auth = Authority::default();
+        auth.set_now_ms_fn(fake_now);
+        ensure_model(&mut auth, "m");
+        let id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"late".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+        auth.report_orphans(&[OrphanReport {
+            node_id: "n0".into(),
+            ids: vec![id.clone()],
+            marked_at_ms: 1_000,
+        }])
+        .unwrap();
+
+        // PutEnd wins before TTL.
+        let full = prefix(&[b"late"]);
+        auth.register("n0", &full, vec![meta("m", b"late")])
+            .unwrap();
+
+        NOW.store(1_000 + 30_000, Ordering::SeqCst);
+        let gone = auth.sweep_orphans(30_000);
+        assert!(
+            gone.is_empty(),
+            "registered block must not be discarded by stale orphan TTL"
+        );
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1);
+    }
 }
