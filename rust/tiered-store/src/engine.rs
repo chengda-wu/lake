@@ -204,20 +204,32 @@ impl LocalTierEngine {
     ///
     /// `ensure_l2_cap` 失败时**回滚本窗全部 L2→L3 demote**（含本次 hash 被挤到 L3
     /// 的情况），避免 Err 仍 `is_settled` / 污染 L3。
+    ///
+    /// 覆盖写（同 hash 已有 L2）失败时**恢复原先 L2 字节**，不无条件 `remove`
+    ///（幂等重放 / 重试安全）。新插入失败则撤掉本次 key。
     pub fn put_durable(
         &mut self,
         h: &[u8],
         bytes: &[u8],
     ) -> Result<(LocalTier, TierSideEffects), String> {
+        let prior_l2 = self.l2.get(h).cloned();
         self.l2.insert(h.to_vec(), bytes.to_vec());
         Self::touch(&mut self.l2_order, h);
         let l2_demoted_to_l3 = match self.ensure_l2_cap() {
             Ok(d) => d.into_hashes(),
             Err((demoted, e)) => {
-                // Undo every demote in this window, then drop the failed insert.
+                // Undo every demote in this window, then restore pre-call L2.
                 self.undo_l2_demotes(&demoted);
-                self.l2.remove(h);
-                self.l2_order.retain(|x| x.as_slice() != h);
+                match prior_l2 {
+                    Some(old) => {
+                        self.l2.insert(h.to_vec(), old);
+                        Self::touch(&mut self.l2_order, h);
+                    }
+                    None => {
+                        self.l2.remove(h);
+                        self.l2_order.retain(|x| x.as_slice() != h);
+                    }
+                }
                 return Err(e);
             }
         };
@@ -588,6 +600,30 @@ mod tests {
         assert_eq!(e.l2_len(), 2, "rollback y only");
         // Pre-existing pinned L2 residents untouched.
         assert!(e.is_l2_durable(b"x") && e.is_l2_durable(b"z"));
+    }
+
+    #[test]
+    fn put_durable_err_restores_prior_l2_on_overwrite() {
+        // Cap=2 with x,y pinned at capacity; force z pinned → over cap.
+        // Overwrite y fails cap; must keep OLD bytes (not wipe the key).
+        let mut e = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 2,
+        });
+        e.put_durable(b"y", b"OLD").unwrap();
+        e.put_durable(b"x", b"X").unwrap();
+        e.pin(b"x");
+        e.pin(b"y");
+        e.l2.insert(b"z".to_vec(), b"Z".to_vec());
+        e.l2_order.push_back(b"z".to_vec());
+        e.pin(b"z");
+        assert_eq!(e.l2_len(), 3);
+        let err = e.put_durable(b"y", b"NEW").unwrap_err();
+        assert!(err.contains("pinned"), "{err}");
+        assert_eq!(e.get(b"y"), Some(b"OLD".as_slice()));
+        assert!(e.is_l2_durable(b"y"));
+        assert!(!e.l3_present(b"y"));
     }
 
     #[test]
