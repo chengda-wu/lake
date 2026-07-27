@@ -1916,9 +1916,48 @@ mod tests {
         for id in &push {
             assert_ne!(auth.shard_owner(&id.block_hash).as_deref(), Some("n1"));
         }
+        // Ownership remap ≠ physical done: remove must fail while L2 remains.
+        let err = auth.remove_shard_node("n1").unwrap_err();
+        assert!(
+            err.contains("placement"),
+            "expected placement gate, got {err}"
+        );
+        // Simulate migration completion: clear n1 L2 from the location view.
+        for id in &push {
+            auth.publish_location(
+                &id.model_id,
+                &id.revision,
+                id.pool_kind,
+                &id.block_hash,
+                Tier::L2,
+                "n1",
+                false,
+            )
+            .unwrap();
+        }
         auth.remove_shard_node("n1").unwrap();
         let map2 = auth.shard_map();
         assert!(!map2.nodes.iter().any(|n| n.node_id == "n1"));
+    }
+
+    /// RemoveShardNode must not succeed solely because ownership left the ring.
+    #[test]
+    fn p49_remove_refuses_while_l2_present() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.join_shard_node("n0", 16).unwrap();
+        auth.join_shard_node("n1", 16).unwrap();
+        let mut m = meta("m", b"stuck");
+        m.locations[0].node_id = "n1".into();
+        auth.register("n1", &prefix(&[b"stuck"]), vec![m]).unwrap();
+        auth.drain_shard_node("n1").unwrap();
+        assert!(auth.remove_shard_node("n1").unwrap_err().contains("placement"));
+        // Still in shard map as draining.
+        assert!(auth
+            .shard_map()
+            .nodes
+            .iter()
+            .any(|n| n.node_id == "n1" && n.draining));
     }
 
     /// relocate_in_view updates segment/offset; PauseBackground flips flag.

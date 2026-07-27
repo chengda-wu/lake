@@ -284,10 +284,19 @@ impl Authority {
         Ok((self.shard.to_proto(), migrations, push_l2))
     }
 
+    /// Remove a drained node from the shard map.
+    ///
+    /// Ownership remap (Drain) ≠ physical migration done. Refuse while any
+    /// L0/L1/L2 location still names this node — caller must clear placements
+    /// (push L2 / migrate / Absent) first. Aligns Mooncake unmount with replica
+    /// lifecycle; lake uses CP `locations` as the completion gate.
     pub fn remove_shard_node(&mut self, node_id: &str) -> Result<(), String> {
-        // Refuse if any registered block still maps to this node (shouldn't after drain).
-        if self.shard.owner_of(b"__probe__").as_deref() == Some(node_id) {
-            // ring shouldn't contain draining node; ok
+        let stuck = self.blocks_with_placement_on(node_id);
+        if !stuck.is_empty() {
+            return Err(format!(
+                "remove: node {node_id} still has {} placement(s) in location view; complete migration/push_l2 first",
+                stuck.len()
+            ));
         }
         for (flat, _) in self.all_block_keys() {
             if self.shard.owner_of(&flat).as_deref() == Some(node_id) {
@@ -334,6 +343,19 @@ impl Authority {
     }
 
     fn blocks_with_l2_on(&self, node_id: &str) -> Vec<KvBlockId> {
+        self.blocks_with_placement_on_tier(node_id, Some(Tier::L2))
+    }
+
+    /// Blocks with any (or specific-tier) location on `node_id`.
+    fn blocks_with_placement_on(&self, node_id: &str) -> Vec<KvBlockId> {
+        self.blocks_with_placement_on_tier(node_id, None)
+    }
+
+    fn blocks_with_placement_on_tier(
+        &self,
+        node_id: &str,
+        tier: Option<Tier>,
+    ) -> Vec<KvBlockId> {
         let mut out = Vec::new();
         for nk in self.namespaces.keys() {
             let Some(ns) = self.namespaces.get(nk) else {
@@ -342,7 +364,8 @@ impl Authority {
             for (&pk, pool) in &ns.pools {
                 for (flat, entry) in &pool.by_flat {
                     let on = entry.meta.locations.iter().any(|l| {
-                        l.tier == Tier::L2 as i32 && l.node_id == node_id
+                        l.node_id == node_id
+                            && tier.map(|t| l.tier == t as i32).unwrap_or(true)
                     });
                     if on {
                         out.push(entry.meta.id.clone().unwrap_or(KvBlockId {

@@ -324,7 +324,8 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 - CP 持虚拟节点一致性哈希环(`ShardRing`);`owner_of(block_hash)` 定所有权。
 - **Join**:重算环,只返回所有权迁入新节点的 `ShardMigration`(最小迁移)。
 - **Drain**:节点标 `draining` 并退出所有权环 → 迁出计划 + `push_l2` 候选(Drain 推 L2 逻辑;字节搬运/Transfer 留 P5)。
-- 参考:Mooncake `MetadataShard` 分片键;差异是 lake 环管 KV Node 所有权而非 master 元数据 1024 桶。
+- **Remove**:仅当该节点在位置视图中已无 L0/L1/L2 placement(迁移/推 L2 完成)才可从 shard map 删除——ownership remap ≠ 物理完成。
+- 参考:Mooncake `MetadataShard` 分片键 / Unmount 与 replica 生命周期;差异是 lake 环管 KV Node 所有权,并用 CP `locations` 作 Drain 完成门闩。
 
 ## GC
 
