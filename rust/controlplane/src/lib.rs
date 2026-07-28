@@ -736,7 +736,7 @@ mod tests {
         assert_eq!(hit, 1);
         let q = auth
             .model_descriptor("m", "")
-            .and_then(|d| d.quota.clone())
+            .and_then(|d| d.quota)
             .unwrap();
         assert_eq!(q.soft_bytes, 1);
         assert_eq!(q.hard_bytes, 2);
@@ -795,8 +795,8 @@ mod tests {
         };
         let mut d_id = t_id.clone();
         d_id.pool_kind = PoolKind::Draft as i32;
-        assert_eq!(auth.locate(&[t_id.clone()]).len(), 1);
-        assert_eq!(auth.locate(&[d_id.clone()]).len(), 1);
+        assert_eq!(auth.locate(std::slice::from_ref(&t_id)).len(), 1);
+        assert_eq!(auth.locate(std::slice::from_ref(&d_id)).len(), 1);
 
         // Evict TARGET only
         auth.report_ref(&delta("m", b"shared", 1)).unwrap();

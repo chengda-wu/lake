@@ -612,6 +612,7 @@ impl Authority {
         self.completed_barriers.contains_key(request_id)
     }
 
+    #[allow(clippy::too_many_arguments)] // wire-shaped presence update; pack later if needed
     pub fn publish_location(
         &mut self,
         model_id: &str,

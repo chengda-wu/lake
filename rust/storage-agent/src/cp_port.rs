@@ -13,6 +13,7 @@ pub trait ControlPlanePort {
     fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String>;
     fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String>;
     fn request_barrier(&mut self, req: RequestBarrierRequest) -> Result<(), String>;
+    #[allow(clippy::too_many_arguments)] // mirrors Authority::publish_location
     fn publish_location(
         &mut self,
         model_id: &str,
