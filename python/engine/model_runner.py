@@ -20,7 +20,7 @@ from engine.sample.greedy import greedy_sample
 from engine.sample.grammar import apply_token_bitmask
 from engine.sample.reject import chain_reject_sample
 from runtime.req import Req
-from runtime.scheduler_output import SchedulerOutput
+from runtime.scheduler_output import ForwardMode, SamplingParams, SchedulerOutput
 
 
 @dataclass
@@ -262,37 +262,44 @@ class ModelRunner:
         output: SchedulerOutput,
         ready: ReadyHandle,
         host_reqs: Optional[Mapping[str, Req]] = None,
-        *,
-        dummy_run: bool = False,
     ) -> ModelRunnerOutput:
         if ready.step_id != output.step_id:
             raise RuntimeError(f"ready/output step mismatch: {ready.step_id} vs {output.step_id}")
 
         host = host_reqs or {}
+        try:
+            return self._execute_prepared(output, ready, host)
+        finally:
+            self._pool.done(output.step_id)
+
+    def _execute_prepared(
+        self,
+        output: SchedulerOutput,
+        ready: ReadyHandle,
+        host: Mapping[str, Req],
+    ) -> ModelRunnerOutput:
+        """执行已 ready 的一步；不负责 pool.done。
+
+        `execute_model` 和 `dummy_run` 共用本路径，区别只在前者由真实
+        pool ready 驱动并在 finally 打 done，后者使用 dummy ready 且不触池。
+        """
+
         next_tokens: Dict[str, List[int]] = {}
         next_drafts: Dict[str, List[int]] = {}
 
-        try:
-            if dummy_run:
-                return ModelRunnerOutput(
-                    step_id=output.step_id, model_backend=self.model_backend
-                )
-            batch = self.prepare_inputs(output, host)
-            _meta = self.prepare_attn(batch, ready)
-            if self.model_backend == "tiny_lm":
-                next_tokens, next_drafts = self._forward_tiny(output, host, batch)
-            else:
-                for req_id, n in output.num_scheduled_tokens.items():
-                    if n <= 0:
-                        continue
-                    req = host.get(req_id)
-                    if req is None:
-                        continue
-                    if not batch.is_prompt_phase.get(req_id, False):
-                        next_tokens[req_id] = [0]
-        finally:
-            if not dummy_run:
-                self._pool.done(output.step_id)
+        batch = self.prepare_inputs(output, host)
+        _meta = self.prepare_attn(batch, ready)
+        if self.model_backend == "tiny_lm":
+            next_tokens, next_drafts = self._forward_tiny(output, host, batch)
+        else:
+            for req_id, n in output.num_scheduled_tokens.items():
+                if n <= 0:
+                    continue
+                req = host.get(req_id)
+                if req is None:
+                    continue
+                if not batch.is_prompt_phase.get(req_id, False):
+                    next_tokens[req_id] = [0]
 
         return ModelRunnerOutput(
             step_id=output.step_id,
@@ -352,21 +359,35 @@ class ModelRunner:
     ) -> ModelRunnerOutput:
         """对齐 vLLM `GPUModelRunner._dummy_run`：造假 SchedulerOutput 走生产入口。
 
-        用于 warmup / graph capture 占位；跳过真实 add/update 与 pool.done。
+        用于 warmup / graph capture 占位；构造 dummy host req / ready，不触发
+        pool.prepare_step 或 pool.done。
         """
-        from runtime.scheduler_output import ForwardMode
-
-        num_tokens = {
-            f"dummy-{i}": tokens_per_req for i in range(num_reqs)
+        num_tokens = {f"dummy-{i}": tokens_per_req for i in range(num_reqs)}
+        host_reqs = {
+            rid: Req(
+                req_id=rid,
+                model_id=self._model_id or "dummy-model",
+                prompt_token_ids=list(range(tokens_per_req)),
+                sampling_params=SamplingParams(max_new_tokens=1),
+            )
+            for rid in num_tokens
         }
         output = SchedulerOutput(
             step_id=step_id,
-            forward_mode=ForwardMode.DECODE,
+            forward_mode=ForwardMode.EXTEND,
             num_scheduled_tokens=num_tokens,
             total_num_scheduled_tokens=sum(num_tokens.values()),
-            req_forward_modes={rid: ForwardMode.DECODE for rid in num_tokens},
-            req_num_computed_at_schedule={rid: 1 for rid in num_tokens},
+            req_forward_modes={rid: ForwardMode.EXTEND for rid in num_tokens},
+            req_num_computed_at_schedule={rid: 0 for rid in num_tokens},
             can_run_graph=True,
         )
-        ready = ReadyHandle(step_id=step_id)
-        return self.execute_model(output, ready, host_reqs={}, dummy_run=True)
+        ready = ReadyHandle(
+            step_id=step_id,
+            block_table_by_req={
+                rid: list(range((tokens_per_req + 7) // 8)) for rid in num_tokens
+            },
+            slot_mapping_by_req={
+                rid: list(range(tokens_per_req)) for rid in num_tokens
+            },
+        )
+        return self._execute_prepared(output, ready, host_reqs)

@@ -730,7 +730,7 @@ process_batch_result → finished? → on_request_finished
 
 | # | 缺口 | 说明 |
 |---|------|------|
-| D6 | **Dummy / CUDA graph capture 路径** | **C9 已选 V2**：`ModelRunner.dummy_run` 造假 `SchedulerOutput` + `execute_model(..., dummy_run=True)`（跳过 pool.done）；真 CUDA graph capture 仍后置 |
+| D6 | **Dummy / CUDA graph capture 路径** | **C9 已选“dummy SchedulerOutput”形态**：`ModelRunner.dummy_run` 造假 `SchedulerOutput` + dummy host req/ready，走内部 prepared-forward 路径但跳过 `pool.prepare_step` / `pool.done`；真 CUDA graph capture 仍后置 |
 | D10 | **FutureMap 等价物 + overlap×agent 时序** | C1：`runtime/future_map.py` host 占位；**C9**：`InMemoryAgent` 用 `_prepares_since_commit` 防止旧 commit 压新 prepare HWM（mock 级 device accounting）。生产仍需 GPU buf FutureMap + 真 free_group；`GrpcSkeletonAgent` commit 仍为 no-op。 | 对齐 SGLang `FutureMap` + free_group；vLLM V2 device accounting |
 | D7 | **Sampling / structured output 挂载点** | 状态归属已有 research;engine 内 `sample/` 与 grammar bitmask 的 step 序(相对 `execute_model`/`sample_tokens`)未钉 | 见 [`../research/sampling-params.md`](../research/sampling-params.md)、[`../research/guided-decoding.md`](../research/guided-decoding.md) |
 | D8 | **TP 扇出在 runtime 的形态** | 已定"一份调度 + 多卡执行"、单卡先行;未定 Executor/collective_rpc 等价物是否自研还是薄封装 | 对照 vLLM `MultiprocExecutor.collective_rpc` |

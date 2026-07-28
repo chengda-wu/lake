@@ -55,10 +55,13 @@ def test_dummy_run_skips_pool_done() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="mock")
-    out = runner.dummy_run(num_reqs=2, tokens_per_req=1, step_id=42)
+    out = runner.dummy_run(num_reqs=2, tokens_per_req=3, step_id=42)
     assert out.step_id == 42
     assert ag.done_calls == 0
     assert ag.prepare_calls == 0
+    assert runner._input_batch.req_ids == ["dummy-0", "dummy-1"]  # noqa: SLF001
+    assert runner._attn_meta is not None  # noqa: SLF001
+    assert runner._attn_meta.num_actual_tokens == 6  # noqa: SLF001
 
 
 def test_load_model_pins_weights_and_warmup_skips_pool() -> None:
