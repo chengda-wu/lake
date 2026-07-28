@@ -153,10 +153,12 @@ impl TransferService for TransferServer {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
             Err(TransferError::UnknownBatch(_)) => Ok(Response::new(Ack {
                 ok: false,
                 err: format!("unknown batch_id={}", req.batch_id),
+                backpressure: None,
             })),
             Err(e) => Err(e.into()),
         }
@@ -237,6 +239,7 @@ impl TransferService for TransferServer {
             return Ok(Response::new(Ack {
                 ok: false,
                 err: format!("unknown pull handle={}", req.handle),
+                backpressure: None,
             }));
         };
         // 段可能已被外部 free;仍尽量回收 arena。
@@ -244,6 +247,7 @@ impl TransferService for TransferServer {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
+                backpressure: None,
             })),
             Err(TransferError::UnknownSegment(_)) => Ok(Response::new(Ack {
                 ok: true,
@@ -251,6 +255,7 @@ impl TransferService for TransferServer {
                     "pull handle={} freed; dest segment {} already gone",
                     req.handle, h.dest_segment
                 ),
+                backpressure: None,
             })),
             Err(e) => Err(e.into()),
         }
@@ -271,6 +276,7 @@ impl TransferService for TransferServer {
                     st.last_seq,
                     publish_scope(&req.request_id)
                 ),
+                backpressure: None,
             }));
         }
         if req.seq > st.last_seq {
@@ -286,6 +292,7 @@ impl TransferService for TransferServer {
         Ok(Response::new(Ack {
             ok: true,
             err: String::new(),
+            backpressure: None,
         }))
     }
 
@@ -303,6 +310,7 @@ impl TransferService for TransferServer {
             } else {
                 format!("unknown publish request_id={scope:?}")
             },
+            backpressure: None,
         }))
     }
 }

@@ -70,6 +70,11 @@ class ControlPlaneServiceStub:
                 request_serializer=lake__pb2.LocateRequest.SerializeToString,
                 response_deserializer=lake__pb2.LocateResponse.FromString,
                 _registered_method=True)
+        self.AdmitRegisterBlocks = channel.unary_unary(
+                '/lake.ControlPlaneService/AdmitRegisterBlocks',
+                request_serializer=lake__pb2.RegisterBlocksRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
         self.RegisterBlocks = channel.unary_unary(
                 '/lake.ControlPlaneService/RegisterBlocks',
                 request_serializer=lake__pb2.RegisterBlocksRequest.SerializeToString,
@@ -99,6 +104,16 @@ class ControlPlaneServiceStub:
                 '/lake.ControlPlaneService/DeregisterModel',
                 request_serializer=lake__pb2.DeregisterModelRequest.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
+        self.SetModelQuota = channel.unary_unary(
+                '/lake.ControlPlaneService/SetModelQuota',
+                request_serializer=lake__pb2.SetModelQuotaRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
+        self.GetModelQuota = channel.unary_unary(
+                '/lake.ControlPlaneService/GetModelQuota',
+                request_serializer=lake__pb2.GetModelQuotaRequest.SerializeToString,
+                response_deserializer=lake__pb2.GetModelQuotaResponse.FromString,
                 _registered_method=True)
 
 
@@ -153,12 +168,24 @@ class ControlPlaneServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AdmitRegisterBlocks(self, request, context):
+        """P4.6:配额写前准入(方案 A)。纯检查、不 reserve、不改位置视图。
+        对齐 Mooncake PutStart 的「写前问 Master」公开边界;无 reserved 占座(Reserve* → 多进程/P4.7)。
+        agent 须在 flush durable **之前**调用;触硬 → Ack.ok=false + backpressure。
+        请求体复用 RegisterBlocksRequest(只读 model/revision/pool_kind/block hashes 计费;
+        locations/l3_present 可空)。与进程内 ControlPlanePort::admit_register_blocks 同语义。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def RegisterBlocks(self, request, context):
         """满块注册:**耐久性由 agent 本地完成**(写 L2 durable)后,只调一次本 RPC = PutEnd。
-        PutStart 不进控制面(agent 本地记账即可),防半块被读。仿 Mooncake PutEnd 的控制面侧。
-        release 一致,写控制面内存,不进 etcd。
+        **可见性** PutStart(半块本地记账、防脏读)仍不进控制面; **配额** 写前走 AdmitRegisterBlocks。
+        仿 Mooncake PutEnd 的控制面侧。release 一致,写控制面内存,不进 etcd。
         与 Publish 的区别:Publish(可多次、逐层 slice)只更新位置视图;RegisterBlocks(满块 + L2 durable)才进 radix + 置 l3_present/L2。
         P4.2:须带 prefix_hashes 全链以便控制面建 PositionalLineageHash;`blocks` 可为 miss 后缀。
+        P4.6:触硬 → ok=false + backpressure;建议先 AdmitRegisterBlocks 再 flush。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -194,13 +221,27 @@ class ControlPlaneServiceServicer:
     def RegisterModel(self, request, context):
         """P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
         下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
-        配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def DeregisterModel(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetModelQuota(self, request, context):
+        """P4.6:按模型软/硬配额 + 借用 + 背压(F11)。配额挂 (model_id, revision) 命名空间。
+        触硬配额 → Ack.backpressure 上报;请求级 shedding 仍归 gateway,池内不拒请求。
+        写路径:AdmitRegisterBlocks(写前) / RegisterBlocks(写后确认) 均可带 backpressure。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetModelQuota(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -223,6 +264,11 @@ def add_ControlPlaneServiceServicer_to_server(servicer, server):
                     servicer.Locate,
                     request_deserializer=lake__pb2.LocateRequest.FromString,
                     response_serializer=lake__pb2.LocateResponse.SerializeToString,
+            ),
+            'AdmitRegisterBlocks': grpc.unary_unary_rpc_method_handler(
+                    servicer.AdmitRegisterBlocks,
+                    request_deserializer=lake__pb2.RegisterBlocksRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
             ),
             'RegisterBlocks': grpc.unary_unary_rpc_method_handler(
                     servicer.RegisterBlocks,
@@ -253,6 +299,16 @@ def add_ControlPlaneServiceServicer_to_server(servicer, server):
                     servicer.DeregisterModel,
                     request_deserializer=lake__pb2.DeregisterModelRequest.FromString,
                     response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'SetModelQuota': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetModelQuota,
+                    request_deserializer=lake__pb2.SetModelQuotaRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'GetModelQuota': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetModelQuota,
+                    request_deserializer=lake__pb2.GetModelQuotaRequest.FromString,
+                    response_serializer=lake__pb2.GetModelQuotaResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -357,6 +413,33 @@ class ControlPlaneService:
             '/lake.ControlPlaneService/Locate',
             lake__pb2.LocateRequest.SerializeToString,
             lake__pb2.LocateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AdmitRegisterBlocks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/AdmitRegisterBlocks',
+            lake__pb2.RegisterBlocksRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,
@@ -519,6 +602,60 @@ class ControlPlaneService:
             '/lake.ControlPlaneService/DeregisterModel',
             lake__pb2.DeregisterModelRequest.SerializeToString,
             lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetModelQuota(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/SetModelQuota',
+            lake__pb2.SetModelQuotaRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetModelQuota(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/GetModelQuota',
+            lake__pb2.GetModelQuotaRequest.SerializeToString,
+            lake__pb2.GetModelQuotaResponse.FromString,
             options,
             channel_credentials,
             insecure,
