@@ -97,7 +97,7 @@ def test_partial_hit_prompt_residual_has_read_set() -> None:
     assert any(io.token_start == 8 for io in out.write_set)
 
 
-def test_forward_exception_still_calls_done() -> None:
+def test_forward_exception_does_not_call_done() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="tiny_lm")
@@ -124,7 +124,8 @@ def test_forward_exception_still_calls_done() -> None:
         raise AssertionError("expected boom")
     except RuntimeError as e:
         assert "boom" in str(e)
-    assert ag._ready_step is None  # noqa: SLF001
+    assert ag.done_calls == 0
+    assert ag._ready_step == 1  # noqa: SLF001
     out2 = SchedulerOutput(
         step_id=2,
         forward_mode=ForwardMode.EXTEND,
@@ -133,9 +134,11 @@ def test_forward_exception_still_calls_done() -> None:
         write_set=[ReqIoSet(req_id="r1", token_start=0, token_end=4)],
         req_num_computed_at_schedule={"r1": 0},
     )
-    ready2 = pool.prepare_step(out2, {"r1": req})
-    assert ready2.step_id == 2
-    pool.done(2)
+    try:
+        pool.prepare_step(out2, {"r1": req})
+        raise AssertionError("expected prepare to wait for abort/failure cleanup")
+    except Exception as e:
+        assert "prepare while ready=1" in str(e)
 
 
 if __name__ == "__main__":
