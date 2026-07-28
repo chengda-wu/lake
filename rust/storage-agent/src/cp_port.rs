@@ -45,9 +45,14 @@ pub struct AuthorityPort<'a> {
     pub auth: &'a mut Authority,
 }
 
-fn admit_keys_from_request(
-    req: &RegisterBlocksRequest,
-) -> Result<(String, String, i32, Vec<Vec<u8>>), String> {
+struct AdmitKeys {
+    model_id: String,
+    revision: String,
+    pool_kind: i32,
+    hashes: Vec<Vec<u8>>,
+}
+
+fn admit_keys_from_request(req: &RegisterBlocksRequest) -> Result<AdmitKeys, String> {
     let model_id = req
         .blocks
         .iter()
@@ -71,17 +76,24 @@ fn admit_keys_from_request(
     if hashes.is_empty() {
         return Err("AdmitRegister: no block hashes".into());
     }
-    Ok((model_id, revision, pool_kind, hashes))
+    Ok(AdmitKeys {
+        model_id,
+        revision,
+        pool_kind,
+        hashes,
+    })
 }
 
 impl ControlPlanePort for AuthorityPort<'_> {
     fn admit_register_blocks(&mut self, req: &RegisterBlocksRequest) -> Result<(), String> {
         use lake_controlplane::RegisterStatus;
-        let (model_id, revision, pool_kind, hashes) = admit_keys_from_request(req)?;
-        match self
-            .auth
-            .preflight_register(&model_id, &revision, pool_kind, &hashes)?
-        {
+        let keys = admit_keys_from_request(req)?;
+        match self.auth.preflight_register(
+            &keys.model_id,
+            &keys.revision,
+            keys.pool_kind,
+            &keys.hashes,
+        )? {
             RegisterStatus::Accepted => Ok(()),
             RegisterStatus::RejectedHardQuota(bp) => Err(format!(
                 "AdmitRegister: hard quota exceeded (deficit={})",

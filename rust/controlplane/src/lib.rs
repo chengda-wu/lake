@@ -28,9 +28,14 @@ pub use lake_proto::lake::*;
 use control_plane_service_server::ControlPlaneService;
 
 /// Keys needed for [`Authority::preflight_register`] / `AdmitRegisterBlocks` RPC.
-fn admit_keys_from_request(
-    req: &RegisterBlocksRequest,
-) -> Result<(String, String, i32, Vec<Vec<u8>>), String> {
+struct AdmitKeys {
+    model_id: String,
+    revision: String,
+    pool_kind: i32,
+    hashes: Vec<Vec<u8>>,
+}
+
+fn admit_keys_from_request(req: &RegisterBlocksRequest) -> Result<AdmitKeys, String> {
     let model_id = req
         .blocks
         .iter()
@@ -54,7 +59,12 @@ fn admit_keys_from_request(
     if hashes.is_empty() {
         return Err("AdmitRegisterBlocks: no block hashes".into());
     }
-    Ok((model_id, revision, pool_kind, hashes))
+    Ok(AdmitKeys {
+        model_id,
+        revision,
+        pool_kind,
+        hashes,
+    })
 }
 
 #[derive(Clone, Default)]
@@ -111,7 +121,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RegisterBlocksRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let (model_id, revision, pool_kind, hashes) = match admit_keys_from_request(&req) {
+        let keys = match admit_keys_from_request(&req) {
             Ok(v) => v,
             Err(e) => {
                 return Ok(Response::new(Ack {
@@ -122,7 +132,8 @@ impl ControlPlaneService for ControlPlane {
             }
         };
         let auth = self.inner.lock().unwrap();
-        match auth.preflight_register(&model_id, &revision, pool_kind, &hashes) {
+        match auth.preflight_register(&keys.model_id, &keys.revision, keys.pool_kind, &keys.hashes)
+        {
             Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
                 ok: true,
                 err: String::new(),
