@@ -255,12 +255,12 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
   - [x] **C8**：InputBatch + AttentionMetadata（D4）+ TinyLM 批路径
   - [x] **C9**：D10 overlap×agent + D6 dummy_run
   - [x] **C10**：Warm/容量信号骨架（生命周期 + CapacitySignal；Router/真 pin 联调后置）
-- [~] **C11–C15** 计算模块本轮开发（`cal-0727`，vLLM 对比后补齐生产形状接口）：详见 [`architecture/compute-layer.md`](architecture/compute-layer.md)「C11–C15 本轮开发计划」
+- [x] **C11–C15** 计算模块本轮开发（`cal-0727`，vLLM 对比后补齐生产形状接口）：详见 [`architecture/compute-layer.md`](architecture/compute-layer.md)「C11–C15 本轮开发计划」
   - [x] **C11**：Runner 静态 buffer + lake AttentionMetadata v2（Python 固定 buffer 镜像 + agent block table / slot mapping；真 device tensor 后置）
   - [x] **C12**：真实模型加载骨架（`load_model` / `warmup` / 权重 pin 回调；Worker Warm 阶段执行，容量信号带模型状态）
   - [x] **C13**：Sampling / structured output 挂载点（`GrammarOutput` / bitmask 占位 + spec×grammar overlap 例外）
   - [x] **C14**：`pool_iface` 生产会计契约（`commit_write_extent`、partial hit、prepare/done 错误路径）
-  - [ ] **C15**：D8 runtime executor 草案（一份 `SchedulerOutput` 扇出接口；TP/PP 真通信后置）
+  - [x] **C15**：D8 runtime executor 草案（一份 `SchedulerOutput` 扇出接口；TP/PP 真通信后置）
 - [ ] 同步工程基建：CI 以 `engine`/`runtime`/`kernels` 为主（旧三包仅兼容 import）
 - [ ] Prefill→Decode 的 KV 迁移流水线（计算与传输重叠）
 - [ ] 故障注入：杀 Decode 节点 → 从 KV Pool 续推
