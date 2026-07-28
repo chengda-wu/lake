@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelLoadInfo, ModelRunner
-from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
+from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan
 from runtime.req import Req

@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
-from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
+from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 
 
 class WorkerRole(str, Enum):

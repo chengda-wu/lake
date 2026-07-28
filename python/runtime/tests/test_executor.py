@@ -16,6 +16,7 @@ from runtime.worker_engine import WorkerEngine
 class FakePool:
     def __init__(self) -> None:
         self.finished: List[str] = []
+        self.done_steps: List[int] = []
 
     def prepare_step(self, output: SchedulerOutput, reqs: Dict) -> ReadyHandle:
         stats = {}
@@ -29,7 +30,7 @@ class FakePool:
         return ReadyHandle(step_id=output.step_id, stats_by_req=stats)
 
     def done(self, step_id: int) -> None:
-        return None
+        self.done_steps.append(step_id)
 
     def on_request_finished(self, req) -> None:
         self.finished.append(req.req_id)
@@ -79,6 +80,7 @@ def test_node_scheduler_uses_executor() -> None:
     assert len(executor.inputs) == 1
     assert executor.inputs[0].output.step_id == output.step_id
     assert "r1" in executor.inputs[0].host_reqs
+    assert pool.done_steps == [output.step_id]
 
 
 def test_worker_engine_wires_executor() -> None:

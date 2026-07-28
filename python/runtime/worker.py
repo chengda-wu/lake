@@ -16,7 +16,7 @@ from typing import Optional
 import grpc
 
 from engine.model_runner import ModelRunner
-from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
+from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface, chain_block_hashes, mock_kv_bytes
 from engine.pool_types import PoolError, PoolErrorCode
 from lake_pb import lake_pb2, lake_pb2_grpc

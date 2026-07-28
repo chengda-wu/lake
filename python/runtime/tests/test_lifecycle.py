@@ -6,7 +6,7 @@ import threading
 import time
 
 from engine.model_runner import ModelRunner
-from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
+from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from runtime.lifecycle import WorkerLifecycle, WorkerState
 from runtime.node_scheduler import build_req_from_generate
 from runtime.role import RoleConfig

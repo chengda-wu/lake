@@ -49,6 +49,9 @@ jobs:
       - name: Python grpc deps
         run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0"
       - name: start stack
+        env:
+          # P3 smoke 只验证三语言骨架联通性；不安装 Torch，避免触发 Qwen3 backend。
+          LAKE_MODEL_BACKEND: mock
         run: |
           ./deploy/run-local.sh &
           echo $! > /tmp/lake-stack.pid

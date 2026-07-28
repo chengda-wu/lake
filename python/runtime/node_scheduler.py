@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
-from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
+from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from runtime.executor import ExecutorInput, RuntimeExecutor, SingleProcessExecutor
@@ -259,6 +259,7 @@ class NodeScheduler:
         runner_out = self._executor.execute_model(
             ExecutorInput(output=output, ready=ready, host_reqs=self._reqs)
         )
+        self._pool.done(output.step_id)
         self._result_queue.append(_BatchResult(output=output, runner_out=runner_out, ready=ready))
 
     def _respect_effective_sets(self, output: SchedulerOutput, ready: ReadyHandle) -> SchedulerOutput:
