@@ -1081,6 +1081,26 @@ impl Authority {
         node_id: &str,
         present: bool,
     ) -> Result<(), String> {
+        // Legacy default placement (pre-P4.8 callers).
+        self.publish_location_at(
+            model_id, revision, pool_kind, flat, tier, node_id, 1, 0, present,
+        )
+    }
+
+    /// Publish presence with explicit segment/offset (P4.8).
+    #[allow(clippy::too_many_arguments)] // wire-shaped presence + placement coords
+    pub fn publish_location_at(
+        &mut self,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+        flat: &[u8],
+        tier: Tier,
+        node_id: &str,
+        segment_id: u64,
+        offset: u64,
+        present: bool,
+    ) -> Result<(), String> {
         let pk = resolve_pool_kind(pool_kind)?;
         let ns = self
             .ns_mut(model_id, revision)
@@ -1109,14 +1129,23 @@ impl Authority {
             entry.meta.locations.push(Location {
                 tier: tier_i,
                 node_id: node_id.to_string(),
-                segment_id: 1,
-                offset: 0,
+                segment_id,
+                offset,
             });
             match tier {
                 Tier::L0 => handle.mark_present::<TierL0>(),
                 Tier::L1 => handle.mark_present::<TierL1>(),
                 Tier::L2 => handle.mark_present::<TierL2>(),
                 _ => {}
+            }
+        } else if present && had {
+            // Refresh coordinates (defrag Moved / re-publish).
+            for loc in &mut entry.meta.locations {
+                if loc.tier == tier_i && loc.node_id == node_id {
+                    loc.segment_id = segment_id;
+                    loc.offset = offset;
+                    break;
+                }
             }
         } else if !present && had {
             entry

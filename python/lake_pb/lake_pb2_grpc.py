@@ -135,6 +135,16 @@ class ControlPlaneServiceStub:
                 request_serializer=lake__pb2.RestoreCheckpointRequest.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
                 _registered_method=True)
+        self.TriggerDefrag = channel.unary_unary(
+                '/lake.ControlPlaneService/TriggerDefrag',
+                request_serializer=lake__pb2.TriggerDefragRequest.SerializeToString,
+                response_deserializer=lake__pb2.TriggerDefragResponse.FromString,
+                _registered_method=True)
+        self.PauseBackground = channel.unary_unary(
+                '/lake.ControlPlaneService/PauseBackground',
+                request_serializer=lake__pb2.PauseBackgroundRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServiceServicer:
@@ -298,6 +308,21 @@ class ControlPlaneServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def TriggerDefrag(self, request, context):
+        """P4.8:碎片整理(F11)。逻辑共置 + 物理压实计划;执行走 agent TierPipeline + BandwidthPool。
+        返回 planned moves;字节搬迁/段压实在存储层,CP 只出计划并在 Moved 后更新 Location。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PauseBackground(self, request, context):
+        """暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -379,6 +404,16 @@ def add_ControlPlaneServiceServicer_to_server(servicer, server):
             'RestoreCheckpoint': grpc.unary_unary_rpc_method_handler(
                     servicer.RestoreCheckpoint,
                     request_deserializer=lake__pb2.RestoreCheckpointRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'TriggerDefrag': grpc.unary_unary_rpc_method_handler(
+                    servicer.TriggerDefrag,
+                    request_deserializer=lake__pb2.TriggerDefragRequest.FromString,
+                    response_serializer=lake__pb2.TriggerDefragResponse.SerializeToString,
+            ),
+            'PauseBackground': grpc.unary_unary_rpc_method_handler(
+                    servicer.PauseBackground,
+                    request_deserializer=lake__pb2.PauseBackgroundRequest.FromString,
                     response_serializer=lake__pb2.Ack.SerializeToString,
             ),
     }
@@ -834,6 +869,60 @@ class ControlPlaneService:
             target,
             '/lake.ControlPlaneService/RestoreCheckpoint',
             lake__pb2.RestoreCheckpointRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TriggerDefrag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/TriggerDefrag',
+            lake__pb2.TriggerDefragRequest.SerializeToString,
+            lake__pb2.TriggerDefragResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PauseBackground(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/PauseBackground',
+            lake__pb2.PauseBackgroundRequest.SerializeToString,
             lake__pb2.Ack.FromString,
             options,
             channel_credentials,

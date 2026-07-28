@@ -337,6 +337,15 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 - **物理碎片**:NVMe/RAM 空闲页零散 → 写入放大、分配失败。整理:后台压实合并空闲页。
 - 节流:消耗带宽与 CPU,须节流并与低峰重叠,可暂停可恢复;目标开销 < 总带宽 X%(P7 校准)。
 
+**P4.8 原型**(单进程 mock;真 NVMe/跨机 → P5):
+
+- Proto:`TriggerDefrag` / `PauseBackground`(挂 `ControlPlaneService`)。
+- **计划在 CP**:读 radix `prefix_chain` + Location → `DefragMove` 列表(`COMPACT` / `COLOCATE` / `BOTH`);**不**指挥调度器(方案 Z)。**COLOCATE 仅同 node**(跨节点需 Transfer + source/target → P5);打包目标须与 CP 占用视图对齐(空闲或已是目标块自身),避免生成 `place_at: slot occupied` 的死计划。
+- **执行在 tiered-store**:`SegmentArena`(L2 段式布局)+ `TierPipeline` 动作 `CompactSegment` / `CoLocateMove`;与 promote/demote/GC 共享 [`BandwidthPool`](../../rust/tiered-store/src/bandwidth.rs)(`PauseBackground` → pause/resume)。
+- **PutEnd 同步**:`register_request` 从 `LocalTierEngine::l2_placement` 填 `segment_id`/`offset`,CP 初始视图与 arena 一致(禁止固定 `1,0` 占位叠块)。
+- 完成后发 `LocationEvent::Moved` → CP `relocate_in_view` 更新 `segment_id`/`offset`。
+- **冻结**:`pin` / `global_refs>0` 的块跳过(同 demote)。自动触发阈值(扇出/碎片率)留开放点/P7。
+
 ## 故障恢复
 
 **持久语义分层**(层=介质,持久性分级):

@@ -35,6 +35,8 @@ const (
 	ControlPlaneService_DiscardBlocks_FullMethodName       = "/lake.ControlPlaneService/DiscardBlocks"
 	ControlPlaneService_SaveCheckpoint_FullMethodName      = "/lake.ControlPlaneService/SaveCheckpoint"
 	ControlPlaneService_RestoreCheckpoint_FullMethodName   = "/lake.ControlPlaneService/RestoreCheckpoint"
+	ControlPlaneService_TriggerDefrag_FullMethodName       = "/lake.ControlPlaneService/TriggerDefrag"
+	ControlPlaneService_PauseBackground_FullMethodName     = "/lake.ControlPlaneService/PauseBackground"
 )
 
 // ControlPlaneServiceClient is the client API for ControlPlaneService service.
@@ -111,6 +113,12 @@ type ControlPlaneServiceClient interface {
 	// 降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
 	SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*SaveCheckpointResponse, error)
 	RestoreCheckpoint(ctx context.Context, in *RestoreCheckpointRequest, opts ...grpc.CallOption) (*Ack, error)
+	// P4.8:碎片整理(F11)。逻辑共置 + 物理压实计划;执行走 agent TierPipeline + BandwidthPool。
+	//
+	//	返回 planned moves;字节搬迁/段压实在存储层,CP 只出计划并在 Moved 后更新 Location。
+	TriggerDefrag(ctx context.Context, in *TriggerDefragRequest, opts ...grpc.CallOption) (*TriggerDefragResponse, error)
+	// 暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
+	PauseBackground(ctx context.Context, in *PauseBackgroundRequest, opts ...grpc.CallOption) (*Ack, error)
 }
 
 type controlPlaneServiceClient struct {
@@ -296,6 +304,26 @@ func (c *controlPlaneServiceClient) RestoreCheckpoint(ctx context.Context, in *R
 	return out, nil
 }
 
+func (c *controlPlaneServiceClient) TriggerDefrag(ctx context.Context, in *TriggerDefragRequest, opts ...grpc.CallOption) (*TriggerDefragResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TriggerDefragResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_TriggerDefrag_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) PauseBackground(ctx context.Context, in *PauseBackgroundRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_PauseBackground_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServiceServer is the server API for ControlPlaneService service.
 // All implementations must embed UnimplementedControlPlaneServiceServer
 // for forward compatibility.
@@ -370,6 +398,12 @@ type ControlPlaneServiceServer interface {
 	// 降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
 	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error)
 	RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*Ack, error)
+	// P4.8:碎片整理(F11)。逻辑共置 + 物理压实计划;执行走 agent TierPipeline + BandwidthPool。
+	//
+	//	返回 planned moves;字节搬迁/段压实在存储层,CP 只出计划并在 Moved 后更新 Location。
+	TriggerDefrag(context.Context, *TriggerDefragRequest) (*TriggerDefragResponse, error)
+	// 暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
+	PauseBackground(context.Context, *PauseBackgroundRequest) (*Ack, error)
 	mustEmbedUnimplementedControlPlaneServiceServer()
 }
 
@@ -427,6 +461,12 @@ func (UnimplementedControlPlaneServiceServer) SaveCheckpoint(context.Context, *S
 }
 func (UnimplementedControlPlaneServiceServer) RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method RestoreCheckpoint not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) TriggerDefrag(context.Context, *TriggerDefragRequest) (*TriggerDefragResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerDefrag not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) PauseBackground(context.Context, *PauseBackgroundRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method PauseBackground not implemented")
 }
 func (UnimplementedControlPlaneServiceServer) mustEmbedUnimplementedControlPlaneServiceServer() {}
 func (UnimplementedControlPlaneServiceServer) testEmbeddedByValue()                             {}
@@ -708,6 +748,42 @@ func _ControlPlaneService_RestoreCheckpoint_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlaneService_TriggerDefrag_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerDefragRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).TriggerDefrag(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_TriggerDefrag_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).TriggerDefrag(ctx, req.(*TriggerDefragRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_PauseBackground_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PauseBackgroundRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).PauseBackground(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_PauseBackground_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).PauseBackground(ctx, req.(*PauseBackgroundRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlaneService_ServiceDesc is the grpc.ServiceDesc for ControlPlaneService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -766,6 +842,14 @@ var ControlPlaneService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestoreCheckpoint",
 			Handler:    _ControlPlaneService_RestoreCheckpoint_Handler,
+		},
+		{
+			MethodName: "TriggerDefrag",
+			Handler:    _ControlPlaneService_TriggerDefrag_Handler,
+		},
+		{
+			MethodName: "PauseBackground",
+			Handler:    _ControlPlaneService_PauseBackground_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

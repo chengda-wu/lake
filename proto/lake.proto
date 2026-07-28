@@ -95,6 +95,12 @@ service ControlPlaneService {
   // 降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
   rpc RestoreCheckpoint(RestoreCheckpointRequest) returns (Ack);
+
+  // P4.8:碎片整理(F11)。逻辑共置 + 物理压实计划;执行走 agent TierPipeline + BandwidthPool。
+  //   返回 planned moves;字节搬迁/段压实在存储层,CP 只出计划并在 Moved 后更新 Location。
+  rpc TriggerDefrag(TriggerDefragRequest) returns (TriggerDefragResponse);
+  // 暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
+  rpc PauseBackground(PauseBackgroundRequest) returns (Ack);
 }
 
 // =============================================================================
@@ -288,6 +294,42 @@ message SaveCheckpointResponse {
 message RestoreCheckpointRequest {
   // 空 → 从 CheckpointStore.load();非空 → 用请求内快照(单测注入)。
   CheckpointSnapshot snapshot = 1;
+}
+
+// --- P4.8 碎片整理 ---
+enum DefragMode {
+  DEFRAG_MODE_UNSPECIFIED = 0;
+  COMPACT                 = 1;  // 段内压实(回收空洞)
+  COLOCATE                = 2;  // 同前缀链物理邻近
+  BOTH                    = 3;
+}
+message DefragMove {
+  lake.KVBlockID id   = 1;
+  string node_id      = 2;
+  uint64 from_segment = 3;
+  uint64 from_offset  = 4;
+  uint64 to_segment   = 5;
+  uint64 to_offset    = 6;
+  // true → 整段 CompactSegment(id 可空;只看 segment_id/node_id)
+  bool compact_segment = 7;
+  uint64 segment_id    = 8;
+}
+message TriggerDefragRequest {
+  string model_id         = 1;
+  string revision         = 2;
+  lake.PoolKind pool_kind = 3;  // 缺省 TARGET
+  DefragMode mode         = 4;  // 缺省 BOTH
+  // 段内 slot 字节数(与 SegmentArena 对齐);0 → 默认 4096(P4 mock)
+  uint64 slot_bytes       = 5;
+}
+message TriggerDefragResponse {
+  repeated DefragMove moves = 1;
+  uint32 planned_moves      = 2;
+  bool ok                   = 3;
+  string err                = 4;
+}
+message PauseBackgroundRequest {
+  bool paused = 1;  // true=暂停后台;false=恢复
 }
 
 message LookupPrefixResponse {
