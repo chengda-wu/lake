@@ -1,4 +1,4 @@
-"""薄 ModelRunner：consume ready → prepare → forward → done → sample。
+"""薄 ModelRunner：consume ready → prepare → forward → sample。
 
 对齐 vLLM `GPUModelRunner.execute_model`：统一入口，按本步 token 几何执行
 （`num_scheduled_tokens` / `req_num_computed_at_schedule`），不按 SGLang 分相状态机。
@@ -8,18 +8,16 @@ C8：`prepare_inputs` / `prepare_attn` / `sample_tokens` 拆步；残差 query �
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple
 
 from engine.attn.metadata import AttentionMetadata, build_attn_metadata
 from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.input_batch import InputBatch, InputBuffers
-from engine.models.loader import DummyModelLoader
-from engine.models.qwen3 import (
+from engine.models.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
     QWEN3_0_6B_MODEL_ID,
     QWEN3_DUMMY_WEIGHT_NAMES,
     Qwen3Config,
-    Qwen3ForCausalLM,
 )
 from engine.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
@@ -29,6 +27,9 @@ from engine.sample.grammar import apply_token_bitmask
 from engine.sample.reject import chain_reject_sample
 from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, SamplingParams, SchedulerOutput
+
+if TYPE_CHECKING:
+    from engine.models.qwen3 import Qwen3ForCausalLM
 
 
 @dataclass
@@ -76,7 +77,7 @@ class ModelRunner:
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
         self._qwen3_config = qwen3_config
-        self._qwen3: Optional[Qwen3ForCausalLM] = None
+        self._qwen3: Optional["Qwen3ForCausalLM"] = None
         self._tiny: Optional[TinyLM] = tiny_lm
         self.enable_drafter = enable_drafter
         self._num_draft_tokens = num_draft_tokens
@@ -115,6 +116,8 @@ class ModelRunner:
 
     def _ensure_backend_initialized(self) -> None:
         if self.model_backend == "qwen3" and self._qwen3 is None:
+            from engine.models.qwen3 import Qwen3ForCausalLM
+
             self._qwen3 = Qwen3ForCausalLM(self._qwen3_config)
         if self.model_backend == "tiny_lm" and self._tiny is None:
             self._tiny = TinyLM()
@@ -148,6 +151,9 @@ class ModelRunner:
         self._model_loaded = True
         self._model_warmed = False
         if self.model_backend == "qwen3":
+            from engine.models.loader import DummyModelLoader
+            from engine.models.qwen3 import Qwen3ForCausalLM
+
             self._qwen3 = DummyModelLoader(
                 Qwen3ForCausalLM,
                 self._qwen3_config,
@@ -295,9 +301,7 @@ class ModelRunner:
             raise RuntimeError(f"ready/output step mismatch: {ready.step_id} vs {output.step_id}")
 
         host = host_reqs or {}
-        out = self._execute_prepared(output, ready, host)
-        self._pool.done(output.step_id)
-        return out
+        return self._execute_prepared(output, ready, host)
 
     def _execute_prepared(
         self,
@@ -307,8 +311,8 @@ class ModelRunner:
     ) -> ModelRunnerOutput:
         """执行已 ready 的一步；不负责 pool.done。
 
-        `execute_model` 和 `dummy_run` 共用本路径，区别只在前者由真实
-        pool ready 驱动并在成功后打 done，后者使用 dummy ready 且不触池。
+        `execute_model` 和 `dummy_run` 共用本路径；真实 ready/done 生命周期
+        由 NodeScheduler/RuntimeExecutor 边界统一收口，runner 不 ack pool。
         """
 
         next_tokens: Dict[str, List[int]] = {}
@@ -319,7 +323,7 @@ class ModelRunner:
         if self.model_backend == "tiny_lm":
             next_tokens, next_drafts = self._forward_tiny(output, host, batch)
         elif self.model_backend == "qwen3":
-            next_tokens = self._forward_qwen3(host, batch)
+            next_tokens, next_drafts = self._forward_qwen3(output, host, batch)
         else:
             for req_id, n in output.num_scheduled_tokens.items():
                 if n <= 0:
@@ -339,19 +343,27 @@ class ModelRunner:
 
     def _forward_qwen3(
         self,
+        output: SchedulerOutput,
         host_reqs: Mapping[str, Req],
         batch: InputBatch,
-    ) -> Dict[str, List[int]]:
+    ) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
         assert self._qwen3 is not None
-        out: Dict[str, List[int]] = {}
+        last_logits: Dict[str, List[float]] = {}
         for req_id in batch.req_ids:
             if batch.is_prompt_phase.get(req_id, False):
                 continue
             req = host_reqs.get(req_id)
             if req is None:
                 continue
-            out[req_id] = [self._qwen3_dummy_token(req.all_token_ids)]
-        return out
+            last_logits[req_id] = self._qwen3_dummy_logits(req.all_token_ids)
+        return self.sample_tokens(output, host_reqs, last_logits)
+
+    def _qwen3_dummy_logits(self, context: List[int]) -> List[float]:
+        assert self._qwen3 is not None
+        cfg = self._qwen3.config
+        logits = [0.0] * cfg.vocab_size
+        logits[self._qwen3_dummy_token(context)] = 1.0
+        return logits
 
     def _qwen3_dummy_token(self, context: List[int]) -> int:
         assert self._qwen3 is not None
