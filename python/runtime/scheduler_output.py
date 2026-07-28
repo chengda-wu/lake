@@ -32,6 +32,7 @@ class ForwardMode(str, Enum):
 class SamplingParams:
     max_new_tokens: int = 16
     temperature: float = 1.0
+    structured_output: Optional[str] = None
     # 首版仅占位；完整对照见 docs/research/sampling-params.md
 
 
@@ -63,6 +64,22 @@ class ReqIoSet:
 
 
 @dataclass
+class GrammarOutput:
+    """C13：structured output 的采样侧占位。
+
+    FSM / accept token 仍属于 host 控制态；这里仅镜像本步 sample 需要的
+    bitmask / defer 信号，对齐 vLLM `GrammarOutput` 边界。
+    """
+
+    req_ids: List[str] = field(default_factory=list)
+    # Python 骨架用 bool list 表示 vocab bitmask；生产会替换为 packed int32 tensor。
+    token_bitmask_by_req: Dict[str, List[bool]] = field(default_factory=dict)
+    # async/overlap 下若真实 token 尚未回 CPU，可延后 sample。
+    deferred_req_ids: List[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass
 class SchedulerOutput:
     step_id: int
     forward_mode: ForwardMode
@@ -76,6 +93,7 @@ class SchedulerOutput:
     can_run_graph: Optional[bool] = None
     scheduled_spec_decode_tokens: Optional[Dict[str, List[int]]] = None
     has_structured_output: bool = False
+    grammar_output: Optional[GrammarOutput] = None
     # 每请求派生标签（与批级 forward_mode 一致来源：几何 / spec）
     req_forward_modes: Dict[str, ForwardMode] = field(default_factory=dict)
     # 调度瞬间的 num_computed（供 process 区分 prompt 残差 vs 生成；overlap 下 Host 可能滞后）

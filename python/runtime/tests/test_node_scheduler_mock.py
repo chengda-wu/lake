@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from engine.model_runner import ModelRunner
+from engine.model_runner import ModelRunner, ModelRunnerOutput
 from engine.pool_iface import ReadyHandle, StepStats
-from runtime.node_scheduler import NodeScheduler, build_req_from_generate
+from runtime.node_scheduler import NodeScheduler, _BatchResult, build_req_from_generate
 from runtime.role import RoleConfig
 from runtime.scheduler_output import ForwardMode, SchedulerOutput
 
@@ -121,6 +121,47 @@ def test_future_map_holds_last_token() -> None:
     assert done.output_token_ids[-1] == 1010  # seed=8 → 1009,1010
 
 
+def test_schedule_marks_structured_output() -> None:
+    sched, _ = _make_sched(overlap=False)
+    req = build_req_from_generate("g1", "m", [1, 2, 3, 4], 1, "n0")
+    req.num_computed_tokens = len(req.prompt_token_ids)
+    req.sampling_params.structured_output = "json"
+    sched.add_request(req)
+
+    out = sched.schedule()
+    assert out.forward_mode == ForwardMode.DECODE
+    assert out.has_structured_output is True
+    assert out.grammar_output is not None
+    assert out.grammar_output.req_ids == ["g1"]
+
+
+def test_spec_and_structured_output_disables_overlap() -> None:
+    sched, _ = _make_sched(overlap=True)
+    req = build_req_from_generate("g2", "m", [1, 2, 3, 4], 3, "n0")
+    req.num_computed_tokens = len(req.prompt_token_ids)
+    req.sampling_params.structured_output = "json"
+    sched.add_request(req)
+    sched._running.append(sched._waiting.pop(0))  # noqa: SLF001
+    sched._pending_drafts["g2"] = [7, 8]  # noqa: SLF001
+    out = SchedulerOutput(
+        step_id=1,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"g2": 1},
+        total_num_scheduled_tokens=1,
+        req_forward_modes={"g2": ForwardMode.DECODE},
+        req_num_computed_at_schedule={"g2": len(req.prompt_token_ids)},
+    )
+    sched._result_queue.append(  # noqa: SLF001
+        _BatchResult(
+            output=out,
+            runner_out=ModelRunnerOutput(step_id=1),
+            ready=ReadyHandle(step_id=1),
+        )
+    )
+
+    assert sched._should_disable_overlap() is True  # noqa: SLF001
+
+
 def test_respect_effective_sets_drops_req() -> None:
     """P2-1：prepare 缩批后 scheduler 不得再 execute 被丢的 req。"""
     from engine.agents.memory import InMemoryAgent
@@ -211,6 +252,8 @@ if __name__ == "__main__":
     test_overlap_process_lags_execute()
     test_sync_loop_process_before_next_execute()
     test_future_map_holds_last_token()
+    test_schedule_marks_structured_output()
+    test_spec_and_structured_output_disables_overlap()
     test_respect_effective_sets_drops_req()
     test_respect_effective_sets_drops_all()
     print("test_node_scheduler_mock OK")
