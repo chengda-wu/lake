@@ -269,6 +269,8 @@ pub struct Authority {
     pub(crate) now_ms: fn() -> u64,
     /// P4.7: last checkpoint seq.
     pub(crate) checkpoint_seq: u64,
+    /// P4.9: consistent-hash shard ring (ownership; bytes migrate in P5).
+    pub(crate) shard: crate::shard::ShardRing,
 }
 
 impl Default for Authority {
@@ -288,6 +290,7 @@ impl Authority {
             node_refs: HashMap::new(),
             now_ms: crate::reconcile::wall_now_ms,
             checkpoint_seq: 0,
+            shard: crate::shard::ShardRing::new(crate::shard::DEFAULT_VNODE_COUNT),
         }
     }
 

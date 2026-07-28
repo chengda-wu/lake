@@ -324,7 +324,7 @@ func (x LeaseHeartbeat_Op) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LeaseHeartbeat_Op.Descriptor instead.
 func (LeaseHeartbeat_Op) EnumDescriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{33, 0}
+	return file_lake_proto_rawDescGZIP(), []int{43, 0}
 }
 
 type TransferStatusResponse_State int32
@@ -376,7 +376,7 @@ func (x TransferStatusResponse_State) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TransferStatusResponse_State.Descriptor instead.
 func (TransferStatusResponse_State) EnumDescriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{42, 0}
+	return file_lake_proto_rawDescGZIP(), []int{52, 0}
 }
 
 // --- 订阅视图(边3/4) ---
@@ -2058,6 +2058,600 @@ func (x *PauseBackgroundRequest) GetPaused() bool {
 	return false
 }
 
+// --- P4.9 一致性哈希分片 ---
+type ShardEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	VnodeCount    uint32                 `protobuf:"varint,2,opt,name=vnode_count,json=vnodeCount,proto3" json:"vnode_count,omitempty"`
+	Draining      bool                   `protobuf:"varint,3,opt,name=draining,proto3" json:"draining,omitempty"`
+	VnodeHashes   []uint64               `protobuf:"varint,4,rep,packed,name=vnode_hashes,json=vnodeHashes,proto3" json:"vnode_hashes,omitempty"` // 调试/单测:环上虚拟节点位置
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShardEntry) Reset() {
+	*x = ShardEntry{}
+	mi := &file_lake_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShardEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShardEntry) ProtoMessage() {}
+
+func (x *ShardEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShardEntry.ProtoReflect.Descriptor instead.
+func (*ShardEntry) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ShardEntry) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *ShardEntry) GetVnodeCount() uint32 {
+	if x != nil {
+		return x.VnodeCount
+	}
+	return 0
+}
+
+func (x *ShardEntry) GetDraining() bool {
+	if x != nil {
+		return x.Draining
+	}
+	return false
+}
+
+func (x *ShardEntry) GetVnodeHashes() []uint64 {
+	if x != nil {
+		return x.VnodeHashes
+	}
+	return nil
+}
+
+type ShardMap struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Generation        uint64                 `protobuf:"varint,1,opt,name=generation,proto3" json:"generation,omitempty"`
+	DefaultVnodeCount uint32                 `protobuf:"varint,2,opt,name=default_vnode_count,json=defaultVnodeCount,proto3" json:"default_vnode_count,omitempty"`
+	Nodes             []*ShardEntry          `protobuf:"bytes,3,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ShardMap) Reset() {
+	*x = ShardMap{}
+	mi := &file_lake_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShardMap) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShardMap) ProtoMessage() {}
+
+func (x *ShardMap) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShardMap.ProtoReflect.Descriptor instead.
+func (*ShardMap) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ShardMap) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ShardMap) GetDefaultVnodeCount() uint32 {
+	if x != nil {
+		return x.DefaultVnodeCount
+	}
+	return 0
+}
+
+func (x *ShardMap) GetNodes() []*ShardEntry {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
+type ShardMigration struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Id       *KVBlockID             `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	FromNode string                 `protobuf:"bytes,2,opt,name=from_node,json=fromNode,proto3" json:"from_node,omitempty"`
+	ToNode   string                 `protobuf:"bytes,3,opt,name=to_node,json=toNode,proto3" json:"to_node,omitempty"`
+	// Drain 路径:迁出前须先推 L2(逻辑标记;真字节 → P5)。
+	PushL2First   bool `protobuf:"varint,4,opt,name=push_l2_first,json=pushL2First,proto3" json:"push_l2_first,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShardMigration) Reset() {
+	*x = ShardMigration{}
+	mi := &file_lake_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShardMigration) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShardMigration) ProtoMessage() {}
+
+func (x *ShardMigration) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShardMigration.ProtoReflect.Descriptor instead.
+func (*ShardMigration) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ShardMigration) GetId() *KVBlockID {
+	if x != nil {
+		return x.Id
+	}
+	return nil
+}
+
+func (x *ShardMigration) GetFromNode() string {
+	if x != nil {
+		return x.FromNode
+	}
+	return ""
+}
+
+func (x *ShardMigration) GetToNode() string {
+	if x != nil {
+		return x.ToNode
+	}
+	return ""
+}
+
+func (x *ShardMigration) GetPushL2First() bool {
+	if x != nil {
+		return x.PushL2First
+	}
+	return false
+}
+
+type GetShardMapRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetShardMapRequest) Reset() {
+	*x = GetShardMapRequest{}
+	mi := &file_lake_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetShardMapRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetShardMapRequest) ProtoMessage() {}
+
+func (x *GetShardMapRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetShardMapRequest.ProtoReflect.Descriptor instead.
+func (*GetShardMapRequest) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{29}
+}
+
+type GetShardMapResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Map           *ShardMap              `protobuf:"bytes,1,opt,name=map,proto3" json:"map,omitempty"`
+	Ok            bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
+	Err           string                 `protobuf:"bytes,3,opt,name=err,proto3" json:"err,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetShardMapResponse) Reset() {
+	*x = GetShardMapResponse{}
+	mi := &file_lake_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetShardMapResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetShardMapResponse) ProtoMessage() {}
+
+func (x *GetShardMapResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetShardMapResponse.ProtoReflect.Descriptor instead.
+func (*GetShardMapResponse) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *GetShardMapResponse) GetMap() *ShardMap {
+	if x != nil {
+		return x.Map
+	}
+	return nil
+}
+
+func (x *GetShardMapResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *GetShardMapResponse) GetErr() string {
+	if x != nil {
+		return x.Err
+	}
+	return ""
+}
+
+type JoinShardNodeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	VnodeCount    uint32                 `protobuf:"varint,2,opt,name=vnode_count,json=vnodeCount,proto3" json:"vnode_count,omitempty"` // 0 → 默认(Authority 内 default_vnode_count)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JoinShardNodeRequest) Reset() {
+	*x = JoinShardNodeRequest{}
+	mi := &file_lake_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JoinShardNodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JoinShardNodeRequest) ProtoMessage() {}
+
+func (x *JoinShardNodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JoinShardNodeRequest.ProtoReflect.Descriptor instead.
+func (*JoinShardNodeRequest) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *JoinShardNodeRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *JoinShardNodeRequest) GetVnodeCount() uint32 {
+	if x != nil {
+		return x.VnodeCount
+	}
+	return 0
+}
+
+type JoinShardNodeResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Map            *ShardMap              `protobuf:"bytes,1,opt,name=map,proto3" json:"map,omitempty"`
+	Migrations     []*ShardMigration      `protobuf:"bytes,2,rep,name=migrations,proto3" json:"migrations,omitempty"` // 所有权迁入新节点的 block
+	MigrationCount uint32                 `protobuf:"varint,3,opt,name=migration_count,json=migrationCount,proto3" json:"migration_count,omitempty"`
+	Ok             bool                   `protobuf:"varint,4,opt,name=ok,proto3" json:"ok,omitempty"`
+	Err            string                 `protobuf:"bytes,5,opt,name=err,proto3" json:"err,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *JoinShardNodeResponse) Reset() {
+	*x = JoinShardNodeResponse{}
+	mi := &file_lake_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JoinShardNodeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JoinShardNodeResponse) ProtoMessage() {}
+
+func (x *JoinShardNodeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JoinShardNodeResponse.ProtoReflect.Descriptor instead.
+func (*JoinShardNodeResponse) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *JoinShardNodeResponse) GetMap() *ShardMap {
+	if x != nil {
+		return x.Map
+	}
+	return nil
+}
+
+func (x *JoinShardNodeResponse) GetMigrations() []*ShardMigration {
+	if x != nil {
+		return x.Migrations
+	}
+	return nil
+}
+
+func (x *JoinShardNodeResponse) GetMigrationCount() uint32 {
+	if x != nil {
+		return x.MigrationCount
+	}
+	return 0
+}
+
+func (x *JoinShardNodeResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *JoinShardNodeResponse) GetErr() string {
+	if x != nil {
+		return x.Err
+	}
+	return ""
+}
+
+type DrainShardNodeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DrainShardNodeRequest) Reset() {
+	*x = DrainShardNodeRequest{}
+	mi := &file_lake_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainShardNodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainShardNodeRequest) ProtoMessage() {}
+
+func (x *DrainShardNodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainShardNodeRequest.ProtoReflect.Descriptor instead.
+func (*DrainShardNodeRequest) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *DrainShardNodeRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+type DrainShardNodeResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Map            *ShardMap              `protobuf:"bytes,1,opt,name=map,proto3" json:"map,omitempty"`
+	Migrations     []*ShardMigration      `protobuf:"bytes,2,rep,name=migrations,proto3" json:"migrations,omitempty"`       // 从 Drain 节点迁出
+	PushL2         []*KVBlockID           `protobuf:"bytes,3,rep,name=push_l2,json=pushL2,proto3" json:"push_l2,omitempty"` // Drain 推 L2 候选
+	MigrationCount uint32                 `protobuf:"varint,4,opt,name=migration_count,json=migrationCount,proto3" json:"migration_count,omitempty"`
+	Ok             bool                   `protobuf:"varint,5,opt,name=ok,proto3" json:"ok,omitempty"`
+	Err            string                 `protobuf:"bytes,6,opt,name=err,proto3" json:"err,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DrainShardNodeResponse) Reset() {
+	*x = DrainShardNodeResponse{}
+	mi := &file_lake_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainShardNodeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainShardNodeResponse) ProtoMessage() {}
+
+func (x *DrainShardNodeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainShardNodeResponse.ProtoReflect.Descriptor instead.
+func (*DrainShardNodeResponse) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *DrainShardNodeResponse) GetMap() *ShardMap {
+	if x != nil {
+		return x.Map
+	}
+	return nil
+}
+
+func (x *DrainShardNodeResponse) GetMigrations() []*ShardMigration {
+	if x != nil {
+		return x.Migrations
+	}
+	return nil
+}
+
+func (x *DrainShardNodeResponse) GetPushL2() []*KVBlockID {
+	if x != nil {
+		return x.PushL2
+	}
+	return nil
+}
+
+func (x *DrainShardNodeResponse) GetMigrationCount() uint32 {
+	if x != nil {
+		return x.MigrationCount
+	}
+	return 0
+}
+
+func (x *DrainShardNodeResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *DrainShardNodeResponse) GetErr() string {
+	if x != nil {
+		return x.Err
+	}
+	return ""
+}
+
+type RemoveShardNodeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveShardNodeRequest) Reset() {
+	*x = RemoveShardNodeRequest{}
+	mi := &file_lake_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveShardNodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveShardNodeRequest) ProtoMessage() {}
+
+func (x *RemoveShardNodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_lake_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveShardNodeRequest.ProtoReflect.Descriptor instead.
+func (*RemoveShardNodeRequest) Descriptor() ([]byte, []int) {
+	return file_lake_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *RemoveShardNodeRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
 type LookupPrefixResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Blocks        []*ReusableBlock       `protobuf:"bytes,1,rep,name=blocks,proto3" json:"blocks,omitempty"`                                 // 沿前缀匹配的连续 block 列表
@@ -2069,7 +2663,7 @@ type LookupPrefixResponse struct {
 
 func (x *LookupPrefixResponse) Reset() {
 	*x = LookupPrefixResponse{}
-	mi := &file_lake_proto_msgTypes[26]
+	mi := &file_lake_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2081,7 +2675,7 @@ func (x *LookupPrefixResponse) String() string {
 func (*LookupPrefixResponse) ProtoMessage() {}
 
 func (x *LookupPrefixResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[26]
+	mi := &file_lake_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2094,7 +2688,7 @@ func (x *LookupPrefixResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LookupPrefixResponse.ProtoReflect.Descriptor instead.
 func (*LookupPrefixResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{26}
+	return file_lake_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *LookupPrefixResponse) GetBlocks() []*ReusableBlock {
@@ -2129,7 +2723,7 @@ type ReusableBlock struct {
 
 func (x *ReusableBlock) Reset() {
 	*x = ReusableBlock{}
-	mi := &file_lake_proto_msgTypes[27]
+	mi := &file_lake_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2141,7 +2735,7 @@ func (x *ReusableBlock) String() string {
 func (*ReusableBlock) ProtoMessage() {}
 
 func (x *ReusableBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[27]
+	mi := &file_lake_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2154,7 +2748,7 @@ func (x *ReusableBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReusableBlock.ProtoReflect.Descriptor instead.
 func (*ReusableBlock) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{27}
+	return file_lake_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ReusableBlock) GetId() *KVBlockID {
@@ -2188,7 +2782,7 @@ type LocateRequest struct {
 
 func (x *LocateRequest) Reset() {
 	*x = LocateRequest{}
-	mi := &file_lake_proto_msgTypes[28]
+	mi := &file_lake_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2200,7 +2794,7 @@ func (x *LocateRequest) String() string {
 func (*LocateRequest) ProtoMessage() {}
 
 func (x *LocateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[28]
+	mi := &file_lake_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2213,7 +2807,7 @@ func (x *LocateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocateRequest.ProtoReflect.Descriptor instead.
 func (*LocateRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{28}
+	return file_lake_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *LocateRequest) GetIds() []*KVBlockID {
@@ -2232,7 +2826,7 @@ type LocateResponse struct {
 
 func (x *LocateResponse) Reset() {
 	*x = LocateResponse{}
-	mi := &file_lake_proto_msgTypes[29]
+	mi := &file_lake_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2244,7 +2838,7 @@ func (x *LocateResponse) String() string {
 func (*LocateResponse) ProtoMessage() {}
 
 func (x *LocateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[29]
+	mi := &file_lake_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2257,7 +2851,7 @@ func (x *LocateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocateResponse.ProtoReflect.Descriptor instead.
 func (*LocateResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{29}
+	return file_lake_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *LocateResponse) GetBlocks() []*BlockMeta {
@@ -2282,7 +2876,7 @@ type RegisterBlocksRequest struct {
 
 func (x *RegisterBlocksRequest) Reset() {
 	*x = RegisterBlocksRequest{}
-	mi := &file_lake_proto_msgTypes[30]
+	mi := &file_lake_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2294,7 +2888,7 @@ func (x *RegisterBlocksRequest) String() string {
 func (*RegisterBlocksRequest) ProtoMessage() {}
 
 func (x *RegisterBlocksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[30]
+	mi := &file_lake_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2307,7 +2901,7 @@ func (x *RegisterBlocksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterBlocksRequest.ProtoReflect.Descriptor instead.
 func (*RegisterBlocksRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{30}
+	return file_lake_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *RegisterBlocksRequest) GetNodeId() string {
@@ -2343,7 +2937,7 @@ type RefDelta struct {
 
 func (x *RefDelta) Reset() {
 	*x = RefDelta{}
-	mi := &file_lake_proto_msgTypes[31]
+	mi := &file_lake_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2355,7 +2949,7 @@ func (x *RefDelta) String() string {
 func (*RefDelta) ProtoMessage() {}
 
 func (x *RefDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[31]
+	mi := &file_lake_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2368,7 +2962,7 @@ func (x *RefDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefDelta.ProtoReflect.Descriptor instead.
 func (*RefDelta) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{31}
+	return file_lake_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *RefDelta) GetId() *KVBlockID {
@@ -2410,7 +3004,7 @@ type RequestBarrierRequest struct {
 
 func (x *RequestBarrierRequest) Reset() {
 	*x = RequestBarrierRequest{}
-	mi := &file_lake_proto_msgTypes[32]
+	mi := &file_lake_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2422,7 +3016,7 @@ func (x *RequestBarrierRequest) String() string {
 func (*RequestBarrierRequest) ProtoMessage() {}
 
 func (x *RequestBarrierRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[32]
+	mi := &file_lake_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2435,7 +3029,7 @@ func (x *RequestBarrierRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestBarrierRequest.ProtoReflect.Descriptor instead.
 func (*RequestBarrierRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{32}
+	return file_lake_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *RequestBarrierRequest) GetRequestId() string {
@@ -2465,7 +3059,7 @@ type LeaseHeartbeat struct {
 
 func (x *LeaseHeartbeat) Reset() {
 	*x = LeaseHeartbeat{}
-	mi := &file_lake_proto_msgTypes[33]
+	mi := &file_lake_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2477,7 +3071,7 @@ func (x *LeaseHeartbeat) String() string {
 func (*LeaseHeartbeat) ProtoMessage() {}
 
 func (x *LeaseHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[33]
+	mi := &file_lake_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2490,7 +3084,7 @@ func (x *LeaseHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseHeartbeat.ProtoReflect.Descriptor instead.
 func (*LeaseHeartbeat) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{33}
+	return file_lake_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *LeaseHeartbeat) GetOp() LeaseHeartbeat_Op {
@@ -2531,7 +3125,7 @@ type LeaseAck struct {
 
 func (x *LeaseAck) Reset() {
 	*x = LeaseAck{}
-	mi := &file_lake_proto_msgTypes[34]
+	mi := &file_lake_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2543,7 +3137,7 @@ func (x *LeaseAck) String() string {
 func (*LeaseAck) ProtoMessage() {}
 
 func (x *LeaseAck) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[34]
+	mi := &file_lake_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2556,7 +3150,7 @@ func (x *LeaseAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseAck.ProtoReflect.Descriptor instead.
 func (*LeaseAck) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{34}
+	return file_lake_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *LeaseAck) GetGranted() bool {
@@ -2586,7 +3180,7 @@ type DispatchRequest struct {
 
 func (x *DispatchRequest) Reset() {
 	*x = DispatchRequest{}
-	mi := &file_lake_proto_msgTypes[35]
+	mi := &file_lake_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2598,7 +3192,7 @@ func (x *DispatchRequest) String() string {
 func (*DispatchRequest) ProtoMessage() {}
 
 func (x *DispatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[35]
+	mi := &file_lake_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2611,7 +3205,7 @@ func (x *DispatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchRequest.ProtoReflect.Descriptor instead.
 func (*DispatchRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{35}
+	return file_lake_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *DispatchRequest) GetMode() string {
@@ -2654,7 +3248,7 @@ type LoadReport struct {
 
 func (x *LoadReport) Reset() {
 	*x = LoadReport{}
-	mi := &file_lake_proto_msgTypes[36]
+	mi := &file_lake_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2666,7 +3260,7 @@ func (x *LoadReport) String() string {
 func (*LoadReport) ProtoMessage() {}
 
 func (x *LoadReport) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[36]
+	mi := &file_lake_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2679,7 +3273,7 @@ func (x *LoadReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoadReport.ProtoReflect.Descriptor instead.
 func (*LoadReport) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{36}
+	return file_lake_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *LoadReport) GetNodeId() string {
@@ -2721,7 +3315,7 @@ type PlaceBlocksRequest struct {
 
 func (x *PlaceBlocksRequest) Reset() {
 	*x = PlaceBlocksRequest{}
-	mi := &file_lake_proto_msgTypes[37]
+	mi := &file_lake_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2733,7 +3327,7 @@ func (x *PlaceBlocksRequest) String() string {
 func (*PlaceBlocksRequest) ProtoMessage() {}
 
 func (x *PlaceBlocksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[37]
+	mi := &file_lake_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2746,7 +3340,7 @@ func (x *PlaceBlocksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceBlocksRequest.ProtoReflect.Descriptor instead.
 func (*PlaceBlocksRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{37}
+	return file_lake_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *PlaceBlocksRequest) GetIds() []*KVBlockID {
@@ -2775,7 +3369,7 @@ type TransferBatchRequest struct {
 
 func (x *TransferBatchRequest) Reset() {
 	*x = TransferBatchRequest{}
-	mi := &file_lake_proto_msgTypes[38]
+	mi := &file_lake_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2787,7 +3381,7 @@ func (x *TransferBatchRequest) String() string {
 func (*TransferBatchRequest) ProtoMessage() {}
 
 func (x *TransferBatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[38]
+	mi := &file_lake_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2800,7 +3394,7 @@ func (x *TransferBatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferBatchRequest.ProtoReflect.Descriptor instead.
 func (*TransferBatchRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{38}
+	return file_lake_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *TransferBatchRequest) GetReqs() []*TransferRequest {
@@ -2822,7 +3416,7 @@ type TransferRequest struct {
 
 func (x *TransferRequest) Reset() {
 	*x = TransferRequest{}
-	mi := &file_lake_proto_msgTypes[39]
+	mi := &file_lake_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2834,7 +3428,7 @@ func (x *TransferRequest) String() string {
 func (*TransferRequest) ProtoMessage() {}
 
 func (x *TransferRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[39]
+	mi := &file_lake_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2847,7 +3441,7 @@ func (x *TransferRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferRequest.ProtoReflect.Descriptor instead.
 func (*TransferRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{39}
+	return file_lake_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *TransferRequest) GetSource() *Location {
@@ -2887,7 +3481,7 @@ type TransferBatchAck struct {
 
 func (x *TransferBatchAck) Reset() {
 	*x = TransferBatchAck{}
-	mi := &file_lake_proto_msgTypes[40]
+	mi := &file_lake_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2899,7 +3493,7 @@ func (x *TransferBatchAck) String() string {
 func (*TransferBatchAck) ProtoMessage() {}
 
 func (x *TransferBatchAck) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[40]
+	mi := &file_lake_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2912,7 +3506,7 @@ func (x *TransferBatchAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferBatchAck.ProtoReflect.Descriptor instead.
 func (*TransferBatchAck) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{40}
+	return file_lake_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *TransferBatchAck) GetBatchId() uint64 {
@@ -2932,7 +3526,7 @@ type TransferStatusRequest struct {
 
 func (x *TransferStatusRequest) Reset() {
 	*x = TransferStatusRequest{}
-	mi := &file_lake_proto_msgTypes[41]
+	mi := &file_lake_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2944,7 +3538,7 @@ func (x *TransferStatusRequest) String() string {
 func (*TransferStatusRequest) ProtoMessage() {}
 
 func (x *TransferStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[41]
+	mi := &file_lake_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2957,7 +3551,7 @@ func (x *TransferStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferStatusRequest.ProtoReflect.Descriptor instead.
 func (*TransferStatusRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{41}
+	return file_lake_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *TransferStatusRequest) GetBatchId() uint64 {
@@ -2984,7 +3578,7 @@ type TransferStatusResponse struct {
 
 func (x *TransferStatusResponse) Reset() {
 	*x = TransferStatusResponse{}
-	mi := &file_lake_proto_msgTypes[42]
+	mi := &file_lake_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2996,7 +3590,7 @@ func (x *TransferStatusResponse) String() string {
 func (*TransferStatusResponse) ProtoMessage() {}
 
 func (x *TransferStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[42]
+	mi := &file_lake_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3009,7 +3603,7 @@ func (x *TransferStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransferStatusResponse.ProtoReflect.Descriptor instead.
 func (*TransferStatusResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{42}
+	return file_lake_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *TransferStatusResponse) GetState() TransferStatusResponse_State {
@@ -3035,7 +3629,7 @@ type FreeBatchRequest struct {
 
 func (x *FreeBatchRequest) Reset() {
 	*x = FreeBatchRequest{}
-	mi := &file_lake_proto_msgTypes[43]
+	mi := &file_lake_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3047,7 +3641,7 @@ func (x *FreeBatchRequest) String() string {
 func (*FreeBatchRequest) ProtoMessage() {}
 
 func (x *FreeBatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[43]
+	mi := &file_lake_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3060,7 +3654,7 @@ func (x *FreeBatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FreeBatchRequest.ProtoReflect.Descriptor instead.
 func (*FreeBatchRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{43}
+	return file_lake_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *FreeBatchRequest) GetBatchId() uint64 {
@@ -3083,7 +3677,7 @@ type PullRequest struct {
 
 func (x *PullRequest) Reset() {
 	*x = PullRequest{}
-	mi := &file_lake_proto_msgTypes[44]
+	mi := &file_lake_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3095,7 +3689,7 @@ func (x *PullRequest) String() string {
 func (*PullRequest) ProtoMessage() {}
 
 func (x *PullRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[44]
+	mi := &file_lake_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3108,7 +3702,7 @@ func (x *PullRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullRequest.ProtoReflect.Descriptor instead.
 func (*PullRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{44}
+	return file_lake_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *PullRequest) GetIds() []*KVBlockID {
@@ -3150,7 +3744,7 @@ type PullResponse struct {
 
 func (x *PullResponse) Reset() {
 	*x = PullResponse{}
-	mi := &file_lake_proto_msgTypes[45]
+	mi := &file_lake_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3162,7 +3756,7 @@ func (x *PullResponse) String() string {
 func (*PullResponse) ProtoMessage() {}
 
 func (x *PullResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[45]
+	mi := &file_lake_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3175,7 +3769,7 @@ func (x *PullResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullResponse.ProtoReflect.Descriptor instead.
 func (*PullResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{45}
+	return file_lake_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *PullResponse) GetHandle() uint64 {
@@ -3208,7 +3802,7 @@ type FreePullRequest struct {
 
 func (x *FreePullRequest) Reset() {
 	*x = FreePullRequest{}
-	mi := &file_lake_proto_msgTypes[46]
+	mi := &file_lake_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3220,7 +3814,7 @@ func (x *FreePullRequest) String() string {
 func (*FreePullRequest) ProtoMessage() {}
 
 func (x *FreePullRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[46]
+	mi := &file_lake_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3233,7 +3827,7 @@ func (x *FreePullRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FreePullRequest.ProtoReflect.Descriptor instead.
 func (*FreePullRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{46}
+	return file_lake_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *FreePullRequest) GetHandle() uint64 {
@@ -3255,7 +3849,7 @@ type PublishRequest struct {
 
 func (x *PublishRequest) Reset() {
 	*x = PublishRequest{}
-	mi := &file_lake_proto_msgTypes[47]
+	mi := &file_lake_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3267,7 +3861,7 @@ func (x *PublishRequest) String() string {
 func (*PublishRequest) ProtoMessage() {}
 
 func (x *PublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[47]
+	mi := &file_lake_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3280,7 +3874,7 @@ func (x *PublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishRequest.ProtoReflect.Descriptor instead.
 func (*PublishRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{47}
+	return file_lake_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *PublishRequest) GetSlices() []*LayerSlice {
@@ -3313,7 +3907,7 @@ type FreePublishRequest struct {
 
 func (x *FreePublishRequest) Reset() {
 	*x = FreePublishRequest{}
-	mi := &file_lake_proto_msgTypes[48]
+	mi := &file_lake_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3325,7 +3919,7 @@ func (x *FreePublishRequest) String() string {
 func (*FreePublishRequest) ProtoMessage() {}
 
 func (x *FreePublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[48]
+	mi := &file_lake_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3338,7 +3932,7 @@ func (x *FreePublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FreePublishRequest.ProtoReflect.Descriptor instead.
 func (*FreePublishRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{48}
+	return file_lake_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *FreePublishRequest) GetRequestId() string {
@@ -3360,7 +3954,7 @@ type LayerSlice struct {
 
 func (x *LayerSlice) Reset() {
 	*x = LayerSlice{}
-	mi := &file_lake_proto_msgTypes[49]
+	mi := &file_lake_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3372,7 +3966,7 @@ func (x *LayerSlice) String() string {
 func (*LayerSlice) ProtoMessage() {}
 
 func (x *LayerSlice) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[49]
+	mi := &file_lake_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3385,7 +3979,7 @@ func (x *LayerSlice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LayerSlice.ProtoReflect.Descriptor instead.
 func (*LayerSlice) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{49}
+	return file_lake_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *LayerSlice) GetId() *KVBlockID {
@@ -3429,7 +4023,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_lake_proto_msgTypes[50]
+	mi := &file_lake_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3441,7 +4035,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[50]
+	mi := &file_lake_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3454,7 +4048,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{50}
+	return file_lake_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *Ack) GetOk() bool {
@@ -3488,7 +4082,7 @@ type PutBlocksRequest struct {
 
 func (x *PutBlocksRequest) Reset() {
 	*x = PutBlocksRequest{}
-	mi := &file_lake_proto_msgTypes[51]
+	mi := &file_lake_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3500,7 +4094,7 @@ func (x *PutBlocksRequest) String() string {
 func (*PutBlocksRequest) ProtoMessage() {}
 
 func (x *PutBlocksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[51]
+	mi := &file_lake_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3513,7 +4107,7 @@ func (x *PutBlocksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutBlocksRequest.ProtoReflect.Descriptor instead.
 func (*PutBlocksRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{51}
+	return file_lake_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *PutBlocksRequest) GetNodeId() string {
@@ -3540,7 +4134,7 @@ type OpaqueBlock struct {
 
 func (x *OpaqueBlock) Reset() {
 	*x = OpaqueBlock{}
-	mi := &file_lake_proto_msgTypes[52]
+	mi := &file_lake_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3552,7 +4146,7 @@ func (x *OpaqueBlock) String() string {
 func (*OpaqueBlock) ProtoMessage() {}
 
 func (x *OpaqueBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[52]
+	mi := &file_lake_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3565,7 +4159,7 @@ func (x *OpaqueBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpaqueBlock.ProtoReflect.Descriptor instead.
 func (*OpaqueBlock) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{52}
+	return file_lake_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *OpaqueBlock) GetId() *KVBlockID {
@@ -3591,7 +4185,7 @@ type GetBlocksRequest struct {
 
 func (x *GetBlocksRequest) Reset() {
 	*x = GetBlocksRequest{}
-	mi := &file_lake_proto_msgTypes[53]
+	mi := &file_lake_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3603,7 +4197,7 @@ func (x *GetBlocksRequest) String() string {
 func (*GetBlocksRequest) ProtoMessage() {}
 
 func (x *GetBlocksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[53]
+	mi := &file_lake_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3616,7 +4210,7 @@ func (x *GetBlocksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBlocksRequest.ProtoReflect.Descriptor instead.
 func (*GetBlocksRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{53}
+	return file_lake_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *GetBlocksRequest) GetIds() []*KVBlockID {
@@ -3635,7 +4229,7 @@ type GetBlocksResponse struct {
 
 func (x *GetBlocksResponse) Reset() {
 	*x = GetBlocksResponse{}
-	mi := &file_lake_proto_msgTypes[54]
+	mi := &file_lake_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3647,7 +4241,7 @@ func (x *GetBlocksResponse) String() string {
 func (*GetBlocksResponse) ProtoMessage() {}
 
 func (x *GetBlocksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[54]
+	mi := &file_lake_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3660,7 +4254,7 @@ func (x *GetBlocksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBlocksResponse.ProtoReflect.Descriptor instead.
 func (*GetBlocksResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{54}
+	return file_lake_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *GetBlocksResponse) GetBlocks() []*OpaqueBlock {
@@ -3683,7 +4277,7 @@ type GenerateRequest struct {
 
 func (x *GenerateRequest) Reset() {
 	*x = GenerateRequest{}
-	mi := &file_lake_proto_msgTypes[55]
+	mi := &file_lake_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3695,7 +4289,7 @@ func (x *GenerateRequest) String() string {
 func (*GenerateRequest) ProtoMessage() {}
 
 func (x *GenerateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[55]
+	mi := &file_lake_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3708,7 +4302,7 @@ func (x *GenerateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateRequest.ProtoReflect.Descriptor instead.
 func (*GenerateRequest) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{55}
+	return file_lake_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *GenerateRequest) GetRequestId() string {
@@ -3759,7 +4353,7 @@ type GenerateResponse struct {
 
 func (x *GenerateResponse) Reset() {
 	*x = GenerateResponse{}
-	mi := &file_lake_proto_msgTypes[56]
+	mi := &file_lake_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3771,7 +4365,7 @@ func (x *GenerateResponse) String() string {
 func (*GenerateResponse) ProtoMessage() {}
 
 func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_lake_proto_msgTypes[56]
+	mi := &file_lake_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3784,7 +4378,7 @@ func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateResponse.ProtoReflect.Descriptor instead.
 func (*GenerateResponse) Descriptor() ([]byte, []int) {
-	return file_lake_proto_rawDescGZIP(), []int{56}
+	return file_lake_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *GenerateResponse) GetRequestId() string {
@@ -3968,7 +4562,55 @@ const file_lake_proto_rawDesc = "" +
 	"\x02ok\x18\x03 \x01(\bR\x02ok\x12\x10\n" +
 	"\x03err\x18\x04 \x01(\tR\x03err\"0\n" +
 	"\x16PauseBackgroundRequest\x12\x16\n" +
-	"\x06paused\x18\x01 \x01(\bR\x06paused\"\x86\x01\n" +
+	"\x06paused\x18\x01 \x01(\bR\x06paused\"\x85\x01\n" +
+	"\n" +
+	"ShardEntry\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1f\n" +
+	"\vvnode_count\x18\x02 \x01(\rR\n" +
+	"vnodeCount\x12\x1a\n" +
+	"\bdraining\x18\x03 \x01(\bR\bdraining\x12!\n" +
+	"\fvnode_hashes\x18\x04 \x03(\x04R\vvnodeHashes\"\x82\x01\n" +
+	"\bShardMap\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x01 \x01(\x04R\n" +
+	"generation\x12.\n" +
+	"\x13default_vnode_count\x18\x02 \x01(\rR\x11defaultVnodeCount\x12&\n" +
+	"\x05nodes\x18\x03 \x03(\v2\x10.lake.ShardEntryR\x05nodes\"\x8b\x01\n" +
+	"\x0eShardMigration\x12\x1f\n" +
+	"\x02id\x18\x01 \x01(\v2\x0f.lake.KVBlockIDR\x02id\x12\x1b\n" +
+	"\tfrom_node\x18\x02 \x01(\tR\bfromNode\x12\x17\n" +
+	"\ato_node\x18\x03 \x01(\tR\x06toNode\x12\"\n" +
+	"\rpush_l2_first\x18\x04 \x01(\bR\vpushL2First\"\x14\n" +
+	"\x12GetShardMapRequest\"Y\n" +
+	"\x13GetShardMapResponse\x12 \n" +
+	"\x03map\x18\x01 \x01(\v2\x0e.lake.ShardMapR\x03map\x12\x0e\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x10\n" +
+	"\x03err\x18\x03 \x01(\tR\x03err\"P\n" +
+	"\x14JoinShardNodeRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1f\n" +
+	"\vvnode_count\x18\x02 \x01(\rR\n" +
+	"vnodeCount\"\xba\x01\n" +
+	"\x15JoinShardNodeResponse\x12 \n" +
+	"\x03map\x18\x01 \x01(\v2\x0e.lake.ShardMapR\x03map\x124\n" +
+	"\n" +
+	"migrations\x18\x02 \x03(\v2\x14.lake.ShardMigrationR\n" +
+	"migrations\x12'\n" +
+	"\x0fmigration_count\x18\x03 \x01(\rR\x0emigrationCount\x12\x0e\n" +
+	"\x02ok\x18\x04 \x01(\bR\x02ok\x12\x10\n" +
+	"\x03err\x18\x05 \x01(\tR\x03err\"0\n" +
+	"\x15DrainShardNodeRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"\xe5\x01\n" +
+	"\x16DrainShardNodeResponse\x12 \n" +
+	"\x03map\x18\x01 \x01(\v2\x0e.lake.ShardMapR\x03map\x124\n" +
+	"\n" +
+	"migrations\x18\x02 \x03(\v2\x14.lake.ShardMigrationR\n" +
+	"migrations\x12(\n" +
+	"\apush_l2\x18\x03 \x03(\v2\x0f.lake.KVBlockIDR\x06pushL2\x12'\n" +
+	"\x0fmigration_count\x18\x04 \x01(\rR\x0emigrationCount\x12\x0e\n" +
+	"\x02ok\x18\x05 \x01(\bR\x02ok\x12\x10\n" +
+	"\x03err\x18\x06 \x01(\tR\x03err\"1\n" +
+	"\x16RemoveShardNodeRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"\x86\x01\n" +
 	"\x14LookupPrefixResponse\x12+\n" +
 	"\x06blocks\x18\x01 \x03(\v2\x13.lake.ReusableBlockR\x06blocks\x12\x1d\n" +
 	"\n" +
@@ -4124,7 +4766,7 @@ const file_lake_proto_rawDesc = "" +
 	"PullPolicy\x12\x14\n" +
 	"\x10PULL_BEST_EFFORT\x10\x00\x12\x16\n" +
 	"\x12PULL_WAIT_COMPLETE\x10\x01\x12\x10\n" +
-	"\fPULL_TIMEOUT\x10\x022\xf2\b\n" +
+	"\fPULL_TIMEOUT\x10\x022\x89\v\n" +
 	"\x13ControlPlaneService\x12;\n" +
 	"\rSubscribeView\x12\x16.lake.SubscribeRequest\x1a\x10.lake.ViewUpdate0\x01\x12E\n" +
 	"\fLookupPrefix\x12\x19.lake.LookupPrefixRequest\x1a\x1a.lake.LookupPrefixResponse\x123\n" +
@@ -4143,7 +4785,11 @@ const file_lake_proto_rawDesc = "" +
 	"\x0eSaveCheckpoint\x12\x1b.lake.SaveCheckpointRequest\x1a\x1c.lake.SaveCheckpointResponse\x12>\n" +
 	"\x11RestoreCheckpoint\x12\x1e.lake.RestoreCheckpointRequest\x1a\t.lake.Ack\x12H\n" +
 	"\rTriggerDefrag\x12\x1a.lake.TriggerDefragRequest\x1a\x1b.lake.TriggerDefragResponse\x12:\n" +
-	"\x0fPauseBackground\x12\x1c.lake.PauseBackgroundRequest\x1a\t.lake.Ack2\x9f\x01\n" +
+	"\x0fPauseBackground\x12\x1c.lake.PauseBackgroundRequest\x1a\t.lake.Ack\x12B\n" +
+	"\vGetShardMap\x12\x18.lake.GetShardMapRequest\x1a\x19.lake.GetShardMapResponse\x12H\n" +
+	"\rJoinShardNode\x12\x1a.lake.JoinShardNodeRequest\x1a\x1b.lake.JoinShardNodeResponse\x12K\n" +
+	"\x0eDrainShardNode\x12\x1b.lake.DrainShardNodeRequest\x1a\x1c.lake.DrainShardNodeResponse\x12:\n" +
+	"\x0fRemoveShardNode\x12\x1c.lake.RemoveShardNodeRequest\x1a\t.lake.Ack2\x9f\x01\n" +
 	"\fAgentService\x12,\n" +
 	"\bDispatch\x12\x15.lake.DispatchRequest\x1a\t.lake.Ack\x12-\n" +
 	"\n" +
@@ -4176,7 +4822,7 @@ func file_lake_proto_rawDescGZIP() []byte {
 }
 
 var file_lake_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_lake_proto_msgTypes = make([]protoimpl.MessageInfo, 58)
+var file_lake_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
 var file_lake_proto_goTypes = []any{
 	(HashAlgo)(0),                     // 0: lake.HashAlgo
 	(DefragMode)(0),                   // 1: lake.DefragMode
@@ -4211,51 +4857,61 @@ var file_lake_proto_goTypes = []any{
 	(*TriggerDefragRequest)(nil),      // 30: lake.TriggerDefragRequest
 	(*TriggerDefragResponse)(nil),     // 31: lake.TriggerDefragResponse
 	(*PauseBackgroundRequest)(nil),    // 32: lake.PauseBackgroundRequest
-	(*LookupPrefixResponse)(nil),      // 33: lake.LookupPrefixResponse
-	(*ReusableBlock)(nil),             // 34: lake.ReusableBlock
-	(*LocateRequest)(nil),             // 35: lake.LocateRequest
-	(*LocateResponse)(nil),            // 36: lake.LocateResponse
-	(*RegisterBlocksRequest)(nil),     // 37: lake.RegisterBlocksRequest
-	(*RefDelta)(nil),                  // 38: lake.RefDelta
-	(*RequestBarrierRequest)(nil),     // 39: lake.RequestBarrierRequest
-	(*LeaseHeartbeat)(nil),            // 40: lake.LeaseHeartbeat
-	(*LeaseAck)(nil),                  // 41: lake.LeaseAck
-	(*DispatchRequest)(nil),           // 42: lake.DispatchRequest
-	(*LoadReport)(nil),                // 43: lake.LoadReport
-	(*PlaceBlocksRequest)(nil),        // 44: lake.PlaceBlocksRequest
-	(*TransferBatchRequest)(nil),      // 45: lake.TransferBatchRequest
-	(*TransferRequest)(nil),           // 46: lake.TransferRequest
-	(*TransferBatchAck)(nil),          // 47: lake.TransferBatchAck
-	(*TransferStatusRequest)(nil),     // 48: lake.TransferStatusRequest
-	(*TransferStatusResponse)(nil),    // 49: lake.TransferStatusResponse
-	(*FreeBatchRequest)(nil),          // 50: lake.FreeBatchRequest
-	(*PullRequest)(nil),               // 51: lake.PullRequest
-	(*PullResponse)(nil),              // 52: lake.PullResponse
-	(*FreePullRequest)(nil),           // 53: lake.FreePullRequest
-	(*PublishRequest)(nil),            // 54: lake.PublishRequest
-	(*FreePublishRequest)(nil),        // 55: lake.FreePublishRequest
-	(*LayerSlice)(nil),                // 56: lake.LayerSlice
-	(*Ack)(nil),                       // 57: lake.Ack
-	(*PutBlocksRequest)(nil),          // 58: lake.PutBlocksRequest
-	(*OpaqueBlock)(nil),               // 59: lake.OpaqueBlock
-	(*GetBlocksRequest)(nil),          // 60: lake.GetBlocksRequest
-	(*GetBlocksResponse)(nil),         // 61: lake.GetBlocksResponse
-	(*GenerateRequest)(nil),           // 62: lake.GenerateRequest
-	(*GenerateResponse)(nil),          // 63: lake.GenerateResponse
-	nil,                               // 64: lake.DispatchRequest.HintsEntry
-	(*KVBlockID)(nil),                 // 65: lake.KVBlockID
-	(*Location)(nil),                  // 66: lake.Location
-	(BlockKind)(0),                    // 67: lake.BlockKind
-	(PoolKind)(0),                     // 68: lake.PoolKind
-	(*BlockMeta)(nil),                 // 69: lake.BlockMeta
+	(*ShardEntry)(nil),                // 33: lake.ShardEntry
+	(*ShardMap)(nil),                  // 34: lake.ShardMap
+	(*ShardMigration)(nil),            // 35: lake.ShardMigration
+	(*GetShardMapRequest)(nil),        // 36: lake.GetShardMapRequest
+	(*GetShardMapResponse)(nil),       // 37: lake.GetShardMapResponse
+	(*JoinShardNodeRequest)(nil),      // 38: lake.JoinShardNodeRequest
+	(*JoinShardNodeResponse)(nil),     // 39: lake.JoinShardNodeResponse
+	(*DrainShardNodeRequest)(nil),     // 40: lake.DrainShardNodeRequest
+	(*DrainShardNodeResponse)(nil),    // 41: lake.DrainShardNodeResponse
+	(*RemoveShardNodeRequest)(nil),    // 42: lake.RemoveShardNodeRequest
+	(*LookupPrefixResponse)(nil),      // 43: lake.LookupPrefixResponse
+	(*ReusableBlock)(nil),             // 44: lake.ReusableBlock
+	(*LocateRequest)(nil),             // 45: lake.LocateRequest
+	(*LocateResponse)(nil),            // 46: lake.LocateResponse
+	(*RegisterBlocksRequest)(nil),     // 47: lake.RegisterBlocksRequest
+	(*RefDelta)(nil),                  // 48: lake.RefDelta
+	(*RequestBarrierRequest)(nil),     // 49: lake.RequestBarrierRequest
+	(*LeaseHeartbeat)(nil),            // 50: lake.LeaseHeartbeat
+	(*LeaseAck)(nil),                  // 51: lake.LeaseAck
+	(*DispatchRequest)(nil),           // 52: lake.DispatchRequest
+	(*LoadReport)(nil),                // 53: lake.LoadReport
+	(*PlaceBlocksRequest)(nil),        // 54: lake.PlaceBlocksRequest
+	(*TransferBatchRequest)(nil),      // 55: lake.TransferBatchRequest
+	(*TransferRequest)(nil),           // 56: lake.TransferRequest
+	(*TransferBatchAck)(nil),          // 57: lake.TransferBatchAck
+	(*TransferStatusRequest)(nil),     // 58: lake.TransferStatusRequest
+	(*TransferStatusResponse)(nil),    // 59: lake.TransferStatusResponse
+	(*FreeBatchRequest)(nil),          // 60: lake.FreeBatchRequest
+	(*PullRequest)(nil),               // 61: lake.PullRequest
+	(*PullResponse)(nil),              // 62: lake.PullResponse
+	(*FreePullRequest)(nil),           // 63: lake.FreePullRequest
+	(*PublishRequest)(nil),            // 64: lake.PublishRequest
+	(*FreePublishRequest)(nil),        // 65: lake.FreePublishRequest
+	(*LayerSlice)(nil),                // 66: lake.LayerSlice
+	(*Ack)(nil),                       // 67: lake.Ack
+	(*PutBlocksRequest)(nil),          // 68: lake.PutBlocksRequest
+	(*OpaqueBlock)(nil),               // 69: lake.OpaqueBlock
+	(*GetBlocksRequest)(nil),          // 70: lake.GetBlocksRequest
+	(*GetBlocksResponse)(nil),         // 71: lake.GetBlocksResponse
+	(*GenerateRequest)(nil),           // 72: lake.GenerateRequest
+	(*GenerateResponse)(nil),          // 73: lake.GenerateResponse
+	nil,                               // 74: lake.DispatchRequest.HintsEntry
+	(*KVBlockID)(nil),                 // 75: lake.KVBlockID
+	(*Location)(nil),                  // 76: lake.Location
+	(BlockKind)(0),                    // 77: lake.BlockKind
+	(PoolKind)(0),                     // 78: lake.PoolKind
+	(*BlockMeta)(nil),                 // 79: lake.BlockMeta
 }
 var file_lake_proto_depIdxs = []int32{
 	9,  // 0: lake.ViewUpdate.events:type_name -> lake.ViewEvent
 	4,  // 1: lake.ViewEvent.kind:type_name -> lake.ViewEvent.Kind
-	65, // 2: lake.ViewEvent.id:type_name -> lake.KVBlockID
-	66, // 3: lake.ViewEvent.locations:type_name -> lake.Location
-	67, // 4: lake.ViewEvent.block_kind:type_name -> lake.BlockKind
-	68, // 5: lake.LookupPrefixRequest.pool_kind:type_name -> lake.PoolKind
+	75, // 2: lake.ViewEvent.id:type_name -> lake.KVBlockID
+	76, // 3: lake.ViewEvent.locations:type_name -> lake.Location
+	77, // 4: lake.ViewEvent.block_kind:type_name -> lake.BlockKind
+	78, // 5: lake.LookupPrefixRequest.pool_kind:type_name -> lake.PoolKind
 	11, // 6: lake.ModelDescriptor.block_spec:type_name -> lake.BlockSpec
 	0,  // 7: lake.ModelDescriptor.hash_algo:type_name -> lake.HashAlgo
 	12, // 8: lake.ModelDescriptor.quota:type_name -> lake.Quota
@@ -4263,112 +4919,128 @@ var file_lake_proto_depIdxs = []int32{
 	12, // 10: lake.SetModelQuotaRequest.quota:type_name -> lake.Quota
 	12, // 11: lake.GetModelQuotaResponse.quota:type_name -> lake.Quota
 	13, // 12: lake.GetModelQuotaResponse.backpressure:type_name -> lake.BackpressureSignal
-	65, // 13: lake.OrphanReport.ids:type_name -> lake.KVBlockID
+	75, // 13: lake.OrphanReport.ids:type_name -> lake.KVBlockID
 	20, // 14: lake.ReconcileOrphansRequest.reports:type_name -> lake.OrphanReport
-	68, // 15: lake.ReconcileOrphansRequest.gc_pool_kind:type_name -> lake.PoolKind
-	65, // 16: lake.ReconcileOrphansResponse.discarded:type_name -> lake.KVBlockID
-	65, // 17: lake.ReconcileOrphansResponse.cold_stripped:type_name -> lake.KVBlockID
-	65, // 18: lake.DiscardBlocksRequest.ids:type_name -> lake.KVBlockID
-	69, // 19: lake.CheckpointBlock.meta:type_name -> lake.BlockMeta
+	78, // 15: lake.ReconcileOrphansRequest.gc_pool_kind:type_name -> lake.PoolKind
+	75, // 16: lake.ReconcileOrphansResponse.discarded:type_name -> lake.KVBlockID
+	75, // 17: lake.ReconcileOrphansResponse.cold_stripped:type_name -> lake.KVBlockID
+	75, // 18: lake.DiscardBlocksRequest.ids:type_name -> lake.KVBlockID
+	79, // 19: lake.CheckpointBlock.meta:type_name -> lake.BlockMeta
 	14, // 20: lake.CheckpointSnapshot.models:type_name -> lake.ModelDescriptor
 	24, // 21: lake.CheckpointSnapshot.blocks:type_name -> lake.CheckpointBlock
 	25, // 22: lake.SaveCheckpointResponse.snapshot:type_name -> lake.CheckpointSnapshot
 	25, // 23: lake.RestoreCheckpointRequest.snapshot:type_name -> lake.CheckpointSnapshot
-	65, // 24: lake.DefragMove.id:type_name -> lake.KVBlockID
-	68, // 25: lake.TriggerDefragRequest.pool_kind:type_name -> lake.PoolKind
+	75, // 24: lake.DefragMove.id:type_name -> lake.KVBlockID
+	78, // 25: lake.TriggerDefragRequest.pool_kind:type_name -> lake.PoolKind
 	1,  // 26: lake.TriggerDefragRequest.mode:type_name -> lake.DefragMode
 	29, // 27: lake.TriggerDefragResponse.moves:type_name -> lake.DefragMove
-	34, // 28: lake.LookupPrefixResponse.blocks:type_name -> lake.ReusableBlock
-	65, // 29: lake.ReusableBlock.id:type_name -> lake.KVBlockID
-	69, // 30: lake.ReusableBlock.meta:type_name -> lake.BlockMeta
-	65, // 31: lake.LocateRequest.ids:type_name -> lake.KVBlockID
-	69, // 32: lake.LocateResponse.blocks:type_name -> lake.BlockMeta
-	69, // 33: lake.RegisterBlocksRequest.blocks:type_name -> lake.BlockMeta
-	65, // 34: lake.RefDelta.id:type_name -> lake.KVBlockID
-	2,  // 35: lake.RefDelta.kind:type_name -> lake.RefKind
-	5,  // 36: lake.LeaseHeartbeat.op:type_name -> lake.LeaseHeartbeat.Op
-	65, // 37: lake.DispatchRequest.reuse_blocks:type_name -> lake.KVBlockID
-	64, // 38: lake.DispatchRequest.hints:type_name -> lake.DispatchRequest.HintsEntry
-	65, // 39: lake.PlaceBlocksRequest.ids:type_name -> lake.KVBlockID
-	46, // 40: lake.TransferBatchRequest.reqs:type_name -> lake.TransferRequest
-	66, // 41: lake.TransferRequest.source:type_name -> lake.Location
-	6,  // 42: lake.TransferStatusResponse.state:type_name -> lake.TransferStatusResponse.State
-	65, // 43: lake.PullRequest.ids:type_name -> lake.KVBlockID
-	3,  // 44: lake.PullRequest.policy:type_name -> lake.PullPolicy
-	56, // 45: lake.PublishRequest.slices:type_name -> lake.LayerSlice
-	65, // 46: lake.LayerSlice.id:type_name -> lake.KVBlockID
-	13, // 47: lake.Ack.backpressure:type_name -> lake.BackpressureSignal
-	59, // 48: lake.PutBlocksRequest.blocks:type_name -> lake.OpaqueBlock
-	65, // 49: lake.OpaqueBlock.id:type_name -> lake.KVBlockID
-	65, // 50: lake.GetBlocksRequest.ids:type_name -> lake.KVBlockID
-	59, // 51: lake.GetBlocksResponse.blocks:type_name -> lake.OpaqueBlock
-	7,  // 52: lake.ControlPlaneService.SubscribeView:input_type -> lake.SubscribeRequest
-	10, // 53: lake.ControlPlaneService.LookupPrefix:input_type -> lake.LookupPrefixRequest
-	35, // 54: lake.ControlPlaneService.Locate:input_type -> lake.LocateRequest
-	37, // 55: lake.ControlPlaneService.AdmitRegisterBlocks:input_type -> lake.RegisterBlocksRequest
-	37, // 56: lake.ControlPlaneService.RegisterBlocks:input_type -> lake.RegisterBlocksRequest
-	38, // 57: lake.ControlPlaneService.ReportRef:input_type -> lake.RefDelta
-	39, // 58: lake.ControlPlaneService.RequestBarrier:input_type -> lake.RequestBarrierRequest
-	40, // 59: lake.ControlPlaneService.Lease:input_type -> lake.LeaseHeartbeat
-	15, // 60: lake.ControlPlaneService.RegisterModel:input_type -> lake.RegisterModelRequest
-	16, // 61: lake.ControlPlaneService.DeregisterModel:input_type -> lake.DeregisterModelRequest
-	17, // 62: lake.ControlPlaneService.SetModelQuota:input_type -> lake.SetModelQuotaRequest
-	18, // 63: lake.ControlPlaneService.GetModelQuota:input_type -> lake.GetModelQuotaRequest
-	21, // 64: lake.ControlPlaneService.ReconcileOrphans:input_type -> lake.ReconcileOrphansRequest
-	23, // 65: lake.ControlPlaneService.DiscardBlocks:input_type -> lake.DiscardBlocksRequest
-	26, // 66: lake.ControlPlaneService.SaveCheckpoint:input_type -> lake.SaveCheckpointRequest
-	28, // 67: lake.ControlPlaneService.RestoreCheckpoint:input_type -> lake.RestoreCheckpointRequest
-	30, // 68: lake.ControlPlaneService.TriggerDefrag:input_type -> lake.TriggerDefragRequest
-	32, // 69: lake.ControlPlaneService.PauseBackground:input_type -> lake.PauseBackgroundRequest
-	42, // 70: lake.AgentService.Dispatch:input_type -> lake.DispatchRequest
-	43, // 71: lake.AgentService.ReportLoad:input_type -> lake.LoadReport
-	44, // 72: lake.AgentService.PlaceBlocks:input_type -> lake.PlaceBlocksRequest
-	45, // 73: lake.TransferService.SubmitTransfer:input_type -> lake.TransferBatchRequest
-	48, // 74: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
-	50, // 75: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
-	51, // 76: lake.TransferService.Pull:input_type -> lake.PullRequest
-	53, // 77: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
-	54, // 78: lake.TransferService.Publish:input_type -> lake.PublishRequest
-	55, // 79: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
-	58, // 80: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
-	60, // 81: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
-	62, // 82: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
-	8,  // 83: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
-	33, // 84: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
-	36, // 85: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
-	57, // 86: lake.ControlPlaneService.AdmitRegisterBlocks:output_type -> lake.Ack
-	57, // 87: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
-	57, // 88: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
-	57, // 89: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
-	41, // 90: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
-	57, // 91: lake.ControlPlaneService.RegisterModel:output_type -> lake.Ack
-	57, // 92: lake.ControlPlaneService.DeregisterModel:output_type -> lake.Ack
-	57, // 93: lake.ControlPlaneService.SetModelQuota:output_type -> lake.Ack
-	19, // 94: lake.ControlPlaneService.GetModelQuota:output_type -> lake.GetModelQuotaResponse
-	22, // 95: lake.ControlPlaneService.ReconcileOrphans:output_type -> lake.ReconcileOrphansResponse
-	57, // 96: lake.ControlPlaneService.DiscardBlocks:output_type -> lake.Ack
-	27, // 97: lake.ControlPlaneService.SaveCheckpoint:output_type -> lake.SaveCheckpointResponse
-	57, // 98: lake.ControlPlaneService.RestoreCheckpoint:output_type -> lake.Ack
-	31, // 99: lake.ControlPlaneService.TriggerDefrag:output_type -> lake.TriggerDefragResponse
-	57, // 100: lake.ControlPlaneService.PauseBackground:output_type -> lake.Ack
-	57, // 101: lake.AgentService.Dispatch:output_type -> lake.Ack
-	57, // 102: lake.AgentService.ReportLoad:output_type -> lake.Ack
-	57, // 103: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
-	47, // 104: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
-	49, // 105: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
-	57, // 106: lake.TransferService.FreeBatch:output_type -> lake.Ack
-	52, // 107: lake.TransferService.Pull:output_type -> lake.PullResponse
-	57, // 108: lake.TransferService.FreePull:output_type -> lake.Ack
-	57, // 109: lake.TransferService.Publish:output_type -> lake.Ack
-	57, // 110: lake.TransferService.FreePublish:output_type -> lake.Ack
-	57, // 111: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
-	61, // 112: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
-	63, // 113: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
-	83, // [83:114] is the sub-list for method output_type
-	52, // [52:83] is the sub-list for method input_type
-	52, // [52:52] is the sub-list for extension type_name
-	52, // [52:52] is the sub-list for extension extendee
-	0,  // [0:52] is the sub-list for field type_name
+	33, // 28: lake.ShardMap.nodes:type_name -> lake.ShardEntry
+	75, // 29: lake.ShardMigration.id:type_name -> lake.KVBlockID
+	34, // 30: lake.GetShardMapResponse.map:type_name -> lake.ShardMap
+	34, // 31: lake.JoinShardNodeResponse.map:type_name -> lake.ShardMap
+	35, // 32: lake.JoinShardNodeResponse.migrations:type_name -> lake.ShardMigration
+	34, // 33: lake.DrainShardNodeResponse.map:type_name -> lake.ShardMap
+	35, // 34: lake.DrainShardNodeResponse.migrations:type_name -> lake.ShardMigration
+	75, // 35: lake.DrainShardNodeResponse.push_l2:type_name -> lake.KVBlockID
+	44, // 36: lake.LookupPrefixResponse.blocks:type_name -> lake.ReusableBlock
+	75, // 37: lake.ReusableBlock.id:type_name -> lake.KVBlockID
+	79, // 38: lake.ReusableBlock.meta:type_name -> lake.BlockMeta
+	75, // 39: lake.LocateRequest.ids:type_name -> lake.KVBlockID
+	79, // 40: lake.LocateResponse.blocks:type_name -> lake.BlockMeta
+	79, // 41: lake.RegisterBlocksRequest.blocks:type_name -> lake.BlockMeta
+	75, // 42: lake.RefDelta.id:type_name -> lake.KVBlockID
+	2,  // 43: lake.RefDelta.kind:type_name -> lake.RefKind
+	5,  // 44: lake.LeaseHeartbeat.op:type_name -> lake.LeaseHeartbeat.Op
+	75, // 45: lake.DispatchRequest.reuse_blocks:type_name -> lake.KVBlockID
+	74, // 46: lake.DispatchRequest.hints:type_name -> lake.DispatchRequest.HintsEntry
+	75, // 47: lake.PlaceBlocksRequest.ids:type_name -> lake.KVBlockID
+	56, // 48: lake.TransferBatchRequest.reqs:type_name -> lake.TransferRequest
+	76, // 49: lake.TransferRequest.source:type_name -> lake.Location
+	6,  // 50: lake.TransferStatusResponse.state:type_name -> lake.TransferStatusResponse.State
+	75, // 51: lake.PullRequest.ids:type_name -> lake.KVBlockID
+	3,  // 52: lake.PullRequest.policy:type_name -> lake.PullPolicy
+	66, // 53: lake.PublishRequest.slices:type_name -> lake.LayerSlice
+	75, // 54: lake.LayerSlice.id:type_name -> lake.KVBlockID
+	13, // 55: lake.Ack.backpressure:type_name -> lake.BackpressureSignal
+	69, // 56: lake.PutBlocksRequest.blocks:type_name -> lake.OpaqueBlock
+	75, // 57: lake.OpaqueBlock.id:type_name -> lake.KVBlockID
+	75, // 58: lake.GetBlocksRequest.ids:type_name -> lake.KVBlockID
+	69, // 59: lake.GetBlocksResponse.blocks:type_name -> lake.OpaqueBlock
+	7,  // 60: lake.ControlPlaneService.SubscribeView:input_type -> lake.SubscribeRequest
+	10, // 61: lake.ControlPlaneService.LookupPrefix:input_type -> lake.LookupPrefixRequest
+	45, // 62: lake.ControlPlaneService.Locate:input_type -> lake.LocateRequest
+	47, // 63: lake.ControlPlaneService.AdmitRegisterBlocks:input_type -> lake.RegisterBlocksRequest
+	47, // 64: lake.ControlPlaneService.RegisterBlocks:input_type -> lake.RegisterBlocksRequest
+	48, // 65: lake.ControlPlaneService.ReportRef:input_type -> lake.RefDelta
+	49, // 66: lake.ControlPlaneService.RequestBarrier:input_type -> lake.RequestBarrierRequest
+	50, // 67: lake.ControlPlaneService.Lease:input_type -> lake.LeaseHeartbeat
+	15, // 68: lake.ControlPlaneService.RegisterModel:input_type -> lake.RegisterModelRequest
+	16, // 69: lake.ControlPlaneService.DeregisterModel:input_type -> lake.DeregisterModelRequest
+	17, // 70: lake.ControlPlaneService.SetModelQuota:input_type -> lake.SetModelQuotaRequest
+	18, // 71: lake.ControlPlaneService.GetModelQuota:input_type -> lake.GetModelQuotaRequest
+	21, // 72: lake.ControlPlaneService.ReconcileOrphans:input_type -> lake.ReconcileOrphansRequest
+	23, // 73: lake.ControlPlaneService.DiscardBlocks:input_type -> lake.DiscardBlocksRequest
+	26, // 74: lake.ControlPlaneService.SaveCheckpoint:input_type -> lake.SaveCheckpointRequest
+	28, // 75: lake.ControlPlaneService.RestoreCheckpoint:input_type -> lake.RestoreCheckpointRequest
+	30, // 76: lake.ControlPlaneService.TriggerDefrag:input_type -> lake.TriggerDefragRequest
+	32, // 77: lake.ControlPlaneService.PauseBackground:input_type -> lake.PauseBackgroundRequest
+	36, // 78: lake.ControlPlaneService.GetShardMap:input_type -> lake.GetShardMapRequest
+	38, // 79: lake.ControlPlaneService.JoinShardNode:input_type -> lake.JoinShardNodeRequest
+	40, // 80: lake.ControlPlaneService.DrainShardNode:input_type -> lake.DrainShardNodeRequest
+	42, // 81: lake.ControlPlaneService.RemoveShardNode:input_type -> lake.RemoveShardNodeRequest
+	52, // 82: lake.AgentService.Dispatch:input_type -> lake.DispatchRequest
+	53, // 83: lake.AgentService.ReportLoad:input_type -> lake.LoadReport
+	54, // 84: lake.AgentService.PlaceBlocks:input_type -> lake.PlaceBlocksRequest
+	55, // 85: lake.TransferService.SubmitTransfer:input_type -> lake.TransferBatchRequest
+	58, // 86: lake.TransferService.GetTransferStatus:input_type -> lake.TransferStatusRequest
+	60, // 87: lake.TransferService.FreeBatch:input_type -> lake.FreeBatchRequest
+	61, // 88: lake.TransferService.Pull:input_type -> lake.PullRequest
+	63, // 89: lake.TransferService.FreePull:input_type -> lake.FreePullRequest
+	64, // 90: lake.TransferService.Publish:input_type -> lake.PublishRequest
+	65, // 91: lake.TransferService.FreePublish:input_type -> lake.FreePublishRequest
+	68, // 92: lake.TcpDataService.PutBlocks:input_type -> lake.PutBlocksRequest
+	70, // 93: lake.TcpDataService.GetBlocks:input_type -> lake.GetBlocksRequest
+	72, // 94: lake.WorkerService.Generate:input_type -> lake.GenerateRequest
+	8,  // 95: lake.ControlPlaneService.SubscribeView:output_type -> lake.ViewUpdate
+	43, // 96: lake.ControlPlaneService.LookupPrefix:output_type -> lake.LookupPrefixResponse
+	46, // 97: lake.ControlPlaneService.Locate:output_type -> lake.LocateResponse
+	67, // 98: lake.ControlPlaneService.AdmitRegisterBlocks:output_type -> lake.Ack
+	67, // 99: lake.ControlPlaneService.RegisterBlocks:output_type -> lake.Ack
+	67, // 100: lake.ControlPlaneService.ReportRef:output_type -> lake.Ack
+	67, // 101: lake.ControlPlaneService.RequestBarrier:output_type -> lake.Ack
+	51, // 102: lake.ControlPlaneService.Lease:output_type -> lake.LeaseAck
+	67, // 103: lake.ControlPlaneService.RegisterModel:output_type -> lake.Ack
+	67, // 104: lake.ControlPlaneService.DeregisterModel:output_type -> lake.Ack
+	67, // 105: lake.ControlPlaneService.SetModelQuota:output_type -> lake.Ack
+	19, // 106: lake.ControlPlaneService.GetModelQuota:output_type -> lake.GetModelQuotaResponse
+	22, // 107: lake.ControlPlaneService.ReconcileOrphans:output_type -> lake.ReconcileOrphansResponse
+	67, // 108: lake.ControlPlaneService.DiscardBlocks:output_type -> lake.Ack
+	27, // 109: lake.ControlPlaneService.SaveCheckpoint:output_type -> lake.SaveCheckpointResponse
+	67, // 110: lake.ControlPlaneService.RestoreCheckpoint:output_type -> lake.Ack
+	31, // 111: lake.ControlPlaneService.TriggerDefrag:output_type -> lake.TriggerDefragResponse
+	67, // 112: lake.ControlPlaneService.PauseBackground:output_type -> lake.Ack
+	37, // 113: lake.ControlPlaneService.GetShardMap:output_type -> lake.GetShardMapResponse
+	39, // 114: lake.ControlPlaneService.JoinShardNode:output_type -> lake.JoinShardNodeResponse
+	41, // 115: lake.ControlPlaneService.DrainShardNode:output_type -> lake.DrainShardNodeResponse
+	67, // 116: lake.ControlPlaneService.RemoveShardNode:output_type -> lake.Ack
+	67, // 117: lake.AgentService.Dispatch:output_type -> lake.Ack
+	67, // 118: lake.AgentService.ReportLoad:output_type -> lake.Ack
+	67, // 119: lake.AgentService.PlaceBlocks:output_type -> lake.Ack
+	57, // 120: lake.TransferService.SubmitTransfer:output_type -> lake.TransferBatchAck
+	59, // 121: lake.TransferService.GetTransferStatus:output_type -> lake.TransferStatusResponse
+	67, // 122: lake.TransferService.FreeBatch:output_type -> lake.Ack
+	62, // 123: lake.TransferService.Pull:output_type -> lake.PullResponse
+	67, // 124: lake.TransferService.FreePull:output_type -> lake.Ack
+	67, // 125: lake.TransferService.Publish:output_type -> lake.Ack
+	67, // 126: lake.TransferService.FreePublish:output_type -> lake.Ack
+	67, // 127: lake.TcpDataService.PutBlocks:output_type -> lake.Ack
+	71, // 128: lake.TcpDataService.GetBlocks:output_type -> lake.GetBlocksResponse
+	73, // 129: lake.WorkerService.Generate:output_type -> lake.GenerateResponse
+	95, // [95:130] is the sub-list for method output_type
+	60, // [60:95] is the sub-list for method input_type
+	60, // [60:60] is the sub-list for extension type_name
+	60, // [60:60] is the sub-list for extension extendee
+	0,  // [0:60] is the sub-list for field type_name
 }
 
 func init() { file_lake_proto_init() }
@@ -4383,7 +5055,7 @@ func file_lake_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_lake_proto_rawDesc), len(file_lake_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   58,
+			NumMessages:   68,
 			NumExtensions: 0,
 			NumServices:   5,
 		},

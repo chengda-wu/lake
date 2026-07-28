@@ -318,6 +318,15 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 - **缩容**:Drain 目标 Node(block 迁出或下沉 L3)再下线。
 - 迁移为后台低优先级任务,可暂停让路高峰。
 
+**P4.9 原型**(单测模拟;真跨机字节 → P5):
+
+- Proto:`GetShardMap` / `JoinShardNode` / `DrainShardNode` / `RemoveShardNode`。
+- CP 持虚拟节点一致性哈希环(`ShardRing`);`owner_of(block_hash)` 定所有权。
+- **Join**:重算环,只返回所有权迁入新节点的 `ShardMigration`(最小迁移)。
+- **Drain**:节点标 `draining` 并退出所有权环 → 迁出计划 + `push_l2` 候选(Drain 推 L2 逻辑;字节搬运/Transfer 留 P5)。
+- **Remove**:仅当该节点在位置视图中已无 L0/L1/L2 placement(迁移/推 L2 完成)才可从 shard map 删除——ownership remap ≠ 物理完成。
+- 参考:Mooncake `MetadataShard` 分片键 / Unmount 与 replica 生命周期;差异是 lake 环管 KV Node 所有权,并用 CP `locations` 作 Drain 完成门闩。
+
 ## GC
 
 回收无效/不可达 block(P4.7 原型 RPC:`ReconcileOrphans` / `DiscardBlocks`;checkpoint:`SaveCheckpoint`/`RestoreCheckpoint`+`CheckpointStore` 内存 mock,真 etcd→P6):

@@ -37,6 +37,10 @@ const (
 	ControlPlaneService_RestoreCheckpoint_FullMethodName   = "/lake.ControlPlaneService/RestoreCheckpoint"
 	ControlPlaneService_TriggerDefrag_FullMethodName       = "/lake.ControlPlaneService/TriggerDefrag"
 	ControlPlaneService_PauseBackground_FullMethodName     = "/lake.ControlPlaneService/PauseBackground"
+	ControlPlaneService_GetShardMap_FullMethodName         = "/lake.ControlPlaneService/GetShardMap"
+	ControlPlaneService_JoinShardNode_FullMethodName       = "/lake.ControlPlaneService/JoinShardNode"
+	ControlPlaneService_DrainShardNode_FullMethodName      = "/lake.ControlPlaneService/DrainShardNode"
+	ControlPlaneService_RemoveShardNode_FullMethodName     = "/lake.ControlPlaneService/RemoveShardNode"
 )
 
 // ControlPlaneServiceClient is the client API for ControlPlaneService service.
@@ -119,6 +123,14 @@ type ControlPlaneServiceClient interface {
 	TriggerDefrag(ctx context.Context, in *TriggerDefragRequest, opts ...grpc.CallOption) (*TriggerDefragResponse, error)
 	// 暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
 	PauseBackground(ctx context.Context, in *PauseBackgroundRequest, opts ...grpc.CallOption) (*Ack, error)
+	// P4.9:一致性哈希分片(F11 扩缩)。单测模拟环/最小迁移/Drain;真跨机字节迁移 → P5。
+	GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error)
+	// 加入 KV Node → 重算环,仅返回落在新节点区间的迁移计划(最小迁移)。
+	JoinShardNode(ctx context.Context, in *JoinShardNodeRequest, opts ...grpc.CallOption) (*JoinShardNodeResponse, error)
+	// 缩容:标记 Drain + 迁出计划 + 需先推 L2 的 block 列表(逻辑;字节迁移 P5)。
+	DrainShardNode(ctx context.Context, in *DrainShardNodeRequest, opts ...grpc.CallOption) (*DrainShardNodeResponse, error)
+	// Drain 完成后从环移除(无剩余所有权时)。
+	RemoveShardNode(ctx context.Context, in *RemoveShardNodeRequest, opts ...grpc.CallOption) (*Ack, error)
 }
 
 type controlPlaneServiceClient struct {
@@ -324,6 +336,46 @@ func (c *controlPlaneServiceClient) PauseBackground(ctx context.Context, in *Pau
 	return out, nil
 }
 
+func (c *controlPlaneServiceClient) GetShardMap(ctx context.Context, in *GetShardMapRequest, opts ...grpc.CallOption) (*GetShardMapResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetShardMapResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_GetShardMap_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) JoinShardNode(ctx context.Context, in *JoinShardNodeRequest, opts ...grpc.CallOption) (*JoinShardNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JoinShardNodeResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_JoinShardNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) DrainShardNode(ctx context.Context, in *DrainShardNodeRequest, opts ...grpc.CallOption) (*DrainShardNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DrainShardNodeResponse)
+	err := c.cc.Invoke(ctx, ControlPlaneService_DrainShardNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) RemoveShardNode(ctx context.Context, in *RemoveShardNodeRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_RemoveShardNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServiceServer is the server API for ControlPlaneService service.
 // All implementations must embed UnimplementedControlPlaneServiceServer
 // for forward compatibility.
@@ -404,6 +456,14 @@ type ControlPlaneServiceServer interface {
 	TriggerDefrag(context.Context, *TriggerDefragRequest) (*TriggerDefragResponse, error)
 	// 暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
 	PauseBackground(context.Context, *PauseBackgroundRequest) (*Ack, error)
+	// P4.9:一致性哈希分片(F11 扩缩)。单测模拟环/最小迁移/Drain;真跨机字节迁移 → P5。
+	GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error)
+	// 加入 KV Node → 重算环,仅返回落在新节点区间的迁移计划(最小迁移)。
+	JoinShardNode(context.Context, *JoinShardNodeRequest) (*JoinShardNodeResponse, error)
+	// 缩容:标记 Drain + 迁出计划 + 需先推 L2 的 block 列表(逻辑;字节迁移 P5)。
+	DrainShardNode(context.Context, *DrainShardNodeRequest) (*DrainShardNodeResponse, error)
+	// Drain 完成后从环移除(无剩余所有权时)。
+	RemoveShardNode(context.Context, *RemoveShardNodeRequest) (*Ack, error)
 	mustEmbedUnimplementedControlPlaneServiceServer()
 }
 
@@ -467,6 +527,18 @@ func (UnimplementedControlPlaneServiceServer) TriggerDefrag(context.Context, *Tr
 }
 func (UnimplementedControlPlaneServiceServer) PauseBackground(context.Context, *PauseBackgroundRequest) (*Ack, error) {
 	return nil, status.Error(codes.Unimplemented, "method PauseBackground not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) GetShardMap(context.Context, *GetShardMapRequest) (*GetShardMapResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetShardMap not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) JoinShardNode(context.Context, *JoinShardNodeRequest) (*JoinShardNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method JoinShardNode not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) DrainShardNode(context.Context, *DrainShardNodeRequest) (*DrainShardNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DrainShardNode not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) RemoveShardNode(context.Context, *RemoveShardNodeRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveShardNode not implemented")
 }
 func (UnimplementedControlPlaneServiceServer) mustEmbedUnimplementedControlPlaneServiceServer() {}
 func (UnimplementedControlPlaneServiceServer) testEmbeddedByValue()                             {}
@@ -784,6 +856,78 @@ func _ControlPlaneService_PauseBackground_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlaneService_GetShardMap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetShardMapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).GetShardMap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_GetShardMap_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).GetShardMap(ctx, req.(*GetShardMapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_JoinShardNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JoinShardNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).JoinShardNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_JoinShardNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).JoinShardNode(ctx, req.(*JoinShardNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_DrainShardNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DrainShardNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).DrainShardNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_DrainShardNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).DrainShardNode(ctx, req.(*DrainShardNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_RemoveShardNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveShardNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).RemoveShardNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_RemoveShardNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).RemoveShardNode(ctx, req.(*RemoveShardNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlaneService_ServiceDesc is the grpc.ServiceDesc for ControlPlaneService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -850,6 +994,22 @@ var ControlPlaneService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PauseBackground",
 			Handler:    _ControlPlaneService_PauseBackground_Handler,
+		},
+		{
+			MethodName: "GetShardMap",
+			Handler:    _ControlPlaneService_GetShardMap_Handler,
+		},
+		{
+			MethodName: "JoinShardNode",
+			Handler:    _ControlPlaneService_JoinShardNode_Handler,
+		},
+		{
+			MethodName: "DrainShardNode",
+			Handler:    _ControlPlaneService_DrainShardNode_Handler,
+		},
+		{
+			MethodName: "RemoveShardNode",
+			Handler:    _ControlPlaneService_RemoveShardNode_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

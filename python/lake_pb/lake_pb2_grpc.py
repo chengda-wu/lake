@@ -145,6 +145,26 @@ class ControlPlaneServiceStub:
                 request_serializer=lake__pb2.PauseBackgroundRequest.SerializeToString,
                 response_deserializer=lake__pb2.Ack.FromString,
                 _registered_method=True)
+        self.GetShardMap = channel.unary_unary(
+                '/lake.ControlPlaneService/GetShardMap',
+                request_serializer=lake__pb2.GetShardMapRequest.SerializeToString,
+                response_deserializer=lake__pb2.GetShardMapResponse.FromString,
+                _registered_method=True)
+        self.JoinShardNode = channel.unary_unary(
+                '/lake.ControlPlaneService/JoinShardNode',
+                request_serializer=lake__pb2.JoinShardNodeRequest.SerializeToString,
+                response_deserializer=lake__pb2.JoinShardNodeResponse.FromString,
+                _registered_method=True)
+        self.DrainShardNode = channel.unary_unary(
+                '/lake.ControlPlaneService/DrainShardNode',
+                request_serializer=lake__pb2.DrainShardNodeRequest.SerializeToString,
+                response_deserializer=lake__pb2.DrainShardNodeResponse.FromString,
+                _registered_method=True)
+        self.RemoveShardNode = channel.unary_unary(
+                '/lake.ControlPlaneService/RemoveShardNode',
+                request_serializer=lake__pb2.RemoveShardNodeRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServiceServicer:
@@ -323,6 +343,34 @@ class ControlPlaneServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetShardMap(self, request, context):
+        """P4.9:一致性哈希分片(F11 扩缩)。单测模拟环/最小迁移/Drain;真跨机字节迁移 → P5。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def JoinShardNode(self, request, context):
+        """加入 KV Node → 重算环,仅返回落在新节点区间的迁移计划(最小迁移)。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DrainShardNode(self, request, context):
+        """缩容:标记 Drain + 迁出计划 + 需先推 L2 的 block 列表(逻辑;字节迁移 P5)。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RemoveShardNode(self, request, context):
+        """Drain 完成后从环移除(无剩余所有权时)。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -414,6 +462,26 @@ def add_ControlPlaneServiceServicer_to_server(servicer, server):
             'PauseBackground': grpc.unary_unary_rpc_method_handler(
                     servicer.PauseBackground,
                     request_deserializer=lake__pb2.PauseBackgroundRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'GetShardMap': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetShardMap,
+                    request_deserializer=lake__pb2.GetShardMapRequest.FromString,
+                    response_serializer=lake__pb2.GetShardMapResponse.SerializeToString,
+            ),
+            'JoinShardNode': grpc.unary_unary_rpc_method_handler(
+                    servicer.JoinShardNode,
+                    request_deserializer=lake__pb2.JoinShardNodeRequest.FromString,
+                    response_serializer=lake__pb2.JoinShardNodeResponse.SerializeToString,
+            ),
+            'DrainShardNode': grpc.unary_unary_rpc_method_handler(
+                    servicer.DrainShardNode,
+                    request_deserializer=lake__pb2.DrainShardNodeRequest.FromString,
+                    response_serializer=lake__pb2.DrainShardNodeResponse.SerializeToString,
+            ),
+            'RemoveShardNode': grpc.unary_unary_rpc_method_handler(
+                    servicer.RemoveShardNode,
+                    request_deserializer=lake__pb2.RemoveShardNodeRequest.FromString,
                     response_serializer=lake__pb2.Ack.SerializeToString,
             ),
     }
@@ -923,6 +991,114 @@ class ControlPlaneService:
             target,
             '/lake.ControlPlaneService/PauseBackground',
             lake__pb2.PauseBackgroundRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetShardMap(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/GetShardMap',
+            lake__pb2.GetShardMapRequest.SerializeToString,
+            lake__pb2.GetShardMapResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def JoinShardNode(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/JoinShardNode',
+            lake__pb2.JoinShardNodeRequest.SerializeToString,
+            lake__pb2.JoinShardNodeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DrainShardNode(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/DrainShardNode',
+            lake__pb2.DrainShardNodeRequest.SerializeToString,
+            lake__pb2.DrainShardNodeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RemoveShardNode(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/RemoveShardNode',
+            lake__pb2.RemoveShardNodeRequest.SerializeToString,
             lake__pb2.Ack.FromString,
             options,
             channel_credentials,

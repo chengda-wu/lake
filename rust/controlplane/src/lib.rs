@@ -5,10 +5,12 @@
 //! P4.6:按命名空间软/硬配额 + 借用 + `BackpressureSignal` + `AdmitRegisterBlocks`。
 //! P4.7:冷块 GC / 孤儿 TTL / 节点 reconcile / `CheckpointStore` 内存 mock。
 //! P4.8:碎片整理计划(`TriggerDefrag`/`PauseBackground`)+ Location segment/offset。
+//! P4.9:一致性哈希分片(`GetShardMap`/`JoinShardNode`/`DrainShardNode`)。
 //! 参考:`registry/mod.rs::register_sequence_hash`；Mooncake `ClearInvalidHandles` /
-//! `put_start_discard_timeout`；LMCache `QuotaManager`；Mooncake allocator(无 compaction)。
+//! `put_start_discard_timeout` / `MetadataShard`；LMCache `QuotaManager`；
+//! Mooncake allocator(无 compaction)。
 //! 关键差异:节点级 reconcile 兜底 writeback 泄漏(非会话 TTL)；冷块留 L2/L3；
-//! checkpoint 非 etcd(P6)；主动 defrag 经 BandwidthPool。
+//! checkpoint 非 etcd(P6)；主动 defrag 经 BandwidthPool；分片只出迁移计划(字节 P5)。
 
 mod authority;
 mod checkpoint;
@@ -16,6 +18,7 @@ mod defrag;
 mod hash_chain;
 mod quota;
 mod reconcile;
+mod shard;
 mod tier;
 
 use std::pin::Pin;
@@ -30,6 +33,7 @@ pub use checkpoint::{CheckpointStore, MemoryCheckpointStore};
 pub use defrag::DEFAULT_DEFRAG_SLOT_BYTES;
 pub use lake_proto::lake::*;
 pub use reconcile::DEFAULT_ORPHAN_TTL_MS;
+pub use shard::DEFAULT_VNODE_COUNT;
 
 use control_plane_service_server::ControlPlaneService;
 
@@ -509,6 +513,94 @@ impl ControlPlaneService for ControlPlane {
             err: String::new(),
             backpressure: None,
         }))
+    }
+
+    async fn get_shard_map(
+        &self,
+        _request: Request<GetShardMapRequest>,
+    ) -> Result<Response<GetShardMapResponse>, Status> {
+        let auth = self.inner.lock().unwrap();
+        Ok(Response::new(GetShardMapResponse {
+            map: Some(auth.shard_map()),
+            ok: true,
+            err: String::new(),
+        }))
+    }
+
+    async fn join_shard_node(
+        &self,
+        request: Request<JoinShardNodeRequest>,
+    ) -> Result<Response<JoinShardNodeResponse>, Status> {
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        match auth.join_shard_node(&req.node_id, req.vnode_count) {
+            Ok((map, migrations)) => {
+                let migration_count = migrations.len() as u32;
+                Ok(Response::new(JoinShardNodeResponse {
+                    map: Some(map),
+                    migrations,
+                    migration_count,
+                    ok: true,
+                    err: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(JoinShardNodeResponse {
+                map: None,
+                migrations: vec![],
+                migration_count: 0,
+                ok: false,
+                err: e,
+            })),
+        }
+    }
+
+    async fn drain_shard_node(
+        &self,
+        request: Request<DrainShardNodeRequest>,
+    ) -> Result<Response<DrainShardNodeResponse>, Status> {
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        match auth.drain_shard_node(&req.node_id) {
+            Ok((map, migrations, push_l2)) => {
+                let migration_count = migrations.len() as u32;
+                Ok(Response::new(DrainShardNodeResponse {
+                    map: Some(map),
+                    migrations,
+                    push_l2,
+                    migration_count,
+                    ok: true,
+                    err: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(DrainShardNodeResponse {
+                map: None,
+                migrations: vec![],
+                push_l2: vec![],
+                migration_count: 0,
+                ok: false,
+                err: e,
+            })),
+        }
+    }
+
+    async fn remove_shard_node(
+        &self,
+        request: Request<RemoveShardNodeRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        match auth.remove_shard_node(&req.node_id) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+                backpressure: None,
+            })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
+        }
     }
 }
 
@@ -1765,6 +1857,107 @@ mod tests {
                 "move onto foreign slot; {m:?}"
             );
         }
+    }
+
+    // --- P4.9: consistent-hash sharding ---
+
+    #[test]
+    fn p49_shard_membership_get_map() {
+        let mut auth = Authority::default();
+        auth.join_shard_node("n0", 16).unwrap();
+        auth.join_shard_node("n1", 16).unwrap();
+        let map = auth.shard_map();
+        assert_eq!(map.nodes.len(), 2);
+        assert!(map.generation >= 2);
+        assert!(auth.shard_owner(b"any-key").is_some());
+    }
+
+    #[test]
+    fn p49_expand_minimal_migration() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.join_shard_node("n0", 32).unwrap();
+        auth.join_shard_node("n1", 32).unwrap();
+        // Register many blocks so join n2 produces measurable (but bounded) moves.
+        for i in 0..80u32 {
+            let h = format!("b{i:03}").into_bytes();
+            auth.register("n0", &prefix(&[&h]), vec![meta("m", &h)])
+                .unwrap();
+        }
+        let (_map, migs) = auth.join_shard_node("n2", 32).unwrap();
+        assert!(
+            !migs.is_empty() && migs.len() < 80,
+            "expand should move a subset, got {}",
+            migs.len()
+        );
+        assert!(migs.iter().all(|m| m.to_node == "n2"));
+        assert!(migs.iter().all(|m| m.from_node == "n0" || m.from_node == "n1"));
+        assert!(migs.iter().all(|m| !m.push_l2_first));
+    }
+
+    #[test]
+    fn p49_drain_push_l2_and_remove() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.join_shard_node("n0", 32).unwrap();
+        auth.join_shard_node("n1", 32).unwrap();
+        // Place blocks with L2 on n1.
+        for i in 0..20u32 {
+            let h = format!("d{i:02}").into_bytes();
+            let mut m = meta("m", &h);
+            m.locations[0].node_id = "n1".into();
+            auth.register("n1", &prefix(&[&h]), vec![m]).unwrap();
+        }
+        let (map, migs, push) = auth.drain_shard_node("n1").unwrap();
+        assert!(map.nodes.iter().any(|n| n.node_id == "n1" && n.draining));
+        assert!(!push.is_empty(), "Drain must list L2 push candidates");
+        assert!(migs.iter().all(|m| m.from_node == "n1" && m.push_l2_first));
+        // After drain, no key should own on n1.
+        for id in &push {
+            assert_ne!(auth.shard_owner(&id.block_hash).as_deref(), Some("n1"));
+        }
+        // Ownership remap ≠ physical done: remove must fail while L2 remains.
+        let err = auth.remove_shard_node("n1").unwrap_err();
+        assert!(
+            err.contains("placement"),
+            "expected placement gate, got {err}"
+        );
+        // Simulate migration completion: clear n1 L2 from the location view.
+        for id in &push {
+            auth.publish_location(
+                &id.model_id,
+                &id.revision,
+                id.pool_kind,
+                &id.block_hash,
+                Tier::L2,
+                "n1",
+                false,
+            )
+            .unwrap();
+        }
+        auth.remove_shard_node("n1").unwrap();
+        let map2 = auth.shard_map();
+        assert!(!map2.nodes.iter().any(|n| n.node_id == "n1"));
+    }
+
+    /// RemoveShardNode must not succeed solely because ownership left the ring.
+    #[test]
+    fn p49_remove_refuses_while_l2_present() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.join_shard_node("n0", 16).unwrap();
+        auth.join_shard_node("n1", 16).unwrap();
+        let mut m = meta("m", b"stuck");
+        m.locations[0].node_id = "n1".into();
+        auth.register("n1", &prefix(&[b"stuck"]), vec![m]).unwrap();
+        auth.drain_shard_node("n1").unwrap();
+        assert!(auth.remove_shard_node("n1").unwrap_err().contains("placement"));
+        // Still in shard map as draining.
+        assert!(auth
+            .shard_map()
+            .nodes
+            .iter()
+            .any(|n| n.node_id == "n1" && n.draining));
     }
 
     /// relocate_in_view updates segment/offset; PauseBackground flips flag.

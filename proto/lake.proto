@@ -101,6 +101,15 @@ service ControlPlaneService {
   rpc TriggerDefrag(TriggerDefragRequest) returns (TriggerDefragResponse);
   // 暂停/恢复共享后台带宽池(promote/demote/GC/defrag,<10%)。
   rpc PauseBackground(PauseBackgroundRequest) returns (Ack);
+
+  // P4.9:一致性哈希分片(F11 扩缩)。单测模拟环/最小迁移/Drain;真跨机字节迁移 → P5。
+  rpc GetShardMap(GetShardMapRequest) returns (GetShardMapResponse);
+  // 加入 KV Node → 重算环,仅返回落在新节点区间的迁移计划(最小迁移)。
+  rpc JoinShardNode(JoinShardNodeRequest) returns (JoinShardNodeResponse);
+  // 缩容:标记 Drain + 迁出计划 + 需先推 L2 的 block 列表(逻辑;字节迁移 P5)。
+  rpc DrainShardNode(DrainShardNodeRequest) returns (DrainShardNodeResponse);
+  // Drain 完成后从环移除(无剩余所有权时)。
+  rpc RemoveShardNode(RemoveShardNodeRequest) returns (Ack);
 }
 
 // =============================================================================
@@ -330,6 +339,57 @@ message TriggerDefragResponse {
 }
 message PauseBackgroundRequest {
   bool paused = 1;  // true=暂停后台;false=恢复
+}
+
+// --- P4.9 一致性哈希分片 ---
+message ShardEntry {
+  string node_id              = 1;
+  uint32 vnode_count          = 2;
+  bool draining               = 3;
+  repeated uint64 vnode_hashes = 4;  // 调试/单测:环上虚拟节点位置
+}
+message ShardMap {
+  uint64 generation              = 1;
+  uint32 default_vnode_count     = 2;
+  repeated ShardEntry nodes      = 3;
+}
+message ShardMigration {
+  lake.KVBlockID id   = 1;
+  string from_node    = 2;
+  string to_node      = 3;
+  // Drain 路径:迁出前须先推 L2(逻辑标记;真字节 → P5)。
+  bool push_l2_first  = 4;
+}
+message GetShardMapRequest {}
+message GetShardMapResponse {
+  ShardMap map = 1;
+  bool ok      = 2;
+  string err   = 3;
+}
+message JoinShardNodeRequest {
+  string node_id       = 1;
+  uint32 vnode_count   = 2;  // 0 → 默认(Authority 内 default_vnode_count)
+}
+message JoinShardNodeResponse {
+  ShardMap map                      = 1;
+  repeated ShardMigration migrations = 2;  // 所有权迁入新节点的 block
+  uint32 migration_count            = 3;
+  bool ok                           = 4;
+  string err                        = 5;
+}
+message DrainShardNodeRequest {
+  string node_id = 1;
+}
+message DrainShardNodeResponse {
+  ShardMap map                      = 1;
+  repeated ShardMigration migrations = 2;  // 从 Drain 节点迁出
+  repeated lake.KVBlockID push_l2    = 3;  // Drain 推 L2 候选
+  uint32 migration_count            = 4;
+  bool ok                           = 5;
+  string err                        = 6;
+}
+message RemoveShardNodeRequest {
+  string node_id = 1;
 }
 
 message LookupPrefixResponse {
