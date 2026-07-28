@@ -115,6 +115,26 @@ class ControlPlaneServiceStub:
                 request_serializer=lake__pb2.GetModelQuotaRequest.SerializeToString,
                 response_deserializer=lake__pb2.GetModelQuotaResponse.FromString,
                 _registered_method=True)
+        self.ReconcileOrphans = channel.unary_unary(
+                '/lake.ControlPlaneService/ReconcileOrphans',
+                request_serializer=lake__pb2.ReconcileOrphansRequest.SerializeToString,
+                response_deserializer=lake__pb2.ReconcileOrphansResponse.FromString,
+                _registered_method=True)
+        self.DiscardBlocks = channel.unary_unary(
+                '/lake.ControlPlaneService/DiscardBlocks',
+                request_serializer=lake__pb2.DiscardBlocksRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
+        self.SaveCheckpoint = channel.unary_unary(
+                '/lake.ControlPlaneService/SaveCheckpoint',
+                request_serializer=lake__pb2.SaveCheckpointRequest.SerializeToString,
+                response_deserializer=lake__pb2.SaveCheckpointResponse.FromString,
+                _registered_method=True)
+        self.RestoreCheckpoint = channel.unary_unary(
+                '/lake.ControlPlaneService/RestoreCheckpoint',
+                request_serializer=lake__pb2.RestoreCheckpointRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServiceServicer:
@@ -247,6 +267,37 @@ class ControlPlaneServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReconcileOrphans(self, request, context):
+        """P4.7:GC + 崩溃 reconcile(F11)。
+        - 上报/扫孤儿(对齐 Mooncake put_start_discard_timeout zombie);
+        - dead_node_id → 节点级 reconcile(清该节点 ref + 摘 L0;兜底 writeback 泄漏);
+        - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾)。
+        元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DiscardBlocks(self, request, context):
+        """显式摘块(元数据);返回 Ack 后调用方删字节。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SaveCheckpoint(self, request, context):
+        """降频 checkpoint(P4=内存 mock;真 etcd → P6)。Save 写出快照;Restore 重建权威。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RestoreCheckpoint(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -309,6 +360,26 @@ def add_ControlPlaneServiceServicer_to_server(servicer, server):
                     servicer.GetModelQuota,
                     request_deserializer=lake__pb2.GetModelQuotaRequest.FromString,
                     response_serializer=lake__pb2.GetModelQuotaResponse.SerializeToString,
+            ),
+            'ReconcileOrphans': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReconcileOrphans,
+                    request_deserializer=lake__pb2.ReconcileOrphansRequest.FromString,
+                    response_serializer=lake__pb2.ReconcileOrphansResponse.SerializeToString,
+            ),
+            'DiscardBlocks': grpc.unary_unary_rpc_method_handler(
+                    servicer.DiscardBlocks,
+                    request_deserializer=lake__pb2.DiscardBlocksRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'SaveCheckpoint': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveCheckpoint,
+                    request_deserializer=lake__pb2.SaveCheckpointRequest.FromString,
+                    response_serializer=lake__pb2.SaveCheckpointResponse.SerializeToString,
+            ),
+            'RestoreCheckpoint': grpc.unary_unary_rpc_method_handler(
+                    servicer.RestoreCheckpoint,
+                    request_deserializer=lake__pb2.RestoreCheckpointRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -656,6 +727,114 @@ class ControlPlaneService:
             '/lake.ControlPlaneService/GetModelQuota',
             lake__pb2.GetModelQuotaRequest.SerializeToString,
             lake__pb2.GetModelQuotaResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReconcileOrphans(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/ReconcileOrphans',
+            lake__pb2.ReconcileOrphansRequest.SerializeToString,
+            lake__pb2.ReconcileOrphansResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DiscardBlocks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/DiscardBlocks',
+            lake__pb2.DiscardBlocksRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveCheckpoint(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/SaveCheckpoint',
+            lake__pb2.SaveCheckpointRequest.SerializeToString,
+            lake__pb2.SaveCheckpointResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RestoreCheckpoint(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/RestoreCheckpoint',
+            lake__pb2.RestoreCheckpointRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

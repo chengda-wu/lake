@@ -320,12 +320,13 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 
 ## GC
 
-回收无效/不可达 block:
+回收无效/不可达 block(P4.7 原型 RPC:`ReconcileOrphans` / `DiscardBlocks`;checkpoint:`SaveCheckpoint`/`RestoreCheckpoint`+`CheckpointStore` 内存 mock,真 etcd→P6):
 
-- **冷块回收**:引用 0 + 冷(LRU 末尾)→ 淘汰。
-- **孤儿块**:Prefill 崩溃残留的部分写入 block → 写入屏障标记未完成,TTL 后回收。
+- **冷块回收**:引用 0 + inactive(LFU-Aging/前缀亲和)→ 摘 L0/L1 位置视图,L2/L3 durable 后盾保留(radix 仍可命中);剥层后 **重新放回 inactive**,否则后续 GC/硬配额回收会漏算仍占 `used_bytes` 的 durable 冷块。
+- **孤儿块**:写入未完成残留 → `OrphanReport` 登记,TTL 后摘元数据(默认 30s,对齐 Mooncake `put_start_discard_timeout`);调用方再删 bytes。`RegisterBlocks` 成功或块已在位置视图 → 清 orphan mark;TTL sweep **不** discard 已注册块。
+- **节点级 reconcile**:`dead_node_id` → 清该节点持有的 global ref + 摘其 L0(兜底 PutEnd writeback 泄漏;不做会话级 TTL)。
 - **模型下线/旧 revision**:级联删除。
-- **元数据一致性**:以控制面元数据为权威,block 字节删除前确认元数据已无引用;崩溃恢复扫描 reconcile 孤儿块。
+- **元数据一致性**:以控制面元数据为权威,**元数据先于字节删除**;崩溃从 checkpoint 重建视图后再对账。`CheckpointSnapshot` 每块带 `prefix_chain`(root→self),restore 按链 `RegisterBlocks` 重建 radix lineage——不能只按 flat hash 当 root。
 - **节流**:后台运行,受带宽/IO 预算限制,不阻塞数据面。
 
 ## 碎片整理

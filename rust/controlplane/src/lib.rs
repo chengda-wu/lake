@@ -2,17 +2,18 @@
 //!
 //! P4.2:Dynamo `BlockRegistry` + `PositionalRadixTree` + `InactiveIndex` 薄驱动。
 //! P4.5:`RegisterModel` / `DeregisterModel`——每 `(model_id, revision)` 一命名空间。
-//! P4.6:按命名空间软/硬配额 + 借用 + `BackpressureSignal`(触硬上报,不请求 shedding)。
-//! 参考:`registry/mod.rs::register_sequence_hash` / `match_sequence_hash`；
-//! `InactiveIndex` + `LineageBackend::with_frequency`（叶子 + TinyLFU）；
-//! Mooncake `ReserveTenantQuota`；LMCache `QuotaManager::set_quota`。
-//! 关键差异:不用 BlockManager/BlockStore；EventsManager 不接线；
-//! presence 与 Authority 同锁 → 进程内线性一致；命名空间显式注册(非懒建)；
-//! 配额是 soft+hard+borrow(非 Mooncake 单 ceiling / LMCache 单 limit)。
+//! P4.6:按命名空间软/硬配额 + 借用 + `BackpressureSignal` + `AdmitRegisterBlocks`。
+//! P4.7:冷块 GC / 孤儿 TTL / 节点 reconcile / `CheckpointStore` 内存 mock。
+//! 参考:`registry/mod.rs::register_sequence_hash`；Mooncake `ClearInvalidHandles` /
+//! `put_start_discard_timeout`；LMCache `QuotaManager`。
+//! 关键差异:节点级 reconcile 兜底 writeback 泄漏(非会话 TTL)；冷块留 L2/L3；
+//! checkpoint 非 etcd(P6)。
 
 mod authority;
+mod checkpoint;
 mod hash_chain;
 mod quota;
+mod reconcile;
 mod tier;
 
 use std::pin::Pin;
@@ -23,7 +24,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 pub use authority::{Authority, NamespaceKey, RegisterStatus};
+pub use checkpoint::{CheckpointStore, MemoryCheckpointStore};
 pub use lake_proto::lake::*;
+pub use reconcile::DEFAULT_ORPHAN_TTL_MS;
 
 use control_plane_service_server::ControlPlaneService;
 
@@ -70,6 +73,20 @@ fn admit_keys_from_request(req: &RegisterBlocksRequest) -> Result<AdmitKeys, Str
 #[derive(Clone, Default)]
 pub struct ControlPlane {
     inner: Arc<Mutex<Authority>>,
+    checkpoints: Arc<MemoryCheckpointStore>,
+}
+
+impl ControlPlane {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_checkpoint_store(store: MemoryCheckpointStore) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Authority::default())),
+            checkpoints: Arc::new(store),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -330,6 +347,107 @@ impl ControlPlaneService for ControlPlane {
                 backpressure: None,
                 ok: false,
                 err: e,
+            })),
+        }
+    }
+
+    async fn reconcile_orphans(
+        &self,
+        request: Request<ReconcileOrphansRequest>,
+    ) -> Result<Response<ReconcileOrphansResponse>, Status> {
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        match auth.reconcile_orphans(&req) {
+            Ok(resp) => Ok(Response::new(resp)),
+            Err(e) => Ok(Response::new(ReconcileOrphansResponse {
+                discarded: vec![],
+                cold_stripped: vec![],
+                refs_cleared: 0,
+                ok: false,
+                err: e,
+            })),
+        }
+    }
+
+    async fn discard_blocks(
+        &self,
+        request: Request<DiscardBlocksRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        match auth.discard_blocks(&req.ids) {
+            Ok(_) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+                backpressure: None,
+            })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
+            })),
+        }
+    }
+
+    async fn save_checkpoint(
+        &self,
+        _request: Request<SaveCheckpointRequest>,
+    ) -> Result<Response<SaveCheckpointResponse>, Status> {
+        let mut auth = self.inner.lock().unwrap();
+        auth.checkpoint_seq = auth.checkpoint_seq.saturating_add(1);
+        let snap = auth.export_snapshot(auth.checkpoint_seq);
+        drop(auth);
+        match self.checkpoints.save(snap.clone()) {
+            Ok(()) => Ok(Response::new(SaveCheckpointResponse {
+                snapshot: Some(snap),
+                ok: true,
+                err: String::new(),
+            })),
+            Err(e) => Ok(Response::new(SaveCheckpointResponse {
+                snapshot: None,
+                ok: false,
+                err: e,
+            })),
+        }
+    }
+
+    async fn restore_checkpoint(
+        &self,
+        request: Request<RestoreCheckpointRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let snap = if let Some(s) = req.snapshot {
+            s
+        } else {
+            match self.checkpoints.load() {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    return Ok(Response::new(Ack {
+                        ok: false,
+                        err: "RestoreCheckpoint: store empty".into(),
+                        backpressure: None,
+                    }));
+                }
+                Err(e) => {
+                    return Ok(Response::new(Ack {
+                        ok: false,
+                        err: e,
+                        backpressure: None,
+                    }));
+                }
+            }
+        };
+        let mut auth = self.inner.lock().unwrap();
+        match auth.import_snapshot(&snap) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+                backpressure: None,
+            })),
+            Err(e) => Ok(Response::new(Ack {
+                ok: false,
+                err: e,
+                backpressure: None,
             })),
         }
     }
@@ -1218,5 +1336,220 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("non-negative") || err.contains("quota"));
+    }
+
+    // --- P4.7: GC / orphan / reconcile / checkpoint ---
+
+    fn meta_l0_l2(model: &str, hash: &[u8]) -> BlockMeta {
+        let mut m = meta(model, hash);
+        m.locations.push(Location {
+            tier: Tier::L0 as i32,
+            node_id: "n0".into(),
+            segment_id: 1,
+            offset: 0,
+        });
+        m
+    }
+
+    /// Cold GC strips L0/L1 but keeps radix + L2 (durable backing).
+    #[test]
+    fn p47_cold_gc_strips_l0_keeps_l2() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"c0"]);
+        auth.register("n0", &full, vec![meta_l0_l2("m", b"c0")])
+            .unwrap();
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"c0", "n0"));
+        // Make inactive
+        auth.report_ref(&delta("m", b"c0", 1)).unwrap();
+        auth.report_ref(&delta("m", b"c0", -1)).unwrap();
+
+        let (stripped, discarded) = auth.gc_cold("m", "", PoolKind::Target as i32, 1).unwrap();
+        assert_eq!(stripped.len(), 1);
+        assert!(discarded.is_empty());
+        assert!(!auth.has_l0_on("m", "", PoolKind::Target as i32, b"c0", "n0"));
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1, "radix + L2 must remain");
+    }
+
+    /// Orphan TTL → metadata discard (Mooncake zombie analogue).
+    #[test]
+    fn p47_orphan_ttl_discard() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NOW: AtomicU64 = AtomicU64::new(1_000);
+        fn fake_now() -> u64 {
+            NOW.load(Ordering::SeqCst)
+        }
+
+        let mut auth = Authority::default();
+        auth.set_now_ms_fn(fake_now);
+        ensure_model(&mut auth, "m");
+        auth.report_orphans(&[OrphanReport {
+            node_id: "n0".into(),
+            ids: vec![KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"zombie".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: String::new(),
+            }],
+            marked_at_ms: 1_000,
+        }])
+        .unwrap();
+
+        // Not yet expired
+        let early = auth.sweep_orphans(30_000);
+        assert!(early.is_empty());
+
+        NOW.store(1_000 + 30_000, Ordering::SeqCst);
+        let gone = auth.sweep_orphans(30_000);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].block_hash, b"zombie");
+    }
+
+    /// Dead-node reconcile clears writeback-held refs (P4.3 leak subset).
+    #[test]
+    fn p47_dead_node_clears_writeback_ref() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"wb"]);
+        auth.register("n0", &full, vec![meta("m", b"wb")]).unwrap();
+        // Simulate WRITEBACK+1 then agent crash (no -1).
+        auth.report_ref(&RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"wb".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: String::new(),
+            }),
+            kind: RefKind::Writeback as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        })
+        .unwrap();
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"wb"), 1);
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 0);
+
+        let (cleared, _) = auth.reconcile_dead_node("n0").unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"wb"), 0);
+        // Now evictable
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+    }
+
+    /// Checkpoint save/restore rebuilds namespace + blocks (metadata before bytes).
+    #[test]
+    fn p47_checkpoint_roundtrip() {
+        let store = MemoryCheckpointStore::new();
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"p"]);
+        auth.register("n0", &full, vec![meta("m", b"p")]).unwrap();
+        let snap = auth.export_snapshot(1);
+        store.save(snap.clone()).unwrap();
+
+        let mut auth2 = Authority::default();
+        auth2
+            .import_snapshot(&store.load().unwrap().unwrap())
+            .unwrap();
+        assert!(auth2.has_namespace("m", ""));
+        let (_, hit, _) = auth2.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1);
+    }
+
+    /// Multi-block prefix lineage survives checkpoint restore (not flat-root register).
+    #[test]
+    fn p47_checkpoint_multilineage_restore() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"h0", b"h1"]);
+        auth.register(
+            "n0",
+            &full,
+            vec![meta("m", b"h0"), meta("m", b"h1")],
+        )
+        .unwrap();
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 2);
+
+        let snap = auth.export_snapshot(2);
+        assert_eq!(snap.blocks.len(), 2);
+        assert!(
+            snap.blocks.iter().any(|b| b.prefix_chain.len() == 2),
+            "child block must export full prefix_chain"
+        );
+
+        let mut auth2 = Authority::default();
+        auth2.import_snapshot(&snap).unwrap();
+        let (_, hit2, _) = auth2.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit2, 2, "restore must keep seq_hash lineage for h0→h1");
+    }
+
+    /// Durable cold peel re-inserts into inactive for later reclaim accounting.
+    #[test]
+    fn p47_cold_gc_reinserts_durable_inactive() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"c0"]);
+        auth.register("n0", &full, vec![meta_l0_l2("m", b"c0")])
+            .unwrap();
+        auth.report_ref(&delta("m", b"c0", 1)).unwrap();
+        auth.report_ref(&delta("m", b"c0", -1)).unwrap();
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+
+        let (stripped, discarded) = auth.gc_cold("m", "", PoolKind::Target as i32, 1).unwrap();
+        assert_eq!(stripped.len(), 1);
+        assert!(discarded.is_empty());
+        assert_eq!(
+            auth.inactive_len("m", "", PoolKind::Target as i32),
+            1,
+            "durable victim must return to inactive after L0/L1 peel"
+        );
+        // Second GC still sees the block (no-op peel; still reclaimable).
+        let (stripped2, _) = auth.gc_cold("m", "", PoolKind::Target as i32, 1).unwrap();
+        assert_eq!(stripped2.len(), 1);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+    }
+
+    /// Stale orphan mark must not TTL-kill a block that later registered.
+    #[test]
+    fn p47_orphan_cleared_on_register() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NOW: AtomicU64 = AtomicU64::new(1_000);
+        fn fake_now() -> u64 {
+            NOW.load(Ordering::SeqCst)
+        }
+
+        let mut auth = Authority::default();
+        auth.set_now_ms_fn(fake_now);
+        ensure_model(&mut auth, "m");
+        let id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"late".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+        auth.report_orphans(&[OrphanReport {
+            node_id: "n0".into(),
+            ids: vec![id.clone()],
+            marked_at_ms: 1_000,
+        }])
+        .unwrap();
+
+        // PutEnd wins before TTL.
+        let full = prefix(&[b"late"]);
+        auth.register("n0", &full, vec![meta("m", b"late")])
+            .unwrap();
+
+        NOW.store(1_000 + 30_000, Ordering::SeqCst);
+        let gone = auth.sweep_orphans(30_000);
+        assert!(
+            gone.is_empty(),
+            "registered block must not be discarded by stale orphan TTL"
+        );
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1);
     }
 }

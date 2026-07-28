@@ -92,22 +92,25 @@ pub fn resolve_pool_kind(raw: i32) -> Result<i32, String> {
     Err(format!("unsupported pool_kind {raw}"))
 }
 
-struct Entry {
-    seq_hash: SequenceHash,
-    meta: BlockMeta,
-    block_id: BlockId,
+pub(crate) struct Entry {
+    pub(crate) seq_hash: SequenceHash,
+    pub(crate) meta: BlockMeta,
+    pub(crate) block_id: BlockId,
+    /// Flat hashes from root through this block (inclusive). Checkpoint export
+    /// needs this — PLH parent fragments alone cannot rebuild content hashes.
+    pub(crate) prefix_chain: Vec<Vec<u8>>,
 }
 
 /// One Dynamo-shaped registry domain per `pool_kind`.
-struct PoolView {
-    registry: BlockRegistry,
-    handles: HashMap<SequenceHash, BlockRegistrationHandle>,
+pub(crate) struct PoolView {
+    pub(crate) registry: BlockRegistry,
+    pub(crate) handles: HashMap<SequenceHash, BlockRegistrationHandle>,
     /// Flat content hash → entry **within this pool_kind**.
-    by_flat: HashMap<Vec<u8>, Entry>,
-    seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
-    inactive: Box<dyn InactiveIndex>,
-    inactive_cap: usize,
-    global_refs: HashMap<SequenceHash, i64>,
+    pub(crate) by_flat: HashMap<Vec<u8>, Entry>,
+    pub(crate) seq_to_flat: HashMap<SequenceHash, Vec<u8>>,
+    pub(crate) inactive: Box<dyn InactiveIndex>,
+    pub(crate) inactive_cap: usize,
+    pub(crate) global_refs: HashMap<SequenceHash, i64>,
     next_block_id: BlockId,
 }
 
@@ -158,13 +161,13 @@ impl PoolView {
     }
 }
 
-struct Namespace {
-    descriptor: ModelDescriptor,
+pub(crate) struct Namespace {
+    pub(crate) descriptor: ModelDescriptor,
     /// `pool_kind` → independent radix / inactive / refs.
-    pools: HashMap<i32, PoolView>,
+    pub(crate) pools: HashMap<i32, PoolView>,
     inactive_cap: usize,
     /// Authoritative durable-byte usage for this namespace (all pool_kinds).
-    used_bytes: i64,
+    pub(crate) used_bytes: i64,
 }
 
 impl Namespace {
@@ -192,7 +195,7 @@ impl Namespace {
         self.pools.values().map(|p| p.by_flat.len()).sum()
     }
 
-    fn bytes_per_block(&self) -> i64 {
+    pub(crate) fn bytes_per_block(&self) -> i64 {
         self.descriptor
             .block_spec
             .as_ref()
@@ -251,13 +254,21 @@ fn descriptor_identity_eq(a: &ModelDescriptor, b: &ModelDescriptor) -> bool {
 
 /// Process-local authority state.
 pub struct Authority {
-    namespaces: HashMap<NamespaceKey, Namespace>,
+    pub(crate) namespaces: HashMap<NamespaceKey, Namespace>,
     inactive_cap: usize,
     /// Completed request barriers: `(request_id, node_id)`.
-    completed_barriers: HashMap<String, String>,
+    pub(crate) completed_barriers: HashMap<String, String>,
     /// P4.6 mock pool durable capacity for borrow accounting.
     /// `0` = unlimited free (borrow always available until per-model hard).
     pool_capacity_bytes: i64,
+    /// P4.7: incomplete-write orphans (Mooncake zombie analogue).
+    pub(crate) orphans: HashMap<crate::reconcile::BlockKey, crate::reconcile::OrphanEntry>,
+    /// P4.7: per-node ref holdings for dead-node reconcile / writeback leak.
+    pub(crate) node_refs: HashMap<String, HashMap<crate::reconcile::BlockKey, i64>>,
+    /// P4.7: injectable clock (orphan TTL tests).
+    pub(crate) now_ms: fn() -> u64,
+    /// P4.7: last checkpoint seq.
+    pub(crate) checkpoint_seq: u64,
 }
 
 impl Default for Authority {
@@ -273,6 +284,10 @@ impl Authority {
             inactive_cap: inactive_cap.max(1),
             completed_barriers: HashMap::new(),
             pool_capacity_bytes: 0,
+            orphans: HashMap::new(),
+            node_refs: HashMap::new(),
+            now_ms: crate::reconcile::wall_now_ms,
+            checkpoint_seq: 0,
         }
     }
 
@@ -419,12 +434,12 @@ impl Authority {
             .unwrap_or(0)
     }
 
-    fn ns_mut(&mut self, model_id: &str, revision: &str) -> Option<&mut Namespace> {
+    pub(crate) fn ns_mut(&mut self, model_id: &str, revision: &str) -> Option<&mut Namespace> {
         self.namespaces
             .get_mut(&NamespaceKey::new(model_id, revision))
     }
 
-    fn ns(&self, model_id: &str, revision: &str) -> Option<&Namespace> {
+    pub(crate) fn ns(&self, model_id: &str, revision: &str) -> Option<&Namespace> {
         self.namespaces.get(&NamespaceKey::new(model_id, revision))
     }
 
@@ -547,67 +562,82 @@ impl Authority {
         }
 
         let lineage = lineage_from_prefix(prefix_hashes);
-        let ns = self
-            .ns_mut(&model_id, &revision)
-            .expect("checked has_namespace");
-        let bpb = ns.bytes_per_block();
-        let pool = ns.pool_mut(pool_kind);
-        let mut charged = 0i64;
+        let mut clear_orphans = Vec::new();
+        {
+            let ns = self
+                .ns_mut(&model_id, &revision)
+                .expect("checked has_namespace");
+            let bpb = ns.bytes_per_block();
+            let pool = ns.pool_mut(pool_kind);
+            let mut charged = 0i64;
 
-        for mut meta in metas {
-            let Some(id) = meta.id.clone() else { continue };
-            // Normalize unspecified → TARGET on stored identity.
-            if let Some(ref mut mid) = meta.id {
-                mid.pool_kind = pool_kind;
-            }
-            let flat = id.block_hash.clone();
-            let pos = *index_of.get(flat.as_slice()).expect("checked");
-            let seq = lineage[pos];
+            for mut meta in metas {
+                let Some(id) = meta.id.clone() else { continue };
+                // Normalize unspecified → TARGET on stored identity.
+                if let Some(ref mut mid) = meta.id {
+                    mid.pool_kind = pool_kind;
+                }
+                let flat = id.block_hash.clone();
+                let pos = *index_of.get(flat.as_slice()).expect("checked");
+                let seq = lineage[pos];
 
-            if meta.locations.is_empty() && !meta.l3_present {
-                return Err(
-                    "RegisterBlocks: need L2 location or l3_present (durable first)".into(),
+                if meta.locations.is_empty() && !meta.l3_present {
+                    return Err(
+                        "RegisterBlocks: need L2 location or l3_present (durable first)".into(),
+                    );
+                }
+                for loc in &mut meta.locations {
+                    if loc.node_id.is_empty() {
+                        loc.node_id = node_id.to_string();
+                    }
+                }
+
+                let is_new = !pool.by_flat.contains_key(&flat);
+
+                let handle = pool.registry.register_sequence_hash(seq);
+                for loc in &meta.locations {
+                    if loc.tier == Tier::L0 as i32 {
+                        handle.mark_present::<TierL0>();
+                    } else if loc.tier == Tier::L1 as i32 {
+                        handle.mark_present::<TierL1>();
+                    } else if loc.tier == Tier::L2 as i32 {
+                        handle.mark_present::<TierL2>();
+                    }
+                }
+                pool.handles.insert(seq, handle);
+
+                let block_id = if let Some(prev) = pool.by_flat.get(&flat) {
+                    prev.block_id
+                } else {
+                    pool.alloc_block_id()
+                };
+                pool.seq_to_flat.insert(seq, flat.clone());
+                let prefix_chain = prefix_hashes[..=pos].to_vec();
+                pool.by_flat.insert(
+                    flat.clone(),
+                    Entry {
+                        seq_hash: seq,
+                        meta,
+                        block_id,
+                        prefix_chain,
+                    },
                 );
-            }
-            for loc in &mut meta.locations {
-                if loc.node_id.is_empty() {
-                    loc.node_id = node_id.to_string();
+                // Successful PutEnd clears any stale orphan mark for this flat.
+                clear_orphans.push(crate::reconcile::BlockKey {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    pool_kind,
+                    flat,
+                });
+                if is_new {
+                    charged += bpb;
                 }
             }
-
-            let is_new = !pool.by_flat.contains_key(&flat);
-
-            let handle = pool.registry.register_sequence_hash(seq);
-            for loc in &meta.locations {
-                if loc.tier == Tier::L0 as i32 {
-                    handle.mark_present::<TierL0>();
-                } else if loc.tier == Tier::L1 as i32 {
-                    handle.mark_present::<TierL1>();
-                } else if loc.tier == Tier::L2 as i32 {
-                    handle.mark_present::<TierL2>();
-                }
-            }
-            pool.handles.insert(seq, handle);
-
-            let block_id = if let Some(prev) = pool.by_flat.get(&flat) {
-                prev.block_id
-            } else {
-                pool.alloc_block_id()
-            };
-            pool.seq_to_flat.insert(seq, flat.clone());
-            pool.by_flat.insert(
-                flat,
-                Entry {
-                    seq_hash: seq,
-                    meta,
-                    block_id,
-                },
-            );
-            if is_new {
-                charged += bpb;
-            }
+            ns.used_bytes = ns.used_bytes.saturating_add(charged);
         }
-        ns.used_bytes = ns.used_bytes.saturating_add(charged);
+        for k in clear_orphans {
+            self.orphans.remove(&k);
+        }
         Ok(RegisterStatus::Accepted)
     }
 
@@ -965,33 +995,7 @@ impl Authority {
     }
 
     pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
-        self.check_report_ref(delta)?;
-        let id = delta.id.as_ref().expect("checked");
-        let pk = resolve_pool_kind(id.pool_kind).expect("checked");
-        let key = NamespaceKey::from_id(id);
-        let ns = self.namespaces.get_mut(&key).expect("checked");
-        let pool = ns.pools.get_mut(&pk).expect("checked");
-        let entry = pool.by_flat.get(&id.block_hash).expect("checked");
-        let seq = entry.seq_hash;
-        let block_id = entry.block_id;
-        let _kind = delta.kind;
-
-        let cur = pool.global_refs.entry(seq).or_insert(0);
-        let before = *cur;
-        *cur = cur.saturating_add(i64::from(delta.delta));
-        if *cur < 0 {
-            *cur = 0;
-        }
-        let after = *cur;
-
-        if before > 0 && after == 0 {
-            if !pool.inactive.has(seq) && pool.inactive.len() < pool.inactive_cap {
-                pool.inactive.insert(seq, block_id);
-            }
-        } else if before == 0 && after > 0 {
-            let _ = pool.inactive.take(seq, block_id);
-        }
-        Ok(())
+        self.report_ref_raw(delta, /*track_node*/ true)
     }
 
     pub fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
