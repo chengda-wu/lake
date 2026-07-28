@@ -13,6 +13,14 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 from engine.attn.metadata import AttentionMetadata, build_attn_metadata
 from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.input_batch import InputBatch, InputBuffers
+from engine.models.loader import DummyModelLoader
+from engine.models.qwen3 import (
+    QWEN3_0_6B_CONFIG,
+    QWEN3_0_6B_MODEL_ID,
+    QWEN3_DUMMY_WEIGHT_NAMES,
+    Qwen3Config,
+    Qwen3ForCausalLM,
+)
 from engine.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
@@ -28,7 +36,7 @@ class ModelRunnerOutput:
     step_id: int
     next_token_ids: Dict[str, List[int]] = field(default_factory=dict)
     next_draft_tokens: Dict[str, List[int]] = field(default_factory=dict)
-    model_backend: str = "mock"
+    model_backend: str = "qwen3"
 
 
 @dataclass(frozen=True)
@@ -54,7 +62,8 @@ class ModelRunner:
         self,
         pool: PoolIface,
         *,
-        model_backend: str = "mock",
+        model_backend: str = "qwen3",
+        qwen3_config: Qwen3Config = QWEN3_0_6B_CONFIG,
         tiny_lm: Optional[TinyLM] = None,
         enable_drafter: bool = False,
         num_draft_tokens: int = 2,
@@ -66,6 +75,8 @@ class ModelRunner:
         self._input_buffers = InputBuffers(max_num_reqs=64, max_num_tokens=8192)
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
+        self._qwen3_config = qwen3_config
+        self._qwen3: Optional[Qwen3ForCausalLM] = None
         self._tiny: Optional[TinyLM] = tiny_lm
         self.enable_drafter = enable_drafter
         self._num_draft_tokens = num_draft_tokens
@@ -89,6 +100,10 @@ class ModelRunner:
     def model_id(self) -> str:
         return self._model_id
 
+    @property
+    def qwen3_config(self) -> Qwen3Config:
+        return self._qwen3_config
+
     def status(self) -> ModelRunnerStatus:
         return ModelRunnerStatus(
             model_id=self._model_id,
@@ -99,6 +114,8 @@ class ModelRunner:
         )
 
     def _ensure_backend_initialized(self) -> None:
+        if self.model_backend == "qwen3" and self._qwen3 is None:
+            self._qwen3 = Qwen3ForCausalLM(self._qwen3_config)
         if self.model_backend == "tiny_lm" and self._tiny is None:
             self._tiny = TinyLM()
         if self.enable_drafter and self._drafter is None and self._tiny is not None:
@@ -112,7 +129,7 @@ class ModelRunner:
     def load_model(
         self,
         *,
-        model_id: str = "mock-llm",
+        model_id: str = "",
         revision: str = "",
         load_dummy_weights: bool = False,
         pin_weights: bool = True,
@@ -125,10 +142,18 @@ class ModelRunner:
         """
 
         self._ensure_backend_initialized()
-        self._model_id = model_id or "mock-llm"
+        default_model_id = QWEN3_0_6B_MODEL_ID if self.model_backend == "qwen3" else "mock-llm"
+        self._model_id = model_id or default_model_id
         self._model_revision = revision
         self._model_loaded = True
         self._model_warmed = False
+        if self.model_backend == "qwen3":
+            self._qwen3 = DummyModelLoader(
+                Qwen3ForCausalLM,
+                self._qwen3_config,
+                QWEN3_DUMMY_WEIGHT_NAMES,
+            ).load_model()
+            load_dummy_weights = True
         info = ModelLoadInfo(
             model_id=self._model_id,
             revision=self._model_revision,
@@ -149,7 +174,10 @@ class ModelRunner:
         """C12：warmup 复用生产 dummy 入口，但跳过 pool.done。"""
 
         if not self._model_loaded:
-            self.load_model(model_id=self._model_id or "mock-llm")
+            default_model_id = (
+                QWEN3_0_6B_MODEL_ID if self.model_backend == "qwen3" else "mock-llm"
+            )
+            self.load_model(model_id=self._model_id or default_model_id)
         out = self.dummy_run(
             num_reqs=num_reqs,
             tokens_per_req=tokens_per_req,
@@ -290,6 +318,8 @@ class ModelRunner:
         _meta = self.prepare_attn(batch, ready)
         if self.model_backend == "tiny_lm":
             next_tokens, next_drafts = self._forward_tiny(output, host, batch)
+        elif self.model_backend == "qwen3":
+            next_tokens = self._forward_qwen3(host, batch)
         else:
             for req_id, n in output.num_scheduled_tokens.items():
                 if n <= 0:
@@ -306,6 +336,28 @@ class ModelRunner:
             next_draft_tokens=next_drafts,
             model_backend=self.model_backend,
         )
+
+    def _forward_qwen3(
+        self,
+        host_reqs: Mapping[str, Req],
+        batch: InputBatch,
+    ) -> Dict[str, List[int]]:
+        assert self._qwen3 is not None
+        out: Dict[str, List[int]] = {}
+        for req_id in batch.req_ids:
+            if batch.is_prompt_phase.get(req_id, False):
+                continue
+            req = host_reqs.get(req_id)
+            if req is None:
+                continue
+            out[req_id] = [self._qwen3_dummy_token(req.all_token_ids)]
+        return out
+
+    def _qwen3_dummy_token(self, context: List[int]) -> int:
+        assert self._qwen3 is not None
+        cfg = self._qwen3.config
+        seed = context[-1] if context else cfg.bos_token_id
+        return (int(seed) + len(context) + cfg.num_hidden_layers) % cfg.vocab_size
 
     def _forward_tiny(
         self,
@@ -365,7 +417,7 @@ class ModelRunner:
         host_reqs = {
             rid: Req(
                 req_id=rid,
-                model_id=self._model_id or "dummy-model",
+                model_id=self._model_id or QWEN3_0_6B_MODEL_ID,
                 prompt_token_ids=list(range(tokens_per_req)),
                 sampling_params=SamplingParams(max_new_tokens=1),
             )

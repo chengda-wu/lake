@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 
 from engine.model_runner import ModelRunner
+from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import ReadyHandle, StepStats
 from runtime.node_scheduler import build_req_from_generate
 from runtime.role import RoleConfig, WorkerRole
@@ -45,7 +46,7 @@ class FakePool:
 
 def _make_engine(max_running: int = 8, coalesce_s: float = 0.005) -> Tuple[WorkerEngine, FakePool]:
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
     role = RoleConfig(enable_overlap=True, max_running_reqs=max_running, model_backend="mock")
     eng = WorkerEngine(pool, runner, role, coalesce_s=coalesce_s)  # type: ignore[arg-type]
     eng.start()
@@ -105,18 +106,18 @@ def test_role_config_from_env() -> None:
     saved = {k: os.environ.get(k) for k in keys}
     try:
         os.environ["LAKE_WORKER_ROLE"] = "prefill"
-        os.environ["LAKE_MODEL_BACKEND"] = "tiny_lm"
+        os.environ["LAKE_MODEL_BACKEND"] = "qwen3"
         os.environ["LAKE_ENABLE_DRAFTER"] = "1"
         os.environ["LAKE_MAX_RUNNING_REQS"] = "3"
         os.environ["LAKE_ENABLE_OVERLAP"] = "0"
-        os.environ["LAKE_MODEL_ID"] = "tiny"
+        os.environ["LAKE_MODEL_ID"] = QWEN3_0_6B_MODEL_ID
         os.environ["LAKE_MODEL_REVISION"] = "r1"
         os.environ["LAKE_WARMUP_NUM_REQS"] = "2"
         os.environ["LAKE_WARMUP_TOKENS_PER_REQ"] = "3"
         cfg = RoleConfig.from_env()
         assert cfg.role == WorkerRole.PREFILL
-        assert cfg.model_backend == "tiny_lm"
-        assert cfg.model_id == "tiny"
+        assert cfg.model_backend == "qwen3"
+        assert cfg.model_id == QWEN3_0_6B_MODEL_ID
         assert cfg.model_revision == "r1"
         assert cfg.enable_drafter is True
         assert cfg.max_running_reqs == 3
