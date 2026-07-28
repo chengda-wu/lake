@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
 from engine.pool_iface import PoolIface
-from engine.pool_types import FinishRequest, PoolError, PoolErrorCode, PreparePlan
+from engine.pool_types import (
+    FinishRequest,
+    PoolError,
+    PoolErrorCode,
+    PreparePlan,
+    ReadyHandle,
+)
 from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams, SchedulerOutput
 
@@ -117,6 +123,114 @@ def test_pool_iface_facade() -> None:
     assert "r1" in ag.finished
 
 
+def test_pool_iface_commit_calls_agent() -> None:
+    ag = InMemoryAgent()
+    ag.l0_token_end["r1"] = 10
+    pool = PoolIface(ag)
+    pool.commit_write_extent("r1", 6)
+    assert ag.l0_token_end["r1"] == 6
+    assert pool.stats.commit_calls == 1
+
+
+def test_pool_iface_finish_idempotent() -> None:
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    req = Req(
+        req_id="r1",
+        model_id="m",
+        prompt_token_ids=[],
+        sampling_params=SamplingParams(max_new_tokens=1),
+    )
+    pool.on_request_finished(req)
+    pool.on_request_finished(req)
+    assert ag.finished == ["r1"]
+    assert pool.stats.finish_calls == 1
+    assert pool.stats.duplicate_finish_calls == 1
+
+
+def test_pool_iface_wraps_unexpected_agent_error() -> None:
+    class BadAgent:
+        def prepare_step(self, plan):
+            raise RuntimeError("boom")
+
+        def done(self, step_id):
+            return None
+
+        def on_request_finished(self, finish):
+            return None
+
+        def commit_write_extent(self, req_id, token_end):
+            return None
+
+    pool = PoolIface(BadAgent())  # type: ignore[arg-type]
+    out = SchedulerOutput(step_id=1, forward_mode=ForwardMode.DECODE)
+    try:
+        pool.prepare_step(out, {})
+        raise AssertionError("expected PoolError")
+    except PoolError as e:
+        assert e.code == PoolErrorCode.DOWNSTREAM
+    assert pool.stats.last_error_code == PoolErrorCode.DOWNSTREAM
+
+
+def test_pool_iface_rejects_shrink_without_partial_hit() -> None:
+    class ShrinkAgent:
+        def prepare_step(self, plan):
+            return ReadyHandle(
+                step_id=plan.step_id,
+                effective_read_set=[ReqIoSet(req_id="r1", token_start=0, token_end=1)],
+                effective_write_set=[],
+            )
+
+        def done(self, step_id):
+            return None
+
+        def on_request_finished(self, finish):
+            return None
+
+        def commit_write_extent(self, req_id, token_end):
+            return None
+
+    pool = PoolIface(ShrinkAgent(), allow_partial_hit=False)  # type: ignore[arg-type]
+    out = SchedulerOutput(
+        step_id=1,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"r1": 1, "r2": 1},
+        total_num_scheduled_tokens=2,
+    )
+    try:
+        pool.prepare_step(out, {})
+        raise AssertionError("expected PoolError")
+    except PoolError as e:
+        assert e.code == PoolErrorCode.PROTOCOL_ERROR
+
+
+def test_timeout_preserves_request_exec_mode() -> None:
+    ag = InMemoryAgent()
+    ag.force_pull_reqs.add("r1")
+    ag.pull_cost_ms = 30
+    pool = PoolIface(ag, pull_budget_ms=10, allow_partial_hit=False)
+    req = Req(
+        req_id="r1",
+        model_id="m",
+        prompt_token_ids=list(range(8)),
+        sampling_params=SamplingParams(max_new_tokens=1),
+    )
+    out = SchedulerOutput(
+        step_id=1,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"r1": 1},
+        total_num_scheduled_tokens=1,
+        read_set=[ReqIoSet(req_id="r1", token_start=0, token_end=8)],
+    )
+    before = req.exec_mode
+    try:
+        pool.prepare_step(out, {"r1": req})
+        raise AssertionError("expected TIMEOUT")
+    except PoolError as e:
+        assert e.code == PoolErrorCode.TIMEOUT
+    assert req.exec_mode == before
+
+
 if __name__ == "__main__":
     test_ready_done_mismatch()
     test_prepare_done_roundtrip()
@@ -125,4 +239,9 @@ if __name__ == "__main__":
     test_deferred_finish_until_done()
     test_commit_write_extent_shrinks()
     test_pool_iface_facade()
+    test_pool_iface_commit_calls_agent()
+    test_pool_iface_finish_idempotent()
+    test_pool_iface_wraps_unexpected_agent_error()
+    test_pool_iface_rejects_shrink_without_partial_hit()
+    test_timeout_preserves_request_exec_mode()
     print("test_pool_agent OK")

@@ -169,6 +169,11 @@ class GrpcSkeletonAgent:
         except grpc.RpcError as e:
             raise PoolError(PoolErrorCode.DOWNSTREAM, e.details() or str(e)) from e
 
+    def commit_write_extent(self, req_id: str, token_end: int) -> None:
+        """P3 skeleton 无本地 slot allocator；生产 PyO3 agent 在此回收 write extent。"""
+
+        return None
+
     def _ensure_prefix_kv(self, req: Req) -> StepStats:
         prompt = req.prompt_token_ids
         hashes = chain_block_hashes(prompt)
