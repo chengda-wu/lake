@@ -900,21 +900,11 @@ mod tests {
         m1.id.as_mut().unwrap().block_hash = b"h1".to_vec();
         m1.locations[0].segment_id = 2;
         m1.locations[0].offset = 0;
-        auth.register(
-            "n0",
-            &[b"h0".to_vec(), b"h1".to_vec()],
-            vec![m0, m1],
-        )
-        .unwrap();
+        auth.register("n0", &[b"h0".to_vec(), b"h1".to_vec()], vec![m0, m1])
+            .unwrap();
 
         let moves = auth
-            .plan_defrag(
-                "m",
-                "",
-                PoolKind::Target as i32,
-                DefragMode::Colocate,
-                slot,
-            )
+            .plan_defrag("m", "", PoolKind::Target as i32, DefragMode::Colocate, slot)
             .unwrap();
         assert!(!moves.is_empty());
 
@@ -929,8 +919,7 @@ mod tests {
         assert!(n >= 1);
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev)
-                .unwrap();
+            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev).unwrap();
         }
         let metas = auth.locate(&[KvBlockId {
             model_id: "m".into(),

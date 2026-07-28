@@ -1615,12 +1615,8 @@ mod tests {
         let mut auth = Authority::default();
         ensure_model(&mut auth, "m");
         let full = prefix(&[b"h0", b"h1"]);
-        auth.register(
-            "n0",
-            &full,
-            vec![meta("m", b"h0"), meta("m", b"h1")],
-        )
-        .unwrap();
+        auth.register("n0", &full, vec![meta("m", b"h0"), meta("m", b"h1")])
+            .unwrap();
         let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 2);
 
@@ -1763,23 +1759,16 @@ mod tests {
         auth.register(
             "n0",
             &prefix(&[b"h0", b"h1"]),
-            vec![
-                meta_l2_at("m", b"h0", 1, 0),
-                meta_l2_at("m", b"h1", 2, 0),
-            ],
+            vec![meta_l2_at("m", b"h0", 1, 0), meta_l2_at("m", b"h1", 2, 0)],
         )
         .unwrap();
         let moves = auth
-            .plan_defrag(
-                "m",
-                "",
-                PoolKind::Target as i32,
-                DefragMode::Colocate,
-                slot,
-            )
+            .plan_defrag("m", "", PoolKind::Target as i32, DefragMode::Colocate, slot)
             .unwrap();
         assert!(
-            moves.iter().any(|m| !m.compact_segment && m.to_segment == 1),
+            moves
+                .iter()
+                .any(|m| !m.compact_segment && m.to_segment == 1),
             "expected co-locate onto seg1; got {moves:?}"
         );
         assert!(moves.iter().all(|m| m.node_id == "n0"));
@@ -1798,13 +1787,7 @@ mod tests {
         auth.register("n0", &prefix(&[b"h0", b"h1"]), vec![m0, m1])
             .unwrap();
         let moves = auth
-            .plan_defrag(
-                "m",
-                "",
-                PoolKind::Target as i32,
-                DefragMode::Colocate,
-                slot,
-            )
+            .plan_defrag("m", "", PoolKind::Target as i32, DefragMode::Colocate, slot)
             .unwrap();
         assert!(
             moves.is_empty(),
@@ -1831,13 +1814,7 @@ mod tests {
         )
         .unwrap();
         let moves = auth
-            .plan_defrag(
-                "m",
-                "",
-                PoolKind::Target as i32,
-                DefragMode::Colocate,
-                slot,
-            )
+            .plan_defrag("m", "", PoolKind::Target as i32, DefragMode::Colocate, slot)
             .unwrap();
         assert!(
             !moves.is_empty(),
@@ -1891,7 +1868,9 @@ mod tests {
             migs.len()
         );
         assert!(migs.iter().all(|m| m.to_node == "n2"));
-        assert!(migs.iter().all(|m| m.from_node == "n0" || m.from_node == "n1"));
+        assert!(migs
+            .iter()
+            .all(|m| m.from_node == "n0" || m.from_node == "n1"));
         assert!(migs.iter().all(|m| !m.push_l2_first));
     }
 
@@ -1951,7 +1930,10 @@ mod tests {
         m.locations[0].node_id = "n1".into();
         auth.register("n1", &prefix(&[b"stuck"]), vec![m]).unwrap();
         auth.drain_shard_node("n1").unwrap();
-        assert!(auth.remove_shard_node("n1").unwrap_err().contains("placement"));
+        assert!(auth
+            .remove_shard_node("n1")
+            .unwrap_err()
+            .contains("placement"));
         // Still in shard map as draining.
         assert!(auth
             .shard_map()

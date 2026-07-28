@@ -155,10 +155,7 @@ impl SegmentArena {
             return Err("place_at: slot occupied".into());
         }
         seg.slots[idx] = Some(hash.to_vec());
-        let p = Placement {
-            segment_id,
-            offset,
-        };
+        let p = Placement { segment_id, offset };
         self.by_hash.insert(hash.to_vec(), p);
         Ok(p)
     }

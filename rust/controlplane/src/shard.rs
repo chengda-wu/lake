@@ -162,9 +162,7 @@ impl ShardRing {
             .get(node_id)
             .ok_or_else(|| format!("remove: unknown node {node_id}"))?;
         if !st.draining {
-            return Err(format!(
-                "remove: node {node_id} must DrainShardNode first"
-            ));
+            return Err(format!("remove: node {node_id} must DrainShardNode first"));
         }
         // Live ring must not still own keys for this node (already rebuilt without it).
         self.nodes.remove(node_id);
@@ -351,11 +349,7 @@ impl Authority {
         self.blocks_with_placement_on_tier(node_id, None)
     }
 
-    fn blocks_with_placement_on_tier(
-        &self,
-        node_id: &str,
-        tier: Option<Tier>,
-    ) -> Vec<KvBlockId> {
+    fn blocks_with_placement_on_tier(&self, node_id: &str, tier: Option<Tier>) -> Vec<KvBlockId> {
         let mut out = Vec::new();
         for nk in self.namespaces.keys() {
             let Some(ns) = self.namespaces.get(nk) else {
@@ -364,8 +358,7 @@ impl Authority {
             for (&pk, pool) in &ns.pools {
                 for (flat, entry) in &pool.by_flat {
                     let on = entry.meta.locations.iter().any(|l| {
-                        l.node_id == node_id
-                            && tier.map(|t| l.tier == t as i32).unwrap_or(true)
+                        l.node_id == node_id && tier.map(|t| l.tier == t as i32).unwrap_or(true)
                     });
                     if on {
                         out.push(entry.meta.id.clone().unwrap_or(KvBlockId {

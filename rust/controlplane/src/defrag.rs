@@ -174,7 +174,10 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
             if loc.tier != Tier::L2 as i32 {
                 continue;
             }
-            occupancy.insert((loc.node_id.clone(), loc.segment_id, loc.offset), flat.clone());
+            occupancy.insert(
+                (loc.node_id.clone(), loc.segment_id, loc.offset),
+                flat.clone(),
+            );
         }
         if entry.prefix_chain.is_empty() {
             continue;
@@ -216,8 +219,7 @@ fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove
         if !needs {
             continue;
         }
-        let Some((dest_seg, base_off)) =
-            pick_colocate_target(&node_id, &members, slot, &occupancy)
+        let Some((dest_seg, base_off)) = pick_colocate_target(&node_id, &members, slot, &occupancy)
         else {
             continue;
         };

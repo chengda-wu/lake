@@ -11,12 +11,22 @@ use crate::segment::Relocate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineAction {
-    Promote { hash: Vec<u8> },
-    DemoteL0 { hash: Vec<u8> },
-    DemoteL2 { hash: Vec<u8> },
-    FillMiss { hash: Vec<u8> },
+    Promote {
+        hash: Vec<u8>,
+    },
+    DemoteL0 {
+        hash: Vec<u8>,
+    },
+    DemoteL2 {
+        hash: Vec<u8>,
+    },
+    FillMiss {
+        hash: Vec<u8>,
+    },
     /// Physical compaction of one L2 segment.
-    CompactSegment { segment_id: u64 },
+    CompactSegment {
+        segment_id: u64,
+    },
     /// Move one L2 block to dest placement (logical co-location).
     CoLocateMove {
         hash: Vec<u8>,
@@ -27,8 +37,14 @@ pub enum PipelineAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocationEvent {
-    Present { hash: Vec<u8>, tier: LocalTier },
-    Absent { hash: Vec<u8>, tier: LocalTier },
+    Present {
+        hash: Vec<u8>,
+        tier: LocalTier,
+    },
+    Absent {
+        hash: Vec<u8>,
+        tier: LocalTier,
+    },
     /// Placement changed within a tier (P4.8 defrag).
     Moved {
         hash: Vec<u8>,
@@ -145,56 +161,52 @@ impl TierPipeline {
             }
             let node = self.node_id.clone();
             match &action {
-                PipelineAction::Promote { hash } => {
-                    match self.engine.promote_to_l0(hash) {
-                        Ok((_n, fx)) => {
-                            events.extend(events_from_effects(&fx));
-                            if self.engine.local_tier(hash) == Some(LocalTier::L0) {
-                                events.push(LocationEvent::Present {
-                                    hash: hash.clone(),
-                                    tier: LocalTier::L0,
-                                });
-                            }
-                            done += 1;
-                            consecutive_fail = 0;
+                PipelineAction::Promote { hash } => match self.engine.promote_to_l0(hash) {
+                    Ok((_n, fx)) => {
+                        events.extend(events_from_effects(&fx));
+                        if self.engine.local_tier(hash) == Some(LocalTier::L0) {
+                            events.push(LocationEvent::Present {
+                                hash: hash.clone(),
+                                tier: LocalTier::L0,
+                            });
                         }
-                        Err(_) => {
-                            if cost > 0 {
-                                self.bandwidth.refund(cost);
-                            }
-                            self.queue.push_back(action);
-                            consecutive_fail += 1;
-                            if consecutive_fail >= q0 {
-                                break;
-                            }
+                        done += 1;
+                        consecutive_fail = 0;
+                    }
+                    Err(_) => {
+                        if cost > 0 {
+                            self.bandwidth.refund(cost);
+                        }
+                        self.queue.push_back(action);
+                        consecutive_fail += 1;
+                        if consecutive_fail >= q0 {
+                            break;
                         }
                     }
-                }
-                PipelineAction::FillMiss { hash } => {
-                    match self.engine.fill_read_miss(hash) {
-                        Ok((_n, fx)) => {
-                            events.extend(events_from_effects(&fx));
-                            if self.engine.local_tier(hash) == Some(LocalTier::L0) {
-                                events.push(LocationEvent::Present {
-                                    hash: hash.clone(),
-                                    tier: LocalTier::L0,
-                                });
-                            }
-                            done += 1;
-                            consecutive_fail = 0;
+                },
+                PipelineAction::FillMiss { hash } => match self.engine.fill_read_miss(hash) {
+                    Ok((_n, fx)) => {
+                        events.extend(events_from_effects(&fx));
+                        if self.engine.local_tier(hash) == Some(LocalTier::L0) {
+                            events.push(LocationEvent::Present {
+                                hash: hash.clone(),
+                                tier: LocalTier::L0,
+                            });
                         }
-                        Err(_) => {
-                            if cost > 0 {
-                                self.bandwidth.refund(cost);
-                            }
-                            self.queue.push_back(action);
-                            consecutive_fail += 1;
-                            if consecutive_fail >= q0 {
-                                break;
-                            }
+                        done += 1;
+                        consecutive_fail = 0;
+                    }
+                    Err(_) => {
+                        if cost > 0 {
+                            self.bandwidth.refund(cost);
+                        }
+                        self.queue.push_back(action);
+                        consecutive_fail += 1;
+                        if consecutive_fail >= q0 {
+                            break;
                         }
                     }
-                }
+                },
                 PipelineAction::DemoteL0 { hash } => match self.engine.demote_l0(hash) {
                     Ok(_) => {
                         events.push(LocationEvent::Absent {

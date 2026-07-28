@@ -109,8 +109,8 @@ type ControlPlaneServiceClient interface {
 	// P4.7:GC + 崩溃 reconcile(F11)。
 	//   - 上报/扫孤儿(对齐 Mooncake put_start_discard_timeout zombie);
 	//   - dead_node_id → 节点级 reconcile(清该节点 ref + 摘 L0;兜底 writeback 泄漏);
-	//   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾)。
-	//     元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
+	//   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾);
+	//   - 元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
 	ReconcileOrphans(ctx context.Context, in *ReconcileOrphansRequest, opts ...grpc.CallOption) (*ReconcileOrphansResponse, error)
 	// 显式摘块(元数据);返回 Ack 后调用方删字节。
 	DiscardBlocks(ctx context.Context, in *DiscardBlocksRequest, opts ...grpc.CallOption) (*Ack, error)
@@ -442,8 +442,8 @@ type ControlPlaneServiceServer interface {
 	// P4.7:GC + 崩溃 reconcile(F11)。
 	//   - 上报/扫孤儿(对齐 Mooncake put_start_discard_timeout zombie);
 	//   - dead_node_id → 节点级 reconcile(清该节点 ref + 摘 L0;兜底 writeback 泄漏);
-	//   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾)。
-	//     元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
+	//   - gc_cold_limit → 冷块摘 L0/L1(留 L2/L3 durable 后盾);
+	//   - 元数据先于字节删:Response 列出待删 id,agent/kv-pool 再删 bytes。
 	ReconcileOrphans(context.Context, *ReconcileOrphansRequest) (*ReconcileOrphansResponse, error)
 	// 显式摘块(元数据);返回 Ack 后调用方删字节。
 	DiscardBlocks(context.Context, *DiscardBlocksRequest) (*Ack, error)
