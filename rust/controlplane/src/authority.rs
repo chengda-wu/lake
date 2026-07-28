@@ -1088,6 +1088,7 @@ impl Authority {
     }
 
     /// Publish presence with explicit segment/offset (P4.8).
+    #[allow(clippy::too_many_arguments)] // wire-shaped presence + placement coords
     pub fn publish_location_at(
         &mut self,
         model_id: &str,

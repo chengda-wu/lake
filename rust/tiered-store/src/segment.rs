@@ -142,7 +142,7 @@ impl SegmentArena {
         if self.by_hash.contains_key(hash) {
             return Err("place_at: hash already placed".into());
         }
-        if offset % self.slot_bytes != 0 {
+        if !offset.is_multiple_of(self.slot_bytes) {
             return Err("place_at: offset not slot-aligned".into());
         }
         let idx = (offset / self.slot_bytes) as usize;

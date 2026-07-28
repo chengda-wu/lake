@@ -40,6 +40,7 @@ pub trait ControlPlanePort {
         present: bool,
     ) -> Result<(), String>;
     /// P4.8: update segment/offset after defrag Moved.
+    #[allow(clippy::too_many_arguments)] // mirrors Authority::relocate_in_view
     fn relocate_in_view(
         &mut self,
         model_id: &str,

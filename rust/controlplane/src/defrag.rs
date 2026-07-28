@@ -57,6 +57,7 @@ impl Authority {
     }
 
     /// Update L0/L1/L2 placement coordinates (P4.8 Moved).
+    #[allow(clippy::too_many_arguments)] // mirrors publish_location_at wire shape
     pub fn relocate_in_view(
         &mut self,
         model_id: &str,
@@ -153,11 +154,13 @@ fn plan_compact(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove>
     out
 }
 
+/// (depth, flat, segment_id, offset) for one L2 member under a prefix root.
+type ColocateMember = (usize, Vec<u8>, u64, u64);
+
 fn plan_colocate(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove> {
     // Group by (prefix root, node_id). P4.8: same-node only — cross-node co-locate
     // needs Transfer + source/target fields (defer P5).
-    let mut by_root_node: HashMap<(Vec<u8>, String), Vec<(usize, Vec<u8>, u64, u64)>> =
-        HashMap::new();
+    let mut by_root_node: HashMap<(Vec<u8>, String), Vec<ColocateMember>> = HashMap::new();
     // (node, seg, offset) → flat occupying that L2 slot (CP view = planner input).
     let mut occupancy: HashMap<(String, u64, u64), Vec<u8>> = HashMap::new();
     for entry in pool.by_flat.values() {
