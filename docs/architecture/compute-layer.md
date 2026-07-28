@@ -630,6 +630,8 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 
 **C13 状态（2026-07-27）**：已落 `GrammarOutput` / `SamplingParams.structured_output` 占位，`ModelRunner.sample_tokens()` 可消费 bool-list bitmask 或 defer 本步 sample；`NodeScheduler.schedule()` 会把 structured 请求标进 `SchedulerOutput.grammar_output`，`spec + structured + overlap` 且存在未处理结果时强制 drain，对齐 SGLang `need_grammar_sync`。同时修正 TARGET_VERIFY 在剩余生成预算截短 draft 时的 query/write slot 对齐：调度只传本步可验证 draft，runner 防御性按 `n-1` 截断。真 xgrammar/llguidance FSM、packed bitmask tensor、H2D copy stream、grammar-aware speculative rejection 后置。
 
+**C14 状态（2026-07-28）**：已把 `pool_iface` 从 mock 门面收紧为生产 agent FFI 契约：`PoolIface` 统一包装非 `PoolError` 为 `DOWNSTREAM`、校验 `ReadyHandle.step_id` / `effective_*_set` / stats req 集合、记录 prepare/done/commit/finish/error 会计；`commit_write_extent` 不再特判 InMemory，而是调用 agent 同名方法（GrpcSkeleton no-op，占位生产 PyO3 agent）；`on_request_finished` 做一次性去重，保证同一 req 只打一次 agent。单测覆盖旧 commit 不压新 prepare HWM、partial-hit 未开启时缩批判协议错误、`TIMEOUT` 保持原 exec mode 不触发 mode fallback、finish 去重。真 device-side commit 序号 / PyO3 FFI ABI / CAPACITY 注入后置。
+
 #### 本轮不做
 
 - 不接 vLLM `BlockPool` / `KVCacheManager` / runner 内 `RequestState`，这些与池权威冲突。

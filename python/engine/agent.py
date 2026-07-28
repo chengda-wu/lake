@@ -31,3 +31,11 @@ class StorageAgent(Protocol):
         overlap 下可延迟到无 in-flight 引用后再归还槽（类 SGLang free_group）。
         """
         ...
+
+    def commit_write_extent(self, req_id: str, token_end: int) -> None:
+        """回收本步未实际产出的 write extent。
+
+        TARGET_VERIFY / stop 等路径可能预留多于实际接受 token；生产 agent 以
+        device-side 会计为准，不能用旧 host commit 压掉更新的 prepare 高水位。
+        """
+        ...
