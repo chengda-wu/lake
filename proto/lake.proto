@@ -64,6 +64,12 @@ service ControlPlaneService {
 
   // lease:节点 mount/unmount segment + 续命(仿 Mooncake MountSegment/UnmountSegment + client_live_ttl_sec)。
   rpc Lease(stream LeaseHeartbeat) returns (stream LeaseAck);
+
+  // P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
+  //   下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
+  //   配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
+  rpc RegisterModel(RegisterModelRequest) returns (Ack);
+  rpc DeregisterModel(DeregisterModelRequest) returns (Ack);
 }
 
 // =============================================================================
@@ -138,6 +144,44 @@ message LookupPrefixRequest {
   string model_id             = 1;
   repeated bytes prefix_hashes = 2;   // 前缀 block hash 链(沿 radix 匹配)
   string requester_node_id    = 3;   // 判定 local_hit 用
+  string revision             = 4;   // P4.5:(model_id, revision) 命名空间;空串=默认
+  // P4.5:查哪个 pool_kind 的 radix。UNSPECIFIED/缺省 → TARGET。
+  //   draft 前缀复用须显式填 DRAFT(与 TARGET 索引域隔离)。
+  lake.PoolKind pool_kind     = 5;
+}
+
+// --- 多模型生命周期(P4.5 / F11) ---
+// BlockSpec 挂 ModelDescriptor,不进 KVBlockID 寻址(#20)。
+message BlockSpec {
+  uint32 block_tokens     = 1;  // 初版默认 128(见 kv-cache-pool.md)
+  uint64 bytes_per_block  = 2;  // 不透明字节块大小提示(池不解释布局)
+}
+enum HashAlgo {
+  HASH_ALGO_UNSPECIFIED = 0;
+  HASH_SHA256_256       = 1;
+  HASH_SHA256_128       = 2;
+  HASH_BLAKE3_128       = 3;
+}
+// P4.5 只存骨架;触硬配额 / 借用 / BackpressureSignal → P4.6。
+message Quota {
+  int64 soft_bytes     = 1;
+  int64 hard_bytes     = 2;
+  bool  borrow_enabled = 3;
+}
+message ModelDescriptor {
+  string    model_id   = 1;
+  string    revision   = 2;  // 空串=未版本化默认;新 revision=新命名空间
+  uint32    num_layers = 3;
+  BlockSpec block_spec = 4;
+  HashAlgo  hash_algo  = 5;
+  Quota     quota      = 6;  // 登记用;执行 → P4.6
+}
+message RegisterModelRequest {
+  ModelDescriptor model = 1;
+}
+message DeregisterModelRequest {
+  string model_id = 1;
+  string revision = 2;  // 与 RegisterModel 同键;级联删该命名空间
 }
 message LookupPrefixResponse {
   repeated ReusableBlock blocks = 1;  // 沿前缀匹配的连续 block 列表

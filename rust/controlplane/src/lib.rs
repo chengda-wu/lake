@@ -1,10 +1,11 @@
 //! 存储控制面:位置视图权威(进程内存)。
 //!
 //! P4.2:Dynamo `BlockRegistry` + `PositionalRadixTree` + `InactiveIndex` 薄驱动。
+//! P4.5:`RegisterModel` / `DeregisterModel`——每 `(model_id, revision)` 一命名空间。
 //! 参考:`registry/mod.rs::register_sequence_hash` / `match_sequence_hash`；
 //! `InactiveIndex` + `LineageBackend::with_frequency`（叶子 + TinyLFU）。
 //! 关键差异:不用 BlockManager/BlockStore；EventsManager 不接线；
-//! presence 与 Authority 同锁 → 进程内线性一致。
+//! presence 与 Authority 同锁 → 进程内线性一致；命名空间显式注册(非懒建)。
 
 mod authority;
 mod hash_chain;
@@ -17,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-pub use authority::Authority;
+pub use authority::{Authority, NamespaceKey};
 pub use lake_proto::lake::*;
 
 use control_plane_service_server::ControlPlaneService;
@@ -47,8 +48,13 @@ impl ControlPlaneService for ControlPlane {
     ) -> Result<Response<LookupPrefixResponse>, Status> {
         let req = request.into_inner();
         let mut auth = self.inner.lock().unwrap();
-        let (blocks, hit_length, all_local_hit) =
-            auth.lookup_prefix(&req.model_id, &req.prefix_hashes, &req.requester_node_id);
+        let (blocks, hit_length, all_local_hit) = auth.lookup_prefix(
+            &req.model_id,
+            &req.revision,
+            req.pool_kind,
+            &req.prefix_hashes,
+            &req.requester_node_id,
+        );
         Ok(Response::new(LookupPrefixResponse {
             blocks,
             hit_length,
@@ -128,6 +134,42 @@ impl ControlPlaneService for ControlPlane {
         let stream: Self::LeaseStream = Box::pin(ReceiverStream::new(rx));
         Ok(Response::new(stream))
     }
+
+    async fn register_model(
+        &self,
+        request: Request<RegisterModelRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let Some(model) = req.model else {
+            return Ok(Response::new(Ack {
+                ok: false,
+                err: "RegisterModel: model required".into(),
+            }));
+        };
+        let mut auth = self.inner.lock().unwrap();
+        match auth.register_model(model) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+            })),
+            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+        }
+    }
+
+    async fn deregister_model(
+        &self,
+        request: Request<DeregisterModelRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let req = request.into_inner();
+        let mut auth = self.inner.lock().unwrap();
+        match auth.deregister_model(&req.model_id, &req.revision) {
+            Ok(()) => Ok(Response::new(Ack {
+                ok: true,
+                err: String::new(),
+            })),
+            Err(e) => Ok(Response::new(Ack { ok: false, err: e })),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -136,6 +178,8 @@ type _CpServer = lake_proto::lake::control_plane_service_server::ControlPlaneSer
 const _ANCHOR: fn() = || {
     let _ = RegisterBlocksRequest::default();
     let _ = LookupPrefixRequest::default();
+    let _ = RegisterModelRequest::default();
+    let _ = DeregisterModelRequest::default();
     let _ = RefDelta::default();
 };
 
@@ -143,16 +187,43 @@ const _ANCHOR: fn() = || {
 mod tests {
     use super::*;
 
+    fn ensure_model(auth: &mut Authority, model: &str) {
+        ensure_model_rev(auth, model, "");
+    }
+
+    fn ensure_model_rev(auth: &mut Authority, model: &str, revision: &str) {
+        auth.register_model(ModelDescriptor {
+            model_id: model.into(),
+            revision: revision.into(),
+            num_layers: 32,
+            block_spec: Some(BlockSpec {
+                block_tokens: 128,
+                bytes_per_block: 0,
+            }),
+            hash_algo: HashAlgo::HashSha256256 as i32,
+            quota: Some(Quota {
+                soft_bytes: 0,
+                hard_bytes: 0,
+                borrow_enabled: false,
+            }),
+        })
+        .unwrap();
+    }
+
     fn meta(model: &str, hash: &[u8]) -> BlockMeta {
+        meta_rev(model, "", hash)
+    }
+
+    fn meta_rev(model: &str, revision: &str, hash: &[u8]) -> BlockMeta {
         BlockMeta {
             id: Some(KvBlockId {
                 model_id: model.into(),
                 block_hash: hash.to_vec(),
                 pool_kind: PoolKind::Target as i32,
                 scope: "public".into(),
+                revision: revision.into(),
             }),
             block_kind: BlockKind::TType as i32,
-            // Explicit L2 — register no longer invents COMPLETE locations.
             locations: vec![Location {
                 tier: Tier::L2 as i32,
                 node_id: "n0".into(),
@@ -168,9 +239,29 @@ mod tests {
         hashes.iter().map(|h| h.to_vec()).collect()
     }
 
+    fn delta(model: &str, flat: &[u8], d: i32) -> RefDelta {
+        delta_rev(model, "", flat, d)
+    }
+
+    fn delta_rev(model: &str, revision: &str, flat: &[u8], d: i32) -> RefDelta {
+        RefDelta {
+            id: Some(KvBlockId {
+                model_id: model.into(),
+                block_hash: flat.to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+                revision: revision.into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: d,
+            node_id: "n0".into(),
+        }
+    }
+
     #[test]
     fn lookup_prefix_contiguous_then_gap() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"h0", b"h1", b"h2"]);
         auth.register(
             "n0",
@@ -178,7 +269,13 @@ mod tests {
             vec![meta("m", b"h0"), meta("m", b"h1"), meta("m", b"h2")],
         )
         .unwrap();
-        let (blocks, hit, local) = auth.lookup_prefix("m", &prefix(&[b"h0", b"gap", b"h2"]), "n0");
+        let (blocks, hit, local) = auth.lookup_prefix(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[b"h0", b"gap", b"h2"]),
+            "n0",
+        );
         assert_eq!(hit, 1);
         assert_eq!(blocks.len(), 1);
         assert!(!local);
@@ -187,10 +284,11 @@ mod tests {
     #[test]
     fn lookup_prefix_full_hit_not_local_without_l0() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"a", b"b"]);
         auth.register("n0", &full, vec![meta("m", b"a"), meta("m", b"b")])
             .unwrap();
-        let (_, hit, local) = auth.lookup_prefix("m", &full, "n0");
+        let (_, hit, local) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 2);
         assert!(!local);
     }
@@ -198,42 +296,61 @@ mod tests {
     #[test]
     fn cross_model_isolation() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m1");
+        ensure_model(&mut auth, "m2");
         let full = prefix(&[b"shared"]);
         auth.register("n0", &full, vec![meta("m1", b"shared")])
             .unwrap();
         auth.register("n0", &full, vec![meta("m2", b"shared")])
             .unwrap();
-        let (_, hit1, _) = auth.lookup_prefix("m1", &full, "n0");
-        let (_, hit2, _) = auth.lookup_prefix("m2", &full, "n0");
+        let (_, hit1, _) = auth.lookup_prefix("m1", "", PoolKind::Target as i32, &full, "n0");
+        let (_, hit2, _) = auth.lookup_prefix("m2", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit1, 1);
         assert_eq!(hit2, 1);
-        // miss suffix only for m1 should not affect m2
-        let (_, miss, _) = auth.lookup_prefix("m1", &prefix(&[b"other"]), "n0");
+        let (_, miss, _) = auth.lookup_prefix(
+            "m1",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[b"other"]),
+            "n0",
+        );
         assert_eq!(miss, 0);
     }
 
     #[test]
     fn register_requires_prefix_hashes() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let err = auth.register("n0", &[], vec![meta("m", b"a")]).unwrap_err();
         assert!(err.contains("prefix_hashes"));
     }
 
     #[test]
+    fn register_requires_registered_model() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"a"]);
+        let err = auth
+            .register("n0", &full, vec![meta("m", b"a")])
+            .unwrap_err();
+        assert!(err.contains("not registered"));
+    }
+
+    #[test]
     fn register_miss_suffix_with_full_chain() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"h0", b"h1", b"h2"]);
         auth.register("n0", &full, vec![meta("m", b"h0"), meta("m", b"h1")])
             .unwrap();
-        // miss suffix only
         auth.register("n0", &full, vec![meta("m", b"h2")]).unwrap();
-        let (_, hit, _) = auth.lookup_prefix("m", &full, "n0");
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 3);
     }
 
     #[test]
     fn register_rejects_non_contiguous_subset() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"h0", b"h1", b"h2"]);
         let err = auth
             .register("n0", &full, vec![meta("m", b"h0"), meta("m", b"h2")])
@@ -244,11 +361,12 @@ mod tests {
     #[test]
     fn lookup_stops_on_lineage_mismatch() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let chain = prefix(&[b"A", b"B"]);
         auth.register("n0", &chain, vec![meta("m", b"A"), meta("m", b"B")])
             .unwrap();
-        // Same flat "B" but as a root → different PositionalLineageHash; must not hit.
-        let (blocks, hit, _) = auth.lookup_prefix("m", &prefix(&[b"B"]), "n0");
+        let (blocks, hit, _) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &prefix(&[b"B"]), "n0");
         assert_eq!(hit, 0);
         assert!(blocks.is_empty());
     }
@@ -256,80 +374,49 @@ mod tests {
     #[test]
     fn ref_freeze_and_evict() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"x"]);
         auth.register("n0", &full, vec![meta("m", b"x")]).unwrap();
 
-        let d = RefDelta {
-            id: Some(KvBlockId {
-                model_id: "m".into(),
-                block_hash: b"x".to_vec(),
-                pool_kind: PoolKind::Target as i32,
-                scope: "public".into(),
-            }),
-            kind: RefKind::Request as i32,
-            delta: 1,
-            node_id: "n0".into(),
-        };
+        let d = delta("m", b"x", 1);
         auth.report_ref(&d).unwrap();
-        assert_eq!(auth.global_ref("m", b"x"), 1);
-        assert_eq!(auth.inactive_len("m"), 0);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"x"), 1);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
 
-        // still held → evict should remove 0 from view if we force-insert...
-        // first drop ref
         let mut d0 = d.clone();
         d0.delta = -1;
         auth.report_ref(&d0).unwrap();
-        assert_eq!(auth.global_ref("m", b"x"), 0);
-        assert_eq!(auth.inactive_len("m"), 1);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"x"), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
 
-        // ref>0 again removes from inactive
         auth.report_ref(&d).unwrap();
-        assert_eq!(auth.inactive_len("m"), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
         auth.report_ref(&d0).unwrap();
-        assert_eq!(auth.inactive_len("m"), 1);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
 
-        let n = auth.evict_n("m", 1);
+        let n = auth.evict_n("m", "", PoolKind::Target as i32, 1);
         assert_eq!(n, 1);
-        let (_, hit, _) = auth.lookup_prefix("m", &full, "n0");
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 0);
     }
 
     #[test]
     fn report_ref_batch_all_or_nothing() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"p"]);
         auth.register("n0", &full, vec![meta("m", b"p")]).unwrap();
-        let plus = RefDelta {
-            id: Some(KvBlockId {
-                model_id: "m".into(),
-                block_hash: b"p".to_vec(),
-                pool_kind: PoolKind::Target as i32,
-                scope: "public".into(),
-            }),
-            kind: RefKind::Request as i32,
-            delta: 1,
-            node_id: "n0".into(),
-        };
+        let plus = delta("m", b"p", 1);
         auth.report_ref(&plus).unwrap();
-        assert_eq!(auth.global_ref("m", b"p"), 1);
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"p"), 1);
 
         let mut minus = plus.clone();
         minus.delta = -1;
-        let unknown = RefDelta {
-            id: Some(KvBlockId {
-                model_id: "m".into(),
-                block_hash: b"missing".to_vec(),
-                pool_kind: PoolKind::Target as i32,
-                scope: "public".into(),
-            }),
-            kind: RefKind::Request as i32,
-            delta: -1,
-            node_id: "n0".into(),
-        };
+        let unknown = delta("m", b"missing", -1);
         let err = auth.report_refs(&[minus, unknown]).unwrap_err();
         assert!(err.contains("unknown block_hash") || err.contains("batch"));
         assert_eq!(
-            auth.global_ref("m", b"p"),
+            auth.global_ref("m", "", PoolKind::Target as i32, b"p"),
             1,
             "failed batch must not apply prefix deltas"
         );
@@ -338,59 +425,35 @@ mod tests {
     #[test]
     fn ref_gt_zero_not_evicted() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"y"]);
         auth.register("n0", &full, vec![meta("m", b"y")]).unwrap();
-        let d = RefDelta {
-            id: Some(KvBlockId {
-                model_id: "m".into(),
-                block_hash: b"y".to_vec(),
-                pool_kind: PoolKind::Target as i32,
-                scope: "public".into(),
-            }),
-            kind: RefKind::Request as i32,
-            delta: 1,
-            node_id: "n0".into(),
-        };
-        auth.report_ref(&d).unwrap();
-        // not in inactive while held
-        assert_eq!(auth.evict_n("m", 10), 0);
-        let (_, hit, _) = auth.lookup_prefix("m", &full, "n0");
+        auth.report_ref(&delta("m", b"y", 1)).unwrap();
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 10), 0);
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 1);
     }
 
     #[test]
     fn frequency_evicts_colder_leaf_first() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let cold = prefix(&[b"cold"]);
         let hot = prefix(&[b"hot"]);
         auth.register("n0", &cold, vec![meta("m", b"cold")])
             .unwrap();
         auth.register("n0", &hot, vec![meta("m", b"hot")]).unwrap();
-        // bump TinyLFU for hot via LookupPrefix → match_sequence_hash(touch)
         for _ in 0..64 {
-            let _ = auth.lookup_prefix("m", &hot, "n0");
+            let _ = auth.lookup_prefix("m", "", PoolKind::Target as i32, &hot, "n0");
         }
         for flat in [b"cold".as_slice(), b"hot".as_slice()] {
-            let d = RefDelta {
-                id: Some(KvBlockId {
-                    model_id: "m".into(),
-                    block_hash: flat.to_vec(),
-                    pool_kind: PoolKind::Target as i32,
-                    scope: "public".into(),
-                }),
-                kind: RefKind::Request as i32,
-                delta: 1,
-                node_id: "n0".into(),
-            };
-            auth.report_ref(&d).unwrap();
-            let mut d0 = d;
-            d0.delta = -1;
-            auth.report_ref(&d0).unwrap();
+            auth.report_ref(&delta("m", flat, 1)).unwrap();
+            auth.report_ref(&delta("m", flat, -1)).unwrap();
         }
-        assert_eq!(auth.inactive_len("m"), 2);
-        assert_eq!(auth.evict_n("m", 1), 1);
-        let (_, cold_hit, _) = auth.lookup_prefix("m", &cold, "n0");
-        let (_, hot_hit, _) = auth.lookup_prefix("m", &hot, "n0");
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 2);
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, cold_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &cold, "n0");
+        let (_, hot_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &hot, "n0");
         assert_eq!(cold_hit, 0, "colder leaf should be Frequency victim");
         assert_eq!(hot_hit, 1, "touched hot leaf should survive first allocate");
     }
@@ -398,6 +461,7 @@ mod tests {
     #[test]
     fn authority_evicts_leaf_before_prefix_parent() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let chain = prefix(&[b"parent", b"child"]);
         auth.register(
             "n0",
@@ -406,78 +470,59 @@ mod tests {
         )
         .unwrap();
         for flat in [b"parent".as_slice(), b"child".as_slice()] {
-            let d = RefDelta {
-                id: Some(KvBlockId {
-                    model_id: "m".into(),
-                    block_hash: flat.to_vec(),
-                    pool_kind: PoolKind::Target as i32,
-                    scope: "public".into(),
-                }),
-                kind: RefKind::Request as i32,
-                delta: 1,
-                node_id: "n0".into(),
-            };
-            auth.report_ref(&d).unwrap();
-            let mut d0 = d;
-            d0.delta = -1;
-            auth.report_ref(&d0).unwrap();
+            auth.report_ref(&delta("m", flat, 1)).unwrap();
+            auth.report_ref(&delta("m", flat, -1)).unwrap();
         }
-        assert_eq!(auth.evict_n("m", 1), 1);
-        let (_, parent_only, _) = auth.lookup_prefix("m", &prefix(&[b"parent"]), "n0");
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, parent_only, _) = auth.lookup_prefix(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[b"parent"]),
+            "n0",
+        );
         assert_eq!(parent_only, 1, "prefix parent must survive first evict");
-        let (_, chain_hit, _) = auth.lookup_prefix("m", &chain, "n0");
+        let (_, chain_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &chain, "n0");
         assert_eq!(chain_hit, 1, "leaf gone → gap after parent");
     }
 
-    /// Past inactive_cap, `report_ref` skips insert (Dynamo: insert ≠ allocate).
-    /// Cap-resident leaves stay allocatable; over-cap blocks stay in the view
-    /// at ref=0 but out of inactive (no silent Frequency drop / view zombie).
     #[test]
     fn inactive_cap_skip_insert_no_zombie() {
         let cap = 4;
         let mut auth = Authority::with_inactive_cap(cap);
+        ensure_model(&mut auth, "m");
         let n = cap * 2;
         let mut flats: Vec<Vec<u8>> = Vec::with_capacity(n);
         for i in 0..n {
             let flat = format!("leaf{i:02}").into_bytes();
             let full = prefix(&[flat.as_slice()]);
             auth.register("n0", &full, vec![meta("m", &flat)]).unwrap();
-            let d = RefDelta {
-                id: Some(KvBlockId {
-                    model_id: "m".into(),
-                    block_hash: flat.clone(),
-                    pool_kind: PoolKind::Target as i32,
-                    scope: "public".into(),
-                }),
-                kind: RefKind::Request as i32,
-                delta: 1,
-                node_id: "n0".into(),
-            };
-            auth.report_ref(&d).unwrap();
-            let mut d0 = d;
-            d0.delta = -1;
-            auth.report_ref(&d0).unwrap();
+            auth.report_ref(&delta("m", &flat, 1)).unwrap();
+            auth.report_ref(&delta("m", &flat, -1)).unwrap();
             flats.push(flat);
             assert!(
-                auth.inactive_len("m") <= cap,
+                auth.inactive_len("m", "", PoolKind::Target as i32) <= cap,
                 "inactive must stay ≤ cap after insert #{i}"
             );
         }
-        assert_eq!(auth.inactive_len("m"), cap);
-        // Early leaves still in the view (report_ref must not pressure-evict).
-        let (_, early_hit, _) = auth.lookup_prefix("m", &prefix(&[flats[0].as_slice()]), "n0");
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), cap);
+        let (_, early_hit, _) = auth.lookup_prefix(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            &prefix(&[flats[0].as_slice()]),
+            "n0",
+        );
         assert_eq!(early_hit, 1, "skip-insert must not drop view entries");
-        // Cap-resident inactive must all be allocatable (no zombie leaves).
-        let removed = auth.evict_n("m", cap);
+        let removed = auth.evict_n("m", "", PoolKind::Target as i32, cap);
         assert_eq!(removed, cap, "allocate must clear all inactive at cap");
-        assert_eq!(auth.inactive_len("m"), 0);
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
     }
 
-    /// Mid-batch must not panic: previous ensure_inactive_room could delete a
-    /// later delta's block and trip `expect` after the pre-check passed.
     #[test]
     fn report_refs_mid_batch_must_not_panic_or_drop_peer() {
         let mut auth = Authority::with_inactive_cap(1);
+        ensure_model(&mut auth, "m");
         let held = prefix(&[b"held"]);
         let cand = prefix(&[b"cand"]);
         auth.register("n0", &held, vec![meta("m", b"held")])
@@ -485,92 +530,57 @@ mod tests {
         auth.register("n0", &cand, vec![meta("m", b"cand")])
             .unwrap();
 
-        let held_id = KvBlockId {
-            model_id: "m".into(),
-            block_hash: b"held".to_vec(),
-            pool_kind: PoolKind::Target as i32,
-            scope: "public".into(),
-        };
-        let cand_id = KvBlockId {
-            model_id: "m".into(),
-            block_hash: b"cand".to_vec(),
-            pool_kind: PoolKind::Target as i32,
-            scope: "public".into(),
-        };
-        // Fill inactive with cand; hold held at ref=1.
-        for (id, plus_then_minus) in [(&cand_id, true), (&held_id, false)] {
-            let plus = RefDelta {
-                id: Some(id.clone()),
-                kind: RefKind::Request as i32,
-                delta: 1,
-                node_id: "n0".into(),
-            };
-            auth.report_ref(&plus).unwrap();
-            if plus_then_minus {
-                let mut minus = plus.clone();
-                minus.delta = -1;
-                auth.report_ref(&minus).unwrap();
-            }
-        }
-        assert_eq!(auth.inactive_len("m"), 1);
-        assert_eq!(auth.global_ref("m", b"held"), 1);
-        assert_eq!(auth.global_ref("m", b"cand"), 0);
+        auth.report_ref(&delta("m", b"cand", 1)).unwrap();
+        auth.report_ref(&delta("m", b"cand", -1)).unwrap();
+        auth.report_ref(&delta("m", b"held", 1)).unwrap();
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 1);
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"held"),
+            1
+        );
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"cand"),
+            0
+        );
 
-        let held_minus = RefDelta {
-            id: Some(held_id.clone()),
-            kind: RefKind::Request as i32,
-            delta: -1,
-            node_id: "n0".into(),
-        };
-        let cand_plus = RefDelta {
-            id: Some(cand_id.clone()),
-            kind: RefKind::Request as i32,
-            delta: 1,
-            node_id: "n0".into(),
-        };
-        // Must not panic; both blocks remain addressable.
-        auth.report_refs(&[held_minus, cand_plus]).unwrap();
-        assert_eq!(auth.global_ref("m", b"held"), 0);
-        assert_eq!(auth.global_ref("m", b"cand"), 1);
-        // held:-1 skipped insert (cap full); cand:+1 took itself out → empty.
-        assert_eq!(auth.inactive_len("m"), 0);
-        let (_, cand_hit, _) = auth.lookup_prefix("m", &cand, "n0");
+        auth.report_refs(&[delta("m", b"held", -1), delta("m", b"cand", 1)])
+            .unwrap();
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"held"),
+            0
+        );
+        assert_eq!(
+            auth.global_ref("m", "", PoolKind::Target as i32, b"cand"),
+            1
+        );
+        assert_eq!(auth.inactive_len("m", "", PoolKind::Target as i32), 0);
+        let (_, cand_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &cand, "n0");
         assert_eq!(cand_hit, 1, "peer must not be pressure-evicted mid-batch");
     }
 
-    /// WRITEBACK ±1 on CP `global_refs` freezes eviction (P4.2 skeleton ignores
-    /// `RefKind`; agent-local writeback sub-counter still future work).
-    /// `RequestBarrier` only records completion — unfreeze is WRITEBACK −1.
-    /// Ref: consistency.md §3; SGLang `_evict_write_back`.
     #[test]
     fn writeback_ref_blocks_evict_until_cleared() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"wb0"]);
         auth.register("n0", &full, vec![meta("m", b"wb0")]).unwrap();
-        let plus = RefDelta {
-            id: Some(KvBlockId {
-                model_id: "m".into(),
-                block_hash: b"wb0".to_vec(),
-                pool_kind: PoolKind::Target as i32,
-                scope: "public".into(),
-            }),
-            kind: RefKind::Writeback as i32,
-            delta: 1,
-            node_id: "n0".into(),
-        };
+        let mut plus = delta("m", b"wb0", 1);
+        plus.kind = RefKind::Writeback as i32;
         auth.report_ref(&plus).unwrap();
-        assert_eq!(auth.global_ref("m", b"wb0"), 1);
-        assert_eq!(auth.evict_n("m", 10), 0, "writeback must freeze");
+        assert_eq!(auth.global_ref("m", "", PoolKind::Target as i32, b"wb0"), 1);
+        assert_eq!(
+            auth.evict_n("m", "", PoolKind::Target as i32, 10),
+            0,
+            "writeback must freeze"
+        );
 
         let mut minus = plus.clone();
         minus.delta = -1;
-        // WRITEBACK −1 解冻（commit_through 里此 -1 在 barrier 之后；此处直测 CP 侧）。
         auth.report_ref(&minus).unwrap();
         auth.complete_barrier("req-wb", "n0").unwrap();
         assert!(auth.barrier_completed("req-wb"));
-        // 0→正→0 entered inactive; now evictable.
-        assert_eq!(auth.evict_n("m", 1), 1);
-        let (_, hit, _) = auth.lookup_prefix("m", &full, "n0");
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert_eq!(hit, 0);
     }
 
@@ -584,6 +594,7 @@ mod tests {
     #[test]
     fn register_rejects_invented_l2() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"bare"]);
         let mut m = meta("m", b"bare");
         m.locations.clear();
@@ -593,16 +604,207 @@ mod tests {
     #[test]
     fn publish_l0_enables_local_hit() {
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let full = prefix(&[b"loc"]);
         auth.register("n0", &full, vec![meta("m", b"loc")]).unwrap();
-        auth.publish_location("m", b"loc", Tier::L0, "n0", true)
-            .unwrap();
-        assert!(auth.has_l0_on("m", b"loc", "n0"));
-        let (_, _, all_local) = auth.lookup_prefix("m", &full, "n0");
+        auth.publish_location(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"loc",
+            Tier::L0,
+            "n0",
+            true,
+        )
+        .unwrap();
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"loc", "n0"));
+        let (_, _, all_local) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert!(all_local);
-        auth.publish_location("m", b"loc", Tier::L0, "n0", false)
-            .unwrap();
-        let (_, _, all_local) = auth.lookup_prefix("m", &full, "n0");
+        auth.publish_location(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"loc",
+            Tier::L0,
+            "n0",
+            false,
+        )
+        .unwrap();
+        let (_, _, all_local) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
         assert!(!all_local);
+    }
+
+    /// P4.5: two models, same prefix hash → no cross-namespace hit.
+    #[test]
+    fn p45_two_models_same_hash_no_crosstalk() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "llama");
+        ensure_model(&mut auth, "qwen");
+        let full = prefix(&[b"samehash"]);
+        auth.register("n0", &full, vec![meta("llama", b"samehash")])
+            .unwrap();
+        // qwen has no blocks yet
+        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit_q, 0);
+        auth.register("n0", &full, vec![meta("qwen", b"samehash")])
+            .unwrap();
+        let (_, hit_l, _) = auth.lookup_prefix("llama", "", PoolKind::Target as i32, &full, "n0");
+        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit_l, 1);
+        assert_eq!(hit_q, 1);
+        auth.deregister_model("llama", "").unwrap();
+        let (_, hit_l, _) = auth.lookup_prefix("llama", "", PoolKind::Target as i32, &full, "n0");
+        let (_, hit_q, _) = auth.lookup_prefix("qwen", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit_l, 0, "llama cascaded away");
+        assert_eq!(hit_q, 1, "qwen untouched");
+    }
+
+    /// P4.5: DeregisterModel clears radix/locations for that namespace.
+    #[test]
+    fn p45_deregister_cascades_view() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"a", b"b"]);
+        auth.register("n0", &full, vec![meta("m", b"a"), meta("m", b"b")])
+            .unwrap();
+        assert_eq!(auth.block_count("m", ""), 2);
+        auth.deregister_model("m", "").unwrap();
+        assert!(!auth.has_namespace("m", ""));
+        assert_eq!(auth.block_count("m", ""), 0);
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 0);
+        // re-register model + blocks works on a fresh namespace
+        ensure_model(&mut auth, "m");
+        auth.register("n0", &full, vec![meta("m", b"a")]).unwrap();
+        let (_, hit, _) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &prefix(&[b"a"]), "n0");
+        assert_eq!(hit, 1);
+    }
+
+    /// P4.5: new revision = new namespace; old revision remains until deregistered.
+    #[test]
+    fn p45_revision_isolation_and_invalidate() {
+        let mut auth = Authority::default();
+        ensure_model_rev(&mut auth, "m", "r1");
+        ensure_model_rev(&mut auth, "m", "r2");
+        let full = prefix(&[b"pfx"]);
+        auth.register("n0", &full, vec![meta_rev("m", "r1", b"pfx")])
+            .unwrap();
+        auth.register("n0", &full, vec![meta_rev("m", "r2", b"pfx")])
+            .unwrap();
+        let (_, h1, _) = auth.lookup_prefix("m", "r1", PoolKind::Target as i32, &full, "n0");
+        let (_, h2, _) = auth.lookup_prefix("m", "r2", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(h1, 1);
+        assert_eq!(h2, 1);
+        // miss across revision
+        let (_, h_cross, _) = auth.lookup_prefix("m", "r1", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(h_cross, 1);
+        auth.deregister_model("m", "r1").unwrap();
+        let (_, h1, _) = auth.lookup_prefix("m", "r1", PoolKind::Target as i32, &full, "n0");
+        let (_, h2, _) = auth.lookup_prefix("m", "r2", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(h1, 0, "r1 invalidated");
+        assert_eq!(h2, 1, "r2 still live");
+        assert!(auth.has_namespace("m", "r2"));
+        assert!(!auth.has_namespace("m", "r1"));
+    }
+
+    #[test]
+    fn register_model_idempotent_keeps_blocks() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"keep"]);
+        auth.register("n0", &full, vec![meta("m", b"keep")])
+            .unwrap();
+        // Same identity + quota bump is ok.
+        auth.register_model(ModelDescriptor {
+            model_id: "m".into(),
+            revision: String::new(),
+            num_layers: 32,
+            block_spec: Some(BlockSpec {
+                block_tokens: 128,
+                bytes_per_block: 0,
+            }),
+            hash_algo: HashAlgo::HashSha256256 as i32,
+            quota: Some(Quota {
+                soft_bytes: 1,
+                hard_bytes: 2,
+                borrow_enabled: true,
+            }),
+        })
+        .unwrap();
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1);
+        let q = auth
+            .model_descriptor("m", "")
+            .and_then(|d| d.quota.clone())
+            .unwrap();
+        assert_eq!(q.soft_bytes, 1);
+        assert_eq!(q.hard_bytes, 2);
+        assert!(q.borrow_enabled);
+    }
+
+    #[test]
+    fn register_model_rejects_immutable_change() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let err = auth
+            .register_model(ModelDescriptor {
+                model_id: "m".into(),
+                revision: String::new(),
+                num_layers: 64, // changed
+                block_spec: Some(BlockSpec {
+                    block_tokens: 128,
+                    bytes_per_block: 0,
+                }),
+                hash_algo: HashAlgo::HashSha256256 as i32,
+                quota: None,
+            })
+            .unwrap_err();
+        assert!(err.contains("immutable") || err.contains("new revision"));
+        // blocks still addressable under original descriptor
+        let full = prefix(&[b"x"]);
+        auth.register("n0", &full, vec![meta("m", b"x")]).unwrap();
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1);
+    }
+
+    /// Same (model, revision, hash) under TARGET vs DRAFT must not crosstalk.
+    #[test]
+    fn p45_target_draft_same_hash_no_crosstalk() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"shared"]);
+        auth.register("n0", &full, vec![meta("m", b"shared")])
+            .unwrap();
+        let mut draft = meta("m", b"shared");
+        draft.id.as_mut().unwrap().pool_kind = PoolKind::Draft as i32;
+        auth.register("n0", &full, vec![draft]).unwrap();
+
+        let (_, t_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        let (_, d_hit, _) = auth.lookup_prefix("m", "", PoolKind::Draft as i32, &full, "n0");
+        assert_eq!(t_hit, 1);
+        assert_eq!(d_hit, 1);
+
+        // Locate by pool_kind
+        let t_id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"shared".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+        let mut d_id = t_id.clone();
+        d_id.pool_kind = PoolKind::Draft as i32;
+        assert_eq!(auth.locate(&[t_id.clone()]).len(), 1);
+        assert_eq!(auth.locate(&[d_id.clone()]).len(), 1);
+
+        // Evict TARGET only
+        auth.report_ref(&delta("m", b"shared", 1)).unwrap();
+        auth.report_ref(&delta("m", b"shared", -1)).unwrap();
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
+        let (_, t_hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        let (_, d_hit, _) = auth.lookup_prefix("m", "", PoolKind::Draft as i32, &full, "n0");
+        assert_eq!(t_hit, 0, "target evicted");
+        assert_eq!(d_hit, 1, "draft untouched");
     }
 }

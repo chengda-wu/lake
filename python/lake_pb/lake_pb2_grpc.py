@@ -90,6 +90,16 @@ class ControlPlaneServiceStub:
                 request_serializer=lake__pb2.LeaseHeartbeat.SerializeToString,
                 response_deserializer=lake__pb2.LeaseAck.FromString,
                 _registered_method=True)
+        self.RegisterModel = channel.unary_unary(
+                '/lake.ControlPlaneService/RegisterModel',
+                request_serializer=lake__pb2.RegisterModelRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
+        self.DeregisterModel = channel.unary_unary(
+                '/lake.ControlPlaneService/DeregisterModel',
+                request_serializer=lake__pb2.DeregisterModelRequest.SerializeToString,
+                response_deserializer=lake__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServiceServicer:
@@ -181,6 +191,21 @@ class ControlPlaneServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RegisterModel(self, request, context):
+        """P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
+        下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
+        配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeregisterModel(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -218,6 +243,16 @@ def add_ControlPlaneServiceServicer_to_server(servicer, server):
                     servicer.Lease,
                     request_deserializer=lake__pb2.LeaseHeartbeat.FromString,
                     response_serializer=lake__pb2.LeaseAck.SerializeToString,
+            ),
+            'RegisterModel': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterModel,
+                    request_deserializer=lake__pb2.RegisterModelRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
+            ),
+            'DeregisterModel': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeregisterModel,
+                    request_deserializer=lake__pb2.DeregisterModelRequest.FromString,
+                    response_serializer=lake__pb2.Ack.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -430,6 +465,60 @@ class ControlPlaneService:
             '/lake.ControlPlaneService/Lease',
             lake__pb2.LeaseHeartbeat.SerializeToString,
             lake__pb2.LeaseAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterModel(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/RegisterModel',
+            lake__pb2.RegisterModelRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeregisterModel(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lake.ControlPlaneService/DeregisterModel',
+            lake__pb2.DeregisterModelRequest.SerializeToString,
+            lake__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

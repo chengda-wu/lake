@@ -1,7 +1,7 @@
 //! KV Pool:`TcpDataService` 内存字节存储（dumb 后端）。
 //!
 //! P4.2:索引 / radix / ref 归 controlplane；本 crate 只按
-//! `(model_id, pool_kind, block_hash) → bytes` 存取，无 lookup 职责。
+//! `(model_id, revision, pool_kind, block_hash) → bytes` 存取，无 lookup 职责。
 //! P4.4:正名自 SkeletonKv；对齐 Mooncake `MC_FORCE_TCP` fallback——
 //! 无 RDMA 时 gRPC 传不透明 bytes；生产旁路走 TransferService + Transport。
 //! 参考:LMCache MemoryObj；Mooncake store Put/Get；`TcpTransport`。
@@ -17,12 +17,17 @@ use tcp_data_service_server::TcpDataService;
 
 #[derive(Default)]
 struct Store {
-    /// key = (model_id, pool_kind, block_hash)
-    data: HashMap<(String, i32, Vec<u8>), Vec<u8>>,
+    /// key = (model_id, revision, pool_kind, block_hash)
+    data: HashMap<(String, String, i32, Vec<u8>), Vec<u8>>,
 }
 
-fn key(id: &KvBlockId) -> (String, i32, Vec<u8>) {
-    (id.model_id.clone(), id.pool_kind, id.block_hash.clone())
+fn key(id: &KvBlockId) -> (String, String, i32, Vec<u8>) {
+    (
+        id.model_id.clone(),
+        id.revision.clone(),
+        id.pool_kind,
+        id.block_hash.clone(),
+    )
 }
 
 #[derive(Clone, Default)]

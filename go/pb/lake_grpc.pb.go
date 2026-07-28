@@ -19,13 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ControlPlaneService_SubscribeView_FullMethodName  = "/lake.ControlPlaneService/SubscribeView"
-	ControlPlaneService_LookupPrefix_FullMethodName   = "/lake.ControlPlaneService/LookupPrefix"
-	ControlPlaneService_Locate_FullMethodName         = "/lake.ControlPlaneService/Locate"
-	ControlPlaneService_RegisterBlocks_FullMethodName = "/lake.ControlPlaneService/RegisterBlocks"
-	ControlPlaneService_ReportRef_FullMethodName      = "/lake.ControlPlaneService/ReportRef"
-	ControlPlaneService_RequestBarrier_FullMethodName = "/lake.ControlPlaneService/RequestBarrier"
-	ControlPlaneService_Lease_FullMethodName          = "/lake.ControlPlaneService/Lease"
+	ControlPlaneService_SubscribeView_FullMethodName   = "/lake.ControlPlaneService/SubscribeView"
+	ControlPlaneService_LookupPrefix_FullMethodName    = "/lake.ControlPlaneService/LookupPrefix"
+	ControlPlaneService_Locate_FullMethodName          = "/lake.ControlPlaneService/Locate"
+	ControlPlaneService_RegisterBlocks_FullMethodName  = "/lake.ControlPlaneService/RegisterBlocks"
+	ControlPlaneService_ReportRef_FullMethodName       = "/lake.ControlPlaneService/ReportRef"
+	ControlPlaneService_RequestBarrier_FullMethodName  = "/lake.ControlPlaneService/RequestBarrier"
+	ControlPlaneService_Lease_FullMethodName           = "/lake.ControlPlaneService/Lease"
+	ControlPlaneService_RegisterModel_FullMethodName   = "/lake.ControlPlaneService/RegisterModel"
+	ControlPlaneService_DeregisterModel_FullMethodName = "/lake.ControlPlaneService/DeregisterModel"
 )
 
 // ControlPlaneServiceClient is the client API for ControlPlaneService service.
@@ -72,6 +74,12 @@ type ControlPlaneServiceClient interface {
 	RequestBarrier(ctx context.Context, in *RequestBarrierRequest, opts ...grpc.CallOption) (*Ack, error)
 	// lease:节点 mount/unmount segment + 续命(仿 Mooncake MountSegment/UnmountSegment + client_live_ttl_sec)。
 	Lease(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[LeaseHeartbeat, LeaseAck], error)
+	// P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
+	//
+	//	下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
+	//	配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
+	RegisterModel(ctx context.Context, in *RegisterModelRequest, opts ...grpc.CallOption) (*Ack, error)
+	DeregisterModel(ctx context.Context, in *DeregisterModelRequest, opts ...grpc.CallOption) (*Ack, error)
 }
 
 type controlPlaneServiceClient struct {
@@ -167,6 +175,26 @@ func (c *controlPlaneServiceClient) Lease(ctx context.Context, opts ...grpc.Call
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlPlaneService_LeaseClient = grpc.BidiStreamingClient[LeaseHeartbeat, LeaseAck]
 
+func (c *controlPlaneServiceClient) RegisterModel(ctx context.Context, in *RegisterModelRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_RegisterModel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneServiceClient) DeregisterModel(ctx context.Context, in *DeregisterModelRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ControlPlaneService_DeregisterModel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServiceServer is the server API for ControlPlaneService service.
 // All implementations must embed UnimplementedControlPlaneServiceServer
 // for forward compatibility.
@@ -211,6 +239,12 @@ type ControlPlaneServiceServer interface {
 	RequestBarrier(context.Context, *RequestBarrierRequest) (*Ack, error)
 	// lease:节点 mount/unmount segment + 续命(仿 Mooncake MountSegment/UnmountSegment + client_live_ttl_sec)。
 	Lease(grpc.BidiStreamingServer[LeaseHeartbeat, LeaseAck]) error
+	// P4.5:多模型生命周期(F11)。注册登记 (model_id, revision) 命名空间 + 元数据;
+	//
+	//	下线级联删该命名空间 radix 子树 + 位置视图(字节 GC → P4.7)。
+	//	配额字段可随 ModelDescriptor 登记;软/硬配额执行与背压 → P4.6。
+	RegisterModel(context.Context, *RegisterModelRequest) (*Ack, error)
+	DeregisterModel(context.Context, *DeregisterModelRequest) (*Ack, error)
 	mustEmbedUnimplementedControlPlaneServiceServer()
 }
 
@@ -241,6 +275,12 @@ func (UnimplementedControlPlaneServiceServer) RequestBarrier(context.Context, *R
 }
 func (UnimplementedControlPlaneServiceServer) Lease(grpc.BidiStreamingServer[LeaseHeartbeat, LeaseAck]) error {
 	return status.Error(codes.Unimplemented, "method Lease not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) RegisterModel(context.Context, *RegisterModelRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterModel not implemented")
+}
+func (UnimplementedControlPlaneServiceServer) DeregisterModel(context.Context, *DeregisterModelRequest) (*Ack, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeregisterModel not implemented")
 }
 func (UnimplementedControlPlaneServiceServer) mustEmbedUnimplementedControlPlaneServiceServer() {}
 func (UnimplementedControlPlaneServiceServer) testEmbeddedByValue()                             {}
@@ -360,6 +400,42 @@ func _ControlPlaneService_Lease_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlPlaneService_LeaseServer = grpc.BidiStreamingServer[LeaseHeartbeat, LeaseAck]
 
+func _ControlPlaneService_RegisterModel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterModelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).RegisterModel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_RegisterModel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).RegisterModel(ctx, req.(*RegisterModelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlaneService_DeregisterModel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeregisterModelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServiceServer).DeregisterModel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlaneService_DeregisterModel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServiceServer).DeregisterModel(ctx, req.(*DeregisterModelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlaneService_ServiceDesc is the grpc.ServiceDesc for ControlPlaneService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -382,6 +458,14 @@ var ControlPlaneService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RequestBarrier",
 			Handler:    _ControlPlaneService_RequestBarrier_Handler,
+		},
+		{
+			MethodName: "RegisterModel",
+			Handler:    _ControlPlaneService_RegisterModel_Handler,
+		},
+		{
+			MethodName: "DeregisterModel",
+			Handler:    _ControlPlaneService_DeregisterModel_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -318,6 +318,7 @@ mod tests {
             block_hash: hash.to_vec(),
             pool_kind: PoolKind::Target as i32,
             scope: "public".into(),
+            revision: String::new(),
         }
     }
 

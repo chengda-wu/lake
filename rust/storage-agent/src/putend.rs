@@ -26,6 +26,8 @@ pub struct PutEndSession {
     pub request_id: String,
     pub node_id: String,
     pub model_id: String,
+    /// P4.5: `(model_id, revision)` namespace; empty = default.
+    pub revision: String,
     pub prefix_hashes: Vec<Vec<u8>>,
     blocks: Vec<PendingBlock>,
     /// Observability / future assert: true while WRITEBACK+1 is held
@@ -39,10 +41,20 @@ impl PutEndSession {
         node_id: impl Into<String>,
         model_id: impl Into<String>,
     ) -> Self {
+        Self::with_revision(request_id, node_id, model_id, "")
+    }
+
+    pub fn with_revision(
+        request_id: impl Into<String>,
+        node_id: impl Into<String>,
+        model_id: impl Into<String>,
+        revision: impl Into<String>,
+    ) -> Self {
         Self {
             request_id: request_id.into(),
             node_id: node_id.into(),
             model_id: model_id.into(),
+            revision: revision.into(),
             prefix_hashes: Vec::new(),
             blocks: Vec::new(),
             writeback_open: false,
@@ -57,6 +69,7 @@ impl PutEndSession {
                 block_hash,
                 pool_kind: PoolKind::Target as i32,
                 scope: "public".into(),
+                revision: self.revision.clone(),
             },
             bytes,
             durable: false,
@@ -130,6 +143,13 @@ impl PutEndSession {
         self.blocks.iter().all(|b| b.durable)
     }
 
+    fn pool_kind(&self) -> i32 {
+        self.blocks
+            .first()
+            .map(|b| b.id.pool_kind)
+            .unwrap_or(PoolKind::Target as i32)
+    }
+
     pub fn commit_through<P: ControlPlanePort>(
         &mut self,
         store: &mut LocalTierEngine,
@@ -155,13 +175,20 @@ impl PutEndSession {
         // Cap demotions of prior blocks: L2→L3 XOR sync on CP.
         for h in &demoted {
             if !self.blocks.iter().any(|b| b.id.block_hash == *h) {
-                if let Err(e) =
-                    cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)
-                {
+                let pk = self.pool_kind();
+                if let Err(e) = cp.publish_location(
+                    &self.model_id,
+                    &self.revision,
+                    pk,
+                    h,
+                    Tier::L2,
+                    &self.node_id,
+                    false,
+                ) {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
-                if let Err(e) = cp.set_l3_present(&self.model_id, h, true) {
+                if let Err(e) = cp.set_l3_present(&self.model_id, &self.revision, pk, h, true) {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
@@ -173,19 +200,26 @@ impl PutEndSession {
             unpin_all(store, &self.blocks);
             return Err(e);
         }
+        let pk = self.pool_kind();
         for b in &self.blocks {
             let h = b.id.block_hash.as_slice();
             // Self may have been cap-demoted to L3-only during flush.
             if store.l3_present(h) {
-                if let Err(e) = cp.set_l3_present(&self.model_id, h, true) {
+                if let Err(e) = cp.set_l3_present(&self.model_id, &self.revision, pk, h, true) {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
             }
             if !store.is_l2_durable(h) {
-                if let Err(e) =
-                    cp.publish_location(&self.model_id, h, Tier::L2, &self.node_id, false)
-                {
+                if let Err(e) = cp.publish_location(
+                    &self.model_id,
+                    &self.revision,
+                    pk,
+                    h,
+                    Tier::L2,
+                    &self.node_id,
+                    false,
+                ) {
                     unpin_all(store, &self.blocks);
                     return Err(e);
                 }
@@ -237,10 +271,26 @@ mod tests {
         BandwidthPool, LocalTier, LocalTierEngine, PipelineAction, TierCaps, TierPipeline,
     };
 
+    fn ensure_model(auth: &mut Authority, model: &str) {
+        auth.register_model(ModelDescriptor {
+            model_id: model.into(),
+            revision: String::new(),
+            num_layers: 1,
+            block_spec: Some(BlockSpec {
+                block_tokens: 128,
+                bytes_per_block: 0,
+            }),
+            hash_algo: HashAlgo::HashSha256256 as i32,
+            quota: None,
+        })
+        .unwrap();
+    }
+
     #[test]
     fn commit_through_l2_only_no_l3() {
         let mut store = LocalTierEngine::with_caps(TierCaps::default());
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let mut sess = PutEndSession::new("r1", "n0", "m");
         sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
 
@@ -257,6 +307,7 @@ mod tests {
                 block_hash: b"h0".to_vec(),
                 pool_kind: PoolKind::Target as i32,
                 scope: "public".into(),
+                revision: String::new(),
             }),
             kind: RefKind::Request as i32,
             delta: 1,
@@ -266,24 +317,25 @@ mod tests {
         let mut d0 = d;
         d0.delta = -1;
         auth.report_ref(&d0).unwrap();
-        assert_eq!(auth.evict_n("m", 1), 1);
+        assert_eq!(auth.evict_n("m", "", PoolKind::Target as i32, 1), 1);
     }
 
     #[test]
     fn promote_publishes_l0() {
         let mut store = LocalTierEngine::new();
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let mut sess = PutEndSession::new("r2", "n0", "m");
         sess.put_start(b"p".to_vec(), b"P".to_vec());
         {
             let mut port = AuthorityPort { auth: &mut auth };
             sess.commit_through(&mut store, &mut port).unwrap();
             store.promote_to_l0(b"p").unwrap();
-            port.publish_location("m", b"p", Tier::L0, "n0", true)
+            port.publish_location("m", "", PoolKind::Target as i32, b"p", Tier::L0, "n0", true)
                 .unwrap();
         }
         assert_eq!(store.local_tier(b"p"), Some(LocalTier::L0));
-        assert!(auth.has_l0_on("m", b"p", "n0"));
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"p", "n0"));
     }
 
     #[test]
@@ -294,6 +346,7 @@ mod tests {
             l2: 1,
         });
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let mut s0 = PutEndSession::new("r-a", "n0", "m");
         s0.put_start(b"x".to_vec(), b"X".to_vec());
         {
@@ -309,14 +362,13 @@ mod tests {
             let mut port = AuthorityPort { auth: &mut auth };
             s1.commit_through(&mut store, &mut port).unwrap();
         }
-        // Cap pressure: x moved L2→L3 (XOR), y on L2.
         assert!(!store.is_l2_durable(b"x"));
         assert!(store.l3_present(b"x"));
         assert!(store.is_l2_durable(b"y"));
         assert!(!store.l3_present(b"y"));
 
         let meta_x = auth
-            .lookup_prefix("m", &[b"x".to_vec()], "n0")
+            .lookup_prefix("m", "", PoolKind::Target as i32, &[b"x".to_vec()], "n0")
             .0
             .into_iter()
             .next()
@@ -329,19 +381,19 @@ mod tests {
             .any(|l| l.tier == Tier::L2 as i32 && l.node_id == "n0"));
     }
 
-    /// durable-first 不变量：commit 成功 ⇒ radix 已发布 block 已 settle（L2|L3），无悬空。
-    /// (Ref: consistency.md §2/§8.3, Mooncake PROCESSING→COMPLETE；cap 下可为 L3-only)
     #[test]
     fn commit_published_block_always_settled() {
         let mut store = LocalTierEngine::new();
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let mut sess = PutEndSession::new("r-df", "n0", "m");
         sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
         {
             let mut port = AuthorityPort { auth: &mut auth };
             sess.commit_through(&mut store, &mut port).unwrap();
         }
-        let (metas, _hit, _all) = auth.lookup_prefix("m", &[b"h0".to_vec()], "n0");
+        let (metas, _hit, _all) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &[b"h0".to_vec()], "n0");
         let meta = metas
             .into_iter()
             .next()
@@ -356,7 +408,6 @@ mod tests {
         assert!(store.is_settled(b"h0"));
     }
 
-    /// Multi-block PutEnd under L2 cap: flush-before-pin so XOR demote can run.
     #[test]
     fn multi_block_putend_l2_cap_xor_without_pin_block() {
         let mut store = LocalTierEngine::with_caps(TierCaps {
@@ -365,6 +416,7 @@ mod tests {
             l2: 1,
         });
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let mut sess = PutEndSession::new("r-mb", "n0", "m");
         sess.put_start(b"x".to_vec(), b"X".to_vec());
         sess.put_start(b"y".to_vec(), b"Y".to_vec());
@@ -377,9 +429,6 @@ mod tests {
         assert_eq!(store.l2_len(), 1);
     }
 
-    /// M1(B) 时序不变量：WRITEBACK −1 解冻必须发生在 RequestBarrier 之后。
-    /// 单进程同步无并发窗口，故用 recording mock 锁调用序（防 −1 被改回 barrier 之前）。
-    /// (Ref: consistency.md §3, SGLang `_evict_write_back` 持锁到 flush+ack)
     #[test]
     fn writeback_minus_one_after_barrier() {
         struct RecordingPort {
@@ -408,6 +457,8 @@ mod tests {
             fn publish_location(
                 &mut self,
                 model_id: &str,
+                revision: &str,
+                pool_kind: i32,
                 flat: &[u8],
                 tier: Tier,
                 node_id: &str,
@@ -415,22 +466,27 @@ mod tests {
             ) -> Result<(), String> {
                 self.calls.push("publish");
                 self.auth
-                    .publish_location(model_id, flat, tier, node_id, present)
+                    .publish_location(model_id, revision, pool_kind, flat, tier, node_id, present)
             }
             fn set_l3_present(
                 &mut self,
                 model_id: &str,
+                revision: &str,
+                pool_kind: i32,
                 flat: &[u8],
                 present: bool,
             ) -> Result<(), String> {
                 self.calls.push("l3");
-                self.auth.set_l3_present(model_id, flat, present)
+                self.auth
+                    .set_l3_present(model_id, revision, pool_kind, flat, present)
             }
         }
 
         let mut store = LocalTierEngine::new();
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         let mut port = RecordingPort {
-            auth: Authority::default(),
+            auth,
             calls: Vec::new(),
         };
         let mut sess = PutEndSession::new("r-m1b", "n0", "m");
@@ -462,6 +518,7 @@ mod tests {
             l2: 8,
         });
         let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
         for (id, h, bytes) in [("r-a", b"a", b"A"), ("r-b", b"b", b"B")] {
             let mut s = PutEndSession::new(id, "n0", "m");
             s.put_start(h.to_vec(), bytes.to_vec());
@@ -476,9 +533,9 @@ mod tests {
         assert_eq!(n, 1);
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            apply_location_events(&mut port, "m", "n0", &ev).unwrap();
+            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev).unwrap();
         }
-        assert!(auth.has_l0_on("m", b"a", "n0"));
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"a", "n0"));
 
         pipe.enqueue(PipelineAction::Promote {
             hash: b"b".to_vec(),
@@ -487,11 +544,12 @@ mod tests {
         assert_eq!(n2, 1);
         {
             let mut port = AuthorityPort { auth: &mut auth };
-            apply_location_events(&mut port, "m", "n0", &ev2).unwrap();
+            apply_location_events(&mut port, "m", "", PoolKind::Target as i32, "n0", &ev2).unwrap();
         }
-        assert!(auth.has_l0_on("m", b"b", "n0"));
-        assert!(!auth.has_l0_on("m", b"a", "n0"));
-        let (_, _, all_local_a) = auth.lookup_prefix("m", &[b"a".to_vec()], "n0");
+        assert!(auth.has_l0_on("m", "", PoolKind::Target as i32, b"b", "n0"));
+        assert!(!auth.has_l0_on("m", "", PoolKind::Target as i32, b"a", "n0"));
+        let (_, _, all_local_a) =
+            auth.lookup_prefix("m", "", PoolKind::Target as i32, &[b"a".to_vec()], "n0");
         assert!(!all_local_a);
     }
 }
