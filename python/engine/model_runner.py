@@ -17,6 +17,7 @@ from engine.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from engine.sample.greedy import greedy_sample
+from engine.sample.grammar import apply_token_bitmask
 from engine.sample.reject import chain_reject_sample
 from runtime.req import Req
 from runtime.scheduler_output import SchedulerOutput
@@ -164,6 +165,7 @@ class ModelRunner:
     ) -> InputBatch:
         """对齐 vLLM `prepare_inputs`：组本步 InputBatch（无跨步 RequestState）。"""
         batch = InputBatch()
+        spec_map = output.scheduled_spec_decode_tokens or {}
         for req_id, n in output.num_scheduled_tokens.items():
             if n <= 0:
                 continue
@@ -183,11 +185,18 @@ class ModelRunner:
                 batch.is_prompt_phase[req_id] = True
             else:
                 ctx = list(req.all_token_ids)
-                batch.token_ids[req_id] = ctx
-                # decode：以最后已有 token 为 query，预测下一 token
-                qs = max(0, len(ctx) - 1)
-                batch.query_start[req_id] = qs
-                batch.query_end[req_id] = len(ctx)
+                draft = list(spec_map.get(req_id) or [])[: max(0, n - 1)]
+                if draft:
+                    # TARGET_VERIFY：输入 last_ctx + draft，产生 draft 校验 + bonus。
+                    batch.token_ids[req_id] = ctx + draft
+                    batch.query_start[req_id] = max(0, len(ctx) - 1)
+                    batch.query_end[req_id] = len(ctx) + len(draft)
+                else:
+                    batch.token_ids[req_id] = ctx
+                    # decode：以最后已有 token 为 query，预测下一 token
+                    qs = max(0, len(ctx) - 1)
+                    batch.query_start[req_id] = qs
+                    batch.query_end[req_id] = len(ctx)
                 batch.is_prompt_phase[req_id] = False
         self._input_batch = batch
         return batch
@@ -221,7 +230,12 @@ class ModelRunner:
         out: Dict[str, List[int]] = {}
         drafts_out: Dict[str, List[int]] = {}
         spec_map = output.scheduled_spec_decode_tokens or {}
+        grammar = output.grammar_output
+        deferred = set(grammar.deferred_req_ids if grammar is not None else [])
+        bitmasks = grammar.token_bitmask_by_req if grammar is not None else {}
         for req_id, logits in last_logits.items():
+            if req_id in deferred:
+                continue
             req = host_reqs.get(req_id)
             if req is None:
                 continue
@@ -233,7 +247,10 @@ class ModelRunner:
                 )
                 out[req_id] = accepted
             else:
-                out[req_id] = [greedy_sample(logits)]
+                masked_logits = logits
+                if req_id in bitmasks:
+                    masked_logits = apply_token_bitmask(logits, bitmasks[req_id])
+                out[req_id] = [greedy_sample(masked_logits)]
             if self._drafter is not None and req_id in out:
                 new_ctx = list(req.all_token_ids) + list(out[req_id])
                 self._drafter.post_forward(req_id, new_ctx)

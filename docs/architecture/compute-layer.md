@@ -628,6 +628,8 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 
 **C12 状态（2026-07-27）**：已落 `ModelRunner.load_model` / `warmup` / `ModelRunnerStatus`，`WorkerEngine.start()` 在 Warm 阶段执行 load+warmup，`CapacitySignal` 上报 `model_id` / loaded / warmed；权重 pin 以回调形式接入，保持权重所有权在池侧。warmup 复用 `dummy_run()`，不触发 `pool.prepare_step` / `pool.done`。
 
+**C13 状态（2026-07-27）**：已落 `GrammarOutput` / `SamplingParams.structured_output` 占位，`ModelRunner.sample_tokens()` 可消费 bool-list bitmask 或 defer 本步 sample；`NodeScheduler.schedule()` 会把 structured 请求标进 `SchedulerOutput.grammar_output`，`spec + structured + overlap` 且存在未处理结果时强制 drain，对齐 SGLang `need_grammar_sync`。同时修正 TARGET_VERIFY 在剩余生成预算截短 draft 时的 query/write slot 对齐：调度只传本步可验证 draft，runner 防御性按 `n-1` 截断。真 xgrammar/llguidance FSM、packed bitmask tensor、H2D copy stream、grammar-aware speculative rejection 后置。
+
 #### 本轮不做
 
 - 不接 vLLM `BlockPool` / `KVCacheManager` / runner 内 `RequestState`，这些与池权威冲突。

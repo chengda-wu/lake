@@ -25,6 +25,7 @@ from runtime.role import RoleConfig
 from runtime.scheduler_output import (
     CachedRequestData,
     ForwardMode,
+    GrammarOutput,
     NewRequestData,
     ReqIoSet,
     SamplingParams,
@@ -225,10 +226,26 @@ class NodeScheduler:
         self._drain_results()
 
     def _should_disable_overlap(self) -> bool:
-        """关 overlap 例外（C1：连续 EXTEND 可选；spec+grammar 留给 D7）。"""
+        """关 overlap 例外。
+
+        C13：spec + structured output 需要等真实 token 推进 grammar FSM；
+        若上一批尚未 process，必须先 drain，再调度本批 verify。
+        """
+        if self._result_queue:
+            for rid in self._running:
+                req = self._reqs.get(rid)
+                if req is None or req.finished:
+                    continue
+                if req.num_computed_tokens < len(req.prompt_token_ids):
+                    continue
+                if self._pending_drafts.get(rid) and self._req_has_structured_output(req):
+                    return True
         # 若 waiting 里将有 extend、且队列非空，可强制同步以利 TTFT（对齐
         # SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP 精神）。C1 默认不强制。
         return False
+
+    def _req_has_structured_output(self, req: Req) -> bool:
+        return bool(req.sampling_params.structured_output)
 
     def _run_batch(self, output: SchedulerOutput) -> None:
         ready = self._pool.prepare_step(output, self._reqs)
@@ -294,6 +311,7 @@ class NodeScheduler:
         spec = None
         if output.scheduled_spec_decode_tokens:
             spec = {rid: t for rid, t in output.scheduled_spec_decode_tokens.items() if rid in keep}
+        grammar_output = self._filter_grammar_output(output.grammar_output, keep)
         computed_at = {
             rid: c for rid, c in output.req_num_computed_at_schedule.items() if rid in keep
         }
@@ -311,8 +329,30 @@ class NodeScheduler:
             can_run_graph=output.can_run_graph,
             req_forward_modes=req_modes,
             scheduled_spec_decode_tokens=spec or None,
-            has_structured_output=output.has_structured_output,
+            has_structured_output=grammar_output is not None,
+            grammar_output=grammar_output,
             req_num_computed_at_schedule=computed_at,
+        )
+
+    def _filter_grammar_output(
+        self,
+        grammar: Optional[GrammarOutput],
+        keep: set[str],
+    ) -> Optional[GrammarOutput]:
+        if grammar is None:
+            return None
+        req_ids = [rid for rid in grammar.req_ids if rid in keep]
+        bitmasks = {
+            rid: mask for rid, mask in grammar.token_bitmask_by_req.items() if rid in keep
+        }
+        deferred = [rid for rid in grammar.deferred_req_ids if rid in keep]
+        if not req_ids and not bitmasks and not deferred:
+            return None
+        return GrammarOutput(
+            req_ids=req_ids,
+            token_bitmask_by_req=bitmasks,
+            deferred_req_ids=deferred,
+            reason=grammar.reason,
         )
 
     def _pop_and_process(self) -> None:
@@ -418,7 +458,7 @@ class NodeScheduler:
                 num_tokens[rid] = max_accept
                 write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + max_accept))
                 req_modes[rid] = ForwardMode.TARGET_VERIFY
-                spec_tokens[rid] = list(pending)
+                spec_tokens[rid] = list(pending[: max_accept - 1])
                 self._inflight_decode[rid] = inflight + max_accept
                 budget -= max_accept
             else:
@@ -503,6 +543,12 @@ class NodeScheduler:
         can_graph = mode in (ForwardMode.DECODE, ForwardMode.TARGET_VERIFY) and all(
             n == 1 or req_modes[r] == ForwardMode.TARGET_VERIFY for r, n in num_tokens.items()
         )
+        structured_req_ids = [
+            rid for rid in num_tokens if self._req_has_structured_output(self._reqs[rid])
+        ]
+        grammar_output = (
+            GrammarOutput(req_ids=structured_req_ids) if structured_req_ids else None
+        )
 
         return SchedulerOutput(
             step_id=step,
@@ -517,6 +563,8 @@ class NodeScheduler:
             can_run_graph=can_graph,
             req_forward_modes=req_modes,
             scheduled_spec_decode_tokens=spec_tokens or None,
+            has_structured_output=grammar_output is not None,
+            grammar_output=grammar_output,
             req_num_computed_at_schedule={r: computed_at[r] for r in num_tokens},
         )
 
