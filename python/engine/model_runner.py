@@ -267,10 +267,9 @@ class ModelRunner:
             raise RuntimeError(f"ready/output step mismatch: {ready.step_id} vs {output.step_id}")
 
         host = host_reqs or {}
-        try:
-            return self._execute_prepared(output, ready, host)
-        finally:
-            self._pool.done(output.step_id)
+        out = self._execute_prepared(output, ready, host)
+        self._pool.done(output.step_id)
+        return out
 
     def _execute_prepared(
         self,
@@ -281,7 +280,7 @@ class ModelRunner:
         """执行已 ready 的一步；不负责 pool.done。
 
         `execute_model` 和 `dummy_run` 共用本路径，区别只在前者由真实
-        pool ready 驱动并在 finally 打 done，后者使用 dummy ready 且不触池。
+        pool ready 驱动并在成功后打 done，后者使用 dummy ready 且不触池。
         """
 
         next_tokens: Dict[str, List[int]] = {}

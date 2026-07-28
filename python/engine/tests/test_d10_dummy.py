@@ -6,7 +6,8 @@ from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelLoadInfo, ModelRunner
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan
-from runtime.scheduler_output import ForwardMode, ReqIoSet
+from runtime.req import Req
+from runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams, SchedulerOutput
 
 
 def test_commit_does_not_undercut_newer_prepare() -> None:
@@ -62,6 +63,37 @@ def test_dummy_run_skips_pool_done() -> None:
     assert runner._input_batch.req_ids == ["dummy-0", "dummy-1"]  # noqa: SLF001
     assert runner._attn_meta is not None  # noqa: SLF001
     assert runner._attn_meta.num_actual_tokens == 6  # noqa: SLF001
+
+
+def test_execute_model_does_not_done_failed_step() -> None:
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    runner = ModelRunner(pool, model_backend="mock")
+    req = Req(
+        req_id="bad-ready",
+        model_id="m",
+        prompt_token_ids=[1],
+        sampling_params=SamplingParams(max_new_tokens=1),
+    )
+    output = SchedulerOutput(
+        step_id=7,
+        forward_mode=ForwardMode.EXTEND,
+        num_scheduled_tokens={req.req_id: 1},
+        total_num_scheduled_tokens=1,
+        write_set=[ReqIoSet(req_id=req.req_id, token_start=0, token_end=1)],
+        req_forward_modes={req.req_id: ForwardMode.EXTEND},
+        req_num_computed_at_schedule={req.req_id: 0},
+    )
+    ready = pool.prepare_step(output, {req.req_id: req})
+    ready.slot_mapping_by_req[req.req_id] = []
+
+    try:
+        runner.execute_model(output, ready, {req.req_id: req})
+        raise AssertionError("expected execute_model to fail")
+    except ValueError as e:
+        assert "slot_mapping" in str(e)
+    assert ag.done_calls == 0
+    assert ag._ready_step == 7  # noqa: SLF001
 
 
 def test_load_model_pins_weights_and_warmup_skips_pool() -> None:
