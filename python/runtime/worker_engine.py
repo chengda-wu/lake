@@ -14,6 +14,7 @@ from typing import Dict, Optional
 
 from engine.model_runner import ModelRunner
 from engine.pool_iface import PoolIface
+from runtime.executor import RuntimeExecutor, SingleProcessExecutor
 from runtime.lifecycle import CapacitySignal, WorkerLifecycle, WorkerState
 from runtime.node_scheduler import NodeScheduler
 from runtime.prefix_hint import PrefixHint
@@ -49,14 +50,20 @@ class WorkerEngine:
         role: Optional[RoleConfig] = None,
         *,
         coalesce_s: float = 0.005,
+        executor: Optional[RuntimeExecutor] = None,
     ) -> None:
         self._role = role or RoleConfig()
         self._pool = pool
         self._runner = runner
+        self._executor = executor or SingleProcessExecutor(runner)
         self._coalesce_s = max(0.0, coalesce_s)
         self._life = WorkerLifecycle(WorkerState.IDLE)
         self._sched = NodeScheduler(
-            pool, runner, self._role, on_req_finished=self._on_req_finished
+            pool,
+            runner,
+            self._role,
+            on_req_finished=self._on_req_finished,
+            executor=self._executor,
         )
         self._inbound: "queue.Queue[Optional[_Inbound]]" = queue.Queue()
         self._inflight: Dict[str, _Inbound] = {}

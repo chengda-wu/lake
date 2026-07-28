@@ -16,6 +16,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 from engine.model_runner import ModelRunner, ModelRunnerOutput
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
+from runtime.executor import ExecutorInput, RuntimeExecutor, SingleProcessExecutor
 from runtime.exec_mode import ExecMode
 from runtime.future_map import FutureMap
 from runtime.mode_select import full_local_hit, select_exec_mode
@@ -55,9 +56,11 @@ class NodeScheduler:
         runner: ModelRunner,
         role: Optional[RoleConfig] = None,
         on_req_finished: Optional[Callable[[Req], None]] = None,
+        executor: Optional[RuntimeExecutor] = None,
     ) -> None:
         self._pool = pool
         self._runner = runner
+        self._executor = executor or SingleProcessExecutor(runner)
         self._role = role or RoleConfig()
         self._on_req_finished = on_req_finished
         self._reqs: Dict[str, Req] = {}
@@ -252,7 +255,9 @@ class NodeScheduler:
         # D2：allow_partial_hit 缩批后须按 effective_* 执行（默认与 plan 相同）
         output = self._respect_effective_sets(output, ready)
         self.timeline.append(("execute", output.step_id))
-        runner_out = self._runner.execute_model(output, ready, self._reqs)
+        runner_out = self._executor.execute_model(
+            ExecutorInput(output=output, ready=ready, host_reqs=self._reqs)
+        )
         self._result_queue.append(_BatchResult(output=output, runner_out=runner_out, ready=ready))
 
     def _respect_effective_sets(self, output: SchedulerOutput, ready: ReadyHandle) -> SchedulerOutput:
