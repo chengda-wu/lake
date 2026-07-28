@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
+from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from runtime.executor import ExecutorInput, RuntimeExecutor, SingleProcessExecutor
@@ -79,7 +80,7 @@ class NodeScheduler:
 
     @property
     def _use_runner_tokens(self) -> bool:
-        return self._role.model_backend == "tiny_lm"
+        return self._role.model_backend in ("qwen3", "tiny_lm")
 
     @property
     def _spec_enabled(self) -> bool:
@@ -660,7 +661,7 @@ def build_req_from_generate(
 ) -> Req:
     return Req(
         req_id=request_id,
-        model_id=model_id or "mock-llm",
+        model_id=model_id or QWEN3_0_6B_MODEL_ID,
         prompt_token_ids=list(prompt_tokens),
         sampling_params=SamplingParams(max_new_tokens=max_new_tokens or 4),
         node_id=node_id,

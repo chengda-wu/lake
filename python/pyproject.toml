@@ -11,11 +11,12 @@ requires-python = ">=3.12"
 dependencies = [
     "grpcio>=1.82.1",
     "protobuf>=7.35.0",
+    "torch",
 ]
 
-# 已定技术选型 Python+Triton；C3 TinyLM 不强制。安装：pip install -e ".[cuda]"
+# 已定技术选型 Python+Torch+Triton；torch 是计算层基础依赖，triton 随 CUDA 开发路径安装。
 [project.optional-dependencies]
-cuda = ["torch", "triton"]
+cuda = ["triton"]
 dev = [
     "grpcio-tools==1.82.1",
     "pytest>=8",

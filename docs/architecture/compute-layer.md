@@ -576,7 +576,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | **C5** | vLLM 调度几何 + `mode_select`/`PrefixHint`（D-direct/混部/PD）；整段本地命中→computed=prompt_len；Generate 回填 `exec_mode`；Go Router 权威选路仍后续 | **done 2026-07-22** |
 | **C6** | **Worker 长期单环**：一份 `NodeScheduler`+`ModelRunner`；`Generate` 只入队等待；step 环独立线程；每 step 前 drain 入队以真正 continuous batching；`RoleConfig.from_env`（D3 最小） | **done 2026-07-24** |
 | **C7** | Scheduler 补齐 vLLM 几何：`token_budget` / chunked extend / running 优先；admission 守 `max_model_length` | **done 2026-07-24** |
-| **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ TinyLM 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | **done 2026-07-24** |
+| **C8** | Runner：`InputBatch` + `AttentionMetadata`（D4）+ runner token 批路径；残差只算 `[computed, computed+n)`；`sample_tokens` 接口预留拆分 | **done 2026-07-24** |
 | **C9** | D10 overlap×agent 槽位会计 + D6 `_dummy_run` 复用生产入口 | **done 2026-07-24** |
 | **C10** | Warm/容量信号骨架（生命周期状态机 + `CapacitySignal` 上报；真权重 pin / Router 联调仍后置） | **done 2026-07-24** |
 
@@ -592,7 +592,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 |----|--------|------|----------|------|
 | 1 | **C6** Worker 单环 ✅ | `runtime/worker_engine.py` + `worker.py`、`node_scheduler.py`（`has_work` / `before_schedule` / `on_req_finished`）、`role.py` | 无 | 两并发 submit 同 scheduler；同 step 多 `req_id`；单测绿 |
 | 2 | **C7** budget/chunk ✅ | `node_scheduler.py`、`role.py` | 无 | chunked extend + budget + decode 优先 + admission 单测 |
-| 3 | **C8** InputBatch/attn ✅ | `input_batch.py`、`model_runner.py`、`attn/metadata.py`、`kernels/attn_ref.py` | D4 初版已钉 | tiny_lm 同批两请求；`forward_query_logits` 残差 |
+| 3 | **C8** InputBatch/attn ✅ | `input_batch.py`、`model_runner.py`、`attn/metadata.py`、`kernels/attn_ref.py` | D4 初版已钉 | runner token 同批两请求；`forward_query_logits` 残差 |
 | 4 | **C9** D10+D6 ✅ | `agents/memory.py`（prepare 代数防 shrink）、`model_runner.dummy_run` | D10 | 新 prepare 后旧 commit 不压 HWM；dummy 不触 pool |
 | 5 | **C10** 联调骨架 ✅ | `runtime/lifecycle.py` + `WorkerEngine.capacity_signal` | 真 pin/Router 后置 | Serving 态上报 waiting/running；Drain 拒新请求 |
 
@@ -609,7 +609,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | 调度信封 | `SchedulerOutput` 含 new/cached diff、spec、structured、connector、PP token、CoW/zero 等字段 | 已有 `SchedulerOutput` + `read_set`/`write_set`，保留最小 new/cached/spec 字段 | 需补齐 PP/structured/多模态/LoRA 的可空字段边界，但不加入物理 `block_ids` |
 | InputBatch / buffer | `InputBuffers` 预分配 GPU tensor，`InputBatch` 含 positions、query_start_loc、logits_indices、padding、spec 宽度 | `InputBatch` 仍是 Python list/dict，便于 mock | 需引入固定地址 buffer 抽象，为 graph / Triton kernel 接口做准备 |
 | AttentionMetadata | `CommonAttentionMetadata` 含 device/CPU 双视图、`block_table_tensor`、`slot_mapping`、prefill/decode 标志、DCP/R-SWA 字段 | 仅有 seq/query 几何 + agent 逻辑 block table | 需定义 lake 版 device metadata：agent 出固定地址 block table / slot mapping，runner 只读 |
-| ModelRunner | `GPUModelRunner` 能 `load_model`、`initialize_kv_cache`、`prepare_inputs`、`execute_model`、`sample_tokens`、`_dummy_run`；另有 sampler/structured/spec/PP/graph 子模块 | `ModelRunner` 已拆 `prepare_inputs` / `prepare_attn` / `sample_tokens`，后端为 mock/TinyLM | 需接入真权重加载骨架、runner buffer 生命周期、sample/structured 拆分，不引入 runner 内请求表 |
+| ModelRunner | `GPUModelRunner` 能 `load_model`、`initialize_kv_cache`、`prepare_inputs`、`execute_model`、`sample_tokens`、`_dummy_run`；另有 sampler/structured/spec/PP/graph 子模块 | `ModelRunner` 已拆 `prepare_inputs` / `prepare_attn` / `sample_tokens`，主后端为 `qwen3`，`mock`/`tiny_lm` 仅作测试路径 | 需接入真权重加载骨架、runner buffer 生命周期、sample/structured 拆分，不引入 runner 内请求表 |
 | KV Connector / offload | `KVConnectorBase_V1` 提供 scheduler/worker 双侧 load/save/request_finished 钩子，connector 可选 | `pool_iface` 必经，`prepare_step`/`done`/`on_request_finished` 已有 mock | 需把生产 agent 的 device 会计与错误路径钉清，仍不走 vLLM 可选 connector metadata |
 | Overlap / FutureMap | vLLM async + SGLang `FutureMap` 都有 device relay；SGLang 还能 relay spec extras | 当前 `FutureMap` 是 host 占位，`InMemoryAgent` 用代数防 shrink | 需升级为 device relay 设计与测试边界，尤其 spec extras / grammar 同步例外 |
 | 并行执行 | vLLM `Executor.collective_rpc` 扇出同一 `SchedulerOutput` 到 TP/PP worker，PP 有 `PPHandler` | 单卡先行，无 runtime executor | 需先定 D8 最小 runtime executor 形态，再接 TP/PP |
@@ -619,14 +619,14 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 | 里程碑 | 内容 | 主改 | 验收 |
 |--------|------|------|------|
 | **C11** | **Runner 静态 buffer + lake AttentionMetadata v2**：引入固定地址 `InputBuffers` / block table / slot mapping 镜像；`InputBatch` 保持 host 权威但能导出 device-ready 形态 | `engine/input_batch.py`、`engine/attn/metadata.py`、`engine/model_runner.py`、`engine/pool_types.py` | 单测覆盖 ragged query_start、decode 单 token、chunked extend、agent block table 缺失/错配 |
-| **C12** | **真实模型加载骨架**：`load_model` / `warmup` / 权重 pin 回调；先支持 TinyLM→TorchModule 形态，不做 HF 全量生态 | `engine/model_runner.py`、`engine/models/`、`runtime/lifecycle.py`、`runtime/role.py` | Worker Warm→Ready 时完成模型 init；dummy/warmup 不触 KV done；容量信号带模型状态 |
+| **C12** | **真实模型加载骨架**：`load_model` / `warmup` / 权重 pin 回调；先支持 Qwen3 `nn.Module` config/model 骨架 + vLLM-style 通用 `DummyModelLoader`，不做 HF 全量生态 | `engine/model_runner.py`、`engine/models/`、`runtime/lifecycle.py`、`runtime/role.py` | Worker Warm→Ready 时完成模型 init；dummy/warmup 不触 KV done；容量信号带模型状态 |
 | **C13** | **Sampling / structured output 挂载点（D7）**：拆 `execute_model` 与 `sample_tokens` 的时序；加入 `GrammarOutput` / bitmask 占位，明确 spec+grammar 何时关 overlap | `engine/sample/`、`runtime/scheduler_output.py`、`runtime/node_scheduler.py` | 贪心采样不回归；structured 占位可 defer sample；spec+grammar 强制 drain 的测试存在 |
 | **C14** | **pool_iface 生产会计契约**：把 `commit_write_extent`、partial hit、prepare/done 错误路径从 mock 语义提升为 agent FFI 契约；补 D10 device accounting 文档与测试 | `engine/pool_iface.py`、`engine/agent.py`、`engine/agents/memory.py`、`engine/tests/` | 旧 commit 不压新 prepare HWM；`TIMEOUT`/`CAPACITY` 不触发 mode fallback；finish 只打一次 agent |
 | **C15** | **D8 runtime executor 草案**：单进程 executor 先抽象 `execute_model(SchedulerOutput)` 扇出接口，TP/PP 真通信后置 | `runtime/worker_engine.py`、`runtime/` 新 executor 模块、测试 | 单卡路径仍走同接口；未来多 worker 可接同一 output；不复制 Host `Req` 权威 |
 
 **C11 状态（2026-07-27）**：已落 Python 版固定 buffer 镜像（`InputBuffers`）+ `AttentionMetadata` v2（`block_table_tensor` / `slot_mapping` / `positions`）+ `ReadyHandle.slot_mapping_by_req`；`InMemoryAgent` 已返回逻辑 block table / slot mapping 供单测。真 device tensor / CUDA graph capture 仍归 C12+ 后续生产化。
 
-**C12 状态（2026-07-27）**：已落 `ModelRunner.load_model` / `warmup` / `ModelRunnerStatus`，`WorkerEngine.start()` 在 Warm 阶段执行 load+warmup，`CapacitySignal` 上报 `model_id` / loaded / warmed；权重 pin 以回调形式接入，保持权重所有权在池侧。warmup 复用 `dummy_run()`，不触发 `pool.prepare_step` / `pool.done`。
+**C12 状态（2026-07-28）**：已落 `ModelRunner.load_model` / `warmup` / `ModelRunnerStatus`，`WorkerEngine.start()` 在 Warm 阶段执行 load+warmup，`CapacitySignal` 上报 `model_id` / loaded / warmed；权重 pin 以回调形式接入，保持权重所有权在池侧。Python 计算层以 Torch 为基础依赖，默认后端切为 `qwen3`，使用 Qwen3-0.6B config 初始化 `Qwen3ForCausalLM(nn.Module)`；模型分层按 Transformers/vLLM 形态保留 `Qwen3Model` backbone、`forward`、`compute_logits`、`load_weights(weights)` 边界，dummy 仍由通用 `DummyModelLoader` 注入，不污染模型 API。当前 deterministic decode 在 runner 层占位；`tiny_lm` 仅保留为旧单测/采样验证。warmup 复用 `dummy_run()`，不触发 `pool.prepare_step` / `pool.done`。
 
 **C13 状态（2026-07-27）**：已落 `GrammarOutput` / `SamplingParams.structured_output` 占位，`ModelRunner.sample_tokens()` 可消费 bool-list bitmask 或 defer 本步 sample；`NodeScheduler.schedule()` 会把 structured 请求标进 `SchedulerOutput.grammar_output`，`spec + structured + overlap` 且存在未处理结果时强制 drain，对齐 SGLang `need_grammar_sync`。同时修正 TARGET_VERIFY 在剩余生成预算截短 draft 时的 query/write slot 对齐：调度只传本步可验证 draft，runner 防御性按 `n-1` 截断。真 xgrammar/llguidance FSM、packed bitmask tensor、H2D copy stream、grammar-aware speculative rejection 后置。
 

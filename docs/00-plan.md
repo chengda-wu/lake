@@ -136,7 +136,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 - **Python 开发环境用 `uv` 管理**：从仓库根执行 `uv venv --python 3.12`、`source .venv/bin/activate`、`uv pip install -e "./python[dev]"`。
 - **边界**：`uv` 只管 Python 开发依赖与本地测试环境；Rust / Go 仍分别使用 `cargo` / `go`，三语言构建入口不合并到 uv。
-- **CUDA/Triton**：默认 dev 环境不强制安装 Torch/Triton；需要真 CUDA 路径时执行 `uv pip install -e "./python[dev,cuda]"`。
+- **Torch/CUDA/Triton**：Torch 是 Python 计算层基础依赖；本机 CUDA wheel 由安装源/平台解析决定（如 PyPI 默认 CUDA wheel 或 PyTorch 指定 CUDA index），`cuda` extra 仅补 Triton 开发路径。
 - **参考取向**：vLLM 更偏 uv-first（推荐 `uv venv`、`uv pip install ... --torch-backend=auto`）；SGLang 也推荐 uv 并在 CI/Docker 中使用，但保留平台 fallback。lake 采用其开发环境管理经验，不改变既定语言技术选型。
 
 ### 模块与目录划分
@@ -245,13 +245,13 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [x] **C0**：D1 `SchedulerOutput` 定稿 + `python/engine`·`runtime/node_scheduler` 骨架 + P3 Generate 挂新路径（mock）
 - [x] **C1**：continuous batching + overlap 主循环 + FutureMap host 占位
 - [x] **C2**：`pool_iface` FFI 草签（D2/D5）
-- [x] **C3**：TinyLM + attn/sample 最小路径（零强制 torch；P3 默认仍 `model_backend=mock`）
+- [x] **C3**：TinyLM + attn/sample 最小路径（现仅保留为旧单测/采样验证；主计算层已转向 Torch/Qwen3）
 - [x] **C4**：共置 TinyMTP（post/pre_forward）+ TARGET_VERIFY + chain reject
 - [x] **C5**：vLLM 调度几何（`num_computed` + 本步 token）+ 三模式选路骨架（`PrefixHint`/`mode_select`）；整段本地命中→`computed=prompt_len`（无 PREBUILT 分相）；Go Router 权威联调后续
 - [x] **C6–C10** 填充 scheduler/worker/runner（vLLM 为主）：详见 [`architecture/compute-layer.md`](architecture/compute-layer.md)「C6–C10 填充计划」
   - [x] **C6**：Worker 长期单环（一份 scheduler；Generate 入队；step 前 drain）
   - [x] **C7**：token_budget + chunked extend
-  - [x] **C8**：InputBatch + AttentionMetadata（D4）+ TinyLM 批路径
+  - [x] **C8**：InputBatch + AttentionMetadata（D4）+ runner token 批路径
   - [x] **C9**：D10 overlap×agent + D6 dummy_run
   - [x] **C10**：Warm/容量信号骨架（生命周期 + CapacitySignal；Router/真 pin 联调后置）
 - [x] **C11–C15** 计算模块本轮开发（`cal-0727`，vLLM 对比后补齐生产形状接口）：详见 [`architecture/compute-layer.md`](architecture/compute-layer.md)「C11–C15 本轮开发计划」

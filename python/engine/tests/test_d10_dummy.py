@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelLoadInfo, ModelRunner
+from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan
 from runtime.req import Req
@@ -96,26 +97,30 @@ def test_execute_model_does_not_done_failed_step() -> None:
     assert ag._ready_step == 7  # noqa: SLF001
 
 
-def test_load_model_pins_weights_and_warmup_skips_pool() -> None:
+def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     pins: list[ModelLoadInfo] = []
     runner = ModelRunner(
         pool,
-        model_backend="tiny_lm",
+        model_backend="qwen3",
         weight_pin_callback=pins.append,
     )
-    info = runner.load_model(model_id="tiny", revision="r1")
-    assert info.model_id == "tiny"
+    info = runner.load_model(revision="r1")
+    assert info.model_id == QWEN3_0_6B_MODEL_ID
     assert info.revision == "r1"
+    assert info.backend == "qwen3"
+    assert info.load_dummy_weights is True
     assert info.weight_pinned is True
     assert pins == [info]
     assert runner.model_loaded is True
     assert runner.model_warmed is False
+    assert runner.qwen3_config.num_hidden_layers == 28
+    assert runner.qwen3_config.num_key_value_heads == 8
 
     out = runner.warmup(num_reqs=2, tokens_per_req=1)
     assert out.step_id == -1
     assert runner.model_warmed is True
     assert ag.done_calls == 0
     assert ag.prepare_calls == 0
-    assert runner.status().model_id == "tiny"
+    assert runner.status().model_id == QWEN3_0_6B_MODEL_ID

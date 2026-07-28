@@ -44,8 +44,8 @@ class FakePool:
 
 def _make_sched(overlap: bool = True, max_running: int = 8) -> Tuple[NodeScheduler, FakePool]:
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
-    role = RoleConfig(enable_overlap=overlap, max_running_reqs=max_running)
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    role = RoleConfig(model_backend="mock", enable_overlap=overlap, max_running_reqs=max_running)
     return NodeScheduler(pool, runner, role), pool  # type: ignore[arg-type]
 
 

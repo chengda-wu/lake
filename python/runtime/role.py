@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
+from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
+
 
 class WorkerRole(str, Enum):
     PREFILL = "prefill"
@@ -43,10 +45,10 @@ class RoleConfig:
     # D5：prepare 补拉预算；0=同步等到齐（P3 mock）
     pull_budget_ms: int = 0
     allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
-    # C3：mock=P3 可复现递推；tiny_lm=纯 Python 最小因果 LM
-    model_backend: str = "mock"  # mock | tiny_lm
+    # qwen3=Qwen3 load/forward 骨架；mock 仅测试用；tiny_lm 为旧小模型单测
+    model_backend: str = "qwen3"  # qwen3 | mock | tiny_lm
     # C12：模型加载 / warmup 骨架
-    model_id: str = "mock-llm"
+    model_id: str = QWEN3_0_6B_MODEL_ID
     model_revision: str = ""
     warmup_num_reqs: int = 1
     warmup_tokens_per_req: int = 1
@@ -71,7 +73,7 @@ class RoleConfig:
         """C6/D3 + C7：从环境变量读启动配置。
 
         LAKE_WORKER_ROLE=prefill|decode|hybrid
-        LAKE_MODEL_BACKEND=mock|tiny_lm
+        LAKE_MODEL_BACKEND=qwen3|mock|tiny_lm
         LAKE_ENABLE_DRAFTER / LAKE_ENABLE_OVERLAP / LAKE_ALLOW_PARTIAL_HIT
         LAKE_NUM_DRAFT_TOKENS / LAKE_MAX_RUNNING_REQS / LAKE_PULL_BUDGET_MS
         LAKE_MAX_NUM_SCHEDULED_TOKENS / LAKE_LONG_PREFILL_TOKEN_THRESHOLD
@@ -84,11 +86,13 @@ class RoleConfig:
             role = WorkerRole(role_raw)
         except ValueError:
             role = WorkerRole.HYBRID
-        backend = os.environ.get("LAKE_MODEL_BACKEND", "mock").strip().lower() or "mock"
+        backend = os.environ.get("LAKE_MODEL_BACKEND", "qwen3").strip().lower()
+        backend = backend or "qwen3"
         return cls(
             role=role,
             model_backend=backend,
-            model_id=os.environ.get("LAKE_MODEL_ID", "mock-llm").strip() or "mock-llm",
+            model_id=os.environ.get("LAKE_MODEL_ID", QWEN3_0_6B_MODEL_ID).strip()
+            or QWEN3_0_6B_MODEL_ID,
             model_revision=os.environ.get("LAKE_MODEL_REVISION", "").strip(),
             enable_drafter=_env_bool("LAKE_ENABLE_DRAFTER", False),
             enable_overlap=_env_bool("LAKE_ENABLE_OVERLAP", True),

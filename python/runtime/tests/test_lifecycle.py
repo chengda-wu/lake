@@ -6,6 +6,7 @@ import threading
 import time
 
 from engine.model_runner import ModelRunner
+from engine.models.qwen3 import QWEN3_0_6B_MODEL_ID
 from runtime.lifecycle import WorkerLifecycle, WorkerState
 from runtime.node_scheduler import build_req_from_generate
 from runtime.role import RoleConfig
@@ -42,7 +43,7 @@ def test_lifecycle_forward_and_drain() -> None:
 def test_engine_capacity_signal() -> None:
     pool = FakePool()
     runner = ModelRunner(pool)  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    eng = WorkerEngine(pool, runner, RoleConfig(), coalesce_s=0)  # type: ignore[arg-type]
     eng.start()
     try:
         sig = eng.capacity_signal()
@@ -51,7 +52,7 @@ def test_engine_capacity_signal() -> None:
         assert sig.remaining_slots == 8
         assert sig.inflight_reqs == 0
         assert sig.role == "hybrid"
-        assert sig.model_id == "mock-llm"
+        assert sig.model_id == QWEN3_0_6B_MODEL_ID
         assert sig.model_loaded is True
         assert sig.model_warmed is True
     finally:
