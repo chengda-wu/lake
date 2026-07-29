@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lake_proto::lake::*;
 
-use crate::authority::{resolve_pool_kind, Authority, NamespaceKey};
+use crate::authority::{resolve_pool_kind, Authority, NamespaceKey, RegisterStatus};
 use crate::tier::{TierL0, TierL1};
 
 /// Default orphan TTL = Mooncake `put_start_discard_timeout` (30s).
@@ -135,11 +135,18 @@ impl Authority {
         let Some(pool) = ns.pools.get_mut(&pk) else {
             return Ok(false);
         };
-        let Some(entry) = pool.by_flat.remove(&id.block_hash) else {
+        let Some(entry) = pool.by_flat.get(&id.block_hash) else {
             self.orphans.remove(&BlockKey::from_id(id));
             return Ok(false);
         };
         let seq = entry.seq_hash;
+        if pool.global_refs.get(&seq).copied().unwrap_or(0) > 0 {
+            return Err("DiscardBlocks: block has global_refs > 0".into());
+        }
+        let entry = pool
+            .by_flat
+            .remove(&id.block_hash)
+            .expect("checked by_flat entry");
         let bid = entry.block_id;
         pool.handles.remove(&seq);
         pool.global_refs.remove(&seq);
@@ -531,7 +538,13 @@ impl Authority {
                 mid.pool_kind = pk;
             }
             match self.register(&node, &chain, vec![m]) {
-                Ok(_) => {}
+                Ok(RegisterStatus::Accepted) => {}
+                Ok(RegisterStatus::RejectedHardQuota(bp)) => {
+                    return Err(format!(
+                        "import_snapshot register rejected: reason={} deficit={}",
+                        bp.reason, bp.deficit_bytes
+                    ));
+                }
                 Err(e) => return Err(format!("import_snapshot register: {e}")),
             }
         }

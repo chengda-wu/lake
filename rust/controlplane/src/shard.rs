@@ -15,6 +15,15 @@ use crate::authority::{Authority, NamespaceKey};
 /// Default virtual nodes per physical KV Node.
 pub const DEFAULT_VNODE_COUNT: u32 = 64;
 
+fn block_identity_key(id: &KvBlockId) -> (String, String, i32, Vec<u8>) {
+    (
+        id.model_id.clone(),
+        id.revision.clone(),
+        id.pool_kind,
+        id.block_hash.clone(),
+    )
+}
+
 #[derive(Clone, Debug)]
 struct NodeState {
     vnode_count: u32,
@@ -241,14 +250,14 @@ impl Authority {
 
         let mut migrations = Vec::new();
         let mut push_l2: Vec<KvBlockId> = Vec::new();
-        let mut push_seen: HashSet<Vec<u8>> = HashSet::new();
+        let mut push_seen: HashSet<(String, String, i32, Vec<u8>)> = HashSet::new();
 
         for (flat, id) in &keys {
             let old = before.get(flat).cloned().flatten();
             let new = self.shard.owner_of(flat);
             if old.as_deref() == Some(node_id) {
                 // Owned by draining node → must leave; push L2 first (Drain 语义).
-                if !push_seen.insert(flat.clone()) {
+                if !push_seen.insert(block_identity_key(id)) {
                     continue;
                 }
                 push_l2.push(id.clone());
@@ -268,7 +277,7 @@ impl Authority {
         // Also mark blocks that physically sit on this node's L2 even if hash
         // ownership already differed (placement vs ownership).
         for id in self.blocks_with_l2_on(node_id) {
-            if push_seen.insert(id.block_hash.clone()) {
+            if push_seen.insert(block_identity_key(&id)) {
                 push_l2.push(id);
             }
         }

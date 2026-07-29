@@ -177,8 +177,8 @@ impl ControlPlaneService for ControlPlane {
             Ok(RegisterStatus::RejectedHardQuota(bp)) => Ok(Response::new(Ack {
                 ok: false,
                 err: format!(
-                    "AdmitRegisterBlocks: hard quota exceeded (deficit={})",
-                    bp.deficit_bytes
+                    "AdmitRegisterBlocks: admission rejected reason={} deficit={}",
+                    bp.reason, bp.deficit_bytes
                 ),
                 backpressure: Some(bp),
             })),
@@ -205,8 +205,8 @@ impl ControlPlaneService for ControlPlane {
             Ok(RegisterStatus::RejectedHardQuota(bp)) => Ok(Response::new(Ack {
                 ok: false,
                 err: format!(
-                    "RegisterBlocks: hard quota exceeded (deficit={})",
-                    bp.deficit_bytes
+                    "RegisterBlocks: admission rejected reason={} deficit={}",
+                    bp.reason, bp.deficit_bytes
                 ),
                 backpressure: Some(bp),
             })),
@@ -1364,6 +1364,37 @@ mod tests {
         assert_eq!(a_hit, 0, "reclaimed a1");
     }
 
+    /// Under hard quota but out of shared pool capacity must not masquerade as HARD_QUOTA.
+    #[test]
+    fn p46_pool_capacity_reject_is_not_hard_quota() {
+        let mut auth = Authority::default();
+        auth.set_pool_capacity_bytes(200);
+        ensure_model_quota(&mut auth, "m", 100, 300, true, 100);
+
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a0"]), vec![meta("m", b"a0")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        assert_eq!(
+            auth.register("n0", &prefix(&[b"a1"]), vec![meta("m", b"a1")])
+                .unwrap(),
+            RegisterStatus::Accepted
+        );
+        match auth
+            .register("n0", &prefix(&[b"a2"]), vec![meta("m", b"a2")])
+            .unwrap()
+        {
+            RegisterStatus::RejectedHardQuota(bp) => {
+                assert_eq!(bp.reason, "POOL_CAPACITY");
+                assert_eq!(bp.hard_bytes, 300);
+                assert!(bp.deficit_bytes > 0);
+            }
+            other => panic!("expected capacity reject, got {other:?}"),
+        }
+        assert_eq!(auth.block_count("m", ""), 2);
+    }
+
     /// SetModelQuota / GetModelQuota + hard backpressure on RegisterBlocks.
     #[test]
     fn p46_set_get_quota_and_backpressure_signal() {
@@ -1633,6 +1664,29 @@ mod tests {
         assert_eq!(hit2, 2, "restore must keep seq_hash lineage for h0→h1");
     }
 
+    /// Restore must fail loudly if the snapshot's model quota rejects a block.
+    #[test]
+    fn p47_checkpoint_restore_rejects_quota_loss() {
+        let mut auth = Authority::default();
+        ensure_model_quota(&mut auth, "m", 0, 0, false, 100);
+        auth.register("n0", &prefix(&[b"q"]), vec![meta("m", b"q")])
+            .unwrap();
+        let mut snap = auth.export_snapshot(3);
+        snap.models[0].quota = Some(Quota {
+            soft_bytes: 50,
+            hard_bytes: 50,
+            borrow_enabled: false,
+        });
+
+        let mut restored = Authority::default();
+        let err = restored.import_snapshot(&snap).unwrap_err();
+        assert!(
+            err.contains("import_snapshot register rejected"),
+            "restore must not report success after dropping a block: {err}"
+        );
+        assert_eq!(restored.block_count("m", ""), 0);
+    }
+
     /// Durable cold peel re-inserts into inactive for later reclaim accounting.
     #[test]
     fn p47_cold_gc_reinserts_durable_inactive() {
@@ -1700,6 +1754,29 @@ mod tests {
         assert_eq!(hit, 1);
     }
 
+    /// Explicit discard must not remove globally referenced blocks.
+    #[test]
+    fn p47_discard_rejects_refed_block() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"live"]);
+        auth.register("n0", &full, vec![meta("m", b"live")])
+            .unwrap();
+        auth.report_ref(&delta("m", b"live", 1)).unwrap();
+
+        let id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"live".to_vec(),
+            pool_kind: PoolKind::Target as i32,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+        let err = auth.discard_blocks(&[id]).unwrap_err();
+        assert!(err.contains("global_refs"));
+        let (_, hit, _) = auth.lookup_prefix("m", "", PoolKind::Target as i32, &full, "n0");
+        assert_eq!(hit, 1, "refed block must remain visible");
+    }
+
     // --- P4.8: defrag plan + placement ---
 
     fn meta_l2_at(model: &str, hash: &[u8], seg: u64, off: u64) -> BlockMeta {
@@ -1748,6 +1825,32 @@ mod tests {
         assert_eq!(moves.len(), 1);
         assert!(moves[0].compact_segment);
         assert_eq!(moves[0].segment_id, 1);
+    }
+
+    /// Compacting a mixed segment would move ref>0 slots; skip the whole segment.
+    #[test]
+    fn p48_plan_compact_skips_segment_with_refed_block() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let slot = 100u64;
+        auth.register(
+            "n0",
+            &prefix(&[b"a", b"b", b"c"]),
+            vec![
+                meta_l2_at("m", b"a", 1, 0),
+                meta_l2_at("m", b"b", 1, 200),
+                meta_l2_at("m", b"c", 1, 300),
+            ],
+        )
+        .unwrap();
+        auth.report_ref(&delta("m", b"b", 1)).unwrap();
+        let moves = auth
+            .plan_defrag("m", "", PoolKind::Target as i32, DefragMode::Compact, slot)
+            .unwrap();
+        assert!(
+            moves.is_empty(),
+            "segment containing ref>0 block must not be compacted: {moves:?}"
+        );
     }
 
     /// Co-locate plan packs a scattered prefix chain onto one segment (same node).
@@ -1940,6 +2043,40 @@ mod tests {
             .nodes
             .iter()
             .any(|n| n.node_id == "n1" && n.draining));
+    }
+
+    /// Drain must keep TARGET and DRAFT blocks separate even if their flat hash matches.
+    #[test]
+    fn p49_drain_keeps_pool_kind_identities() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.join_shard_node("n0", 16).unwrap();
+        auth.join_shard_node("n1", 16).unwrap();
+
+        let mut target = meta("m", b"same");
+        target.locations[0].node_id = "n1".into();
+        auth.register("n1", &prefix(&[b"same"]), vec![target])
+            .unwrap();
+
+        let mut draft = meta("m", b"same");
+        draft.id.as_mut().unwrap().pool_kind = PoolKind::Draft as i32;
+        draft.locations[0].node_id = "n1".into();
+        auth.register("n1", &prefix(&[b"same"]), vec![draft])
+            .unwrap();
+
+        let (_map, _migs, push) = auth.drain_shard_node("n1").unwrap();
+        let same: Vec<_> = push
+            .iter()
+            .filter(|id| id.model_id == "m" && id.block_hash == b"same".to_vec())
+            .map(|id| id.pool_kind)
+            .collect();
+        assert_eq!(
+            same.len(),
+            2,
+            "TARGET and DRAFT with same hash must both be pushed: {push:?}"
+        );
+        assert!(same.contains(&(PoolKind::Target as i32)));
+        assert!(same.contains(&(PoolKind::Draft as i32)));
     }
 
     /// relocate_in_view updates segment/offset; PauseBackground flips flag.

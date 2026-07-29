@@ -210,7 +210,7 @@ message Quota {
   int64 hard_bytes     = 2;
   bool  borrow_enabled = 3;
 }
-// 写入背压信号:触硬配额时填入 Ack.backpressure / GetModelQuotaResponse。
+// 写入背压信号:触硬配额或池容量不足时填入 Ack.backpressure / GetModelQuotaResponse。
 //   lake 只上报;请求级 shedding 归 gateway(见 features/slo.md「过载控制」)。
 message BackpressureSignal {
   string model_id      = 1;
@@ -218,8 +218,8 @@ message BackpressureSignal {
   int64  used_bytes    = 3;
   int64  soft_bytes    = 4;
   int64  hard_bytes    = 5;
-  int64  deficit_bytes = 6;  // projected - hard(触硬时 >0)
-  string reason        = 7;  // 初版固定 "HARD_QUOTA"
+  int64  deficit_bytes = 6;  // HARD_QUOTA: projected-hard;POOL_CAPACITY: 缺口字节
+  string reason        = 7;  // "HARD_QUOTA" | "POOL_CAPACITY"
 }
 message ModelDescriptor {
   string    model_id   = 1;

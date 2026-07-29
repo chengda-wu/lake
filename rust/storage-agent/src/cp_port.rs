@@ -110,8 +110,8 @@ impl ControlPlanePort for AuthorityPort<'_> {
         )? {
             RegisterStatus::Accepted => Ok(()),
             RegisterStatus::RejectedHardQuota(bp) => Err(format!(
-                "AdmitRegister: hard quota exceeded (deficit={})",
-                bp.deficit_bytes
+                "AdmitRegister: admission rejected reason={} deficit={}",
+                bp.reason, bp.deficit_bytes
             )),
         }
     }
@@ -124,8 +124,8 @@ impl ControlPlanePort for AuthorityPort<'_> {
         {
             RegisterStatus::Accepted => Ok(()),
             RegisterStatus::RejectedHardQuota(bp) => Err(format!(
-                "RegisterBlocks: hard quota exceeded (deficit={})",
-                bp.deficit_bytes
+                "RegisterBlocks: admission rejected reason={} deficit={}",
+                bp.reason, bp.deficit_bytes
             )),
         }
     }

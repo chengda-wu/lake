@@ -5,7 +5,7 @@
 //! 关键差异:CP 出计划 + 更新 Location 权威；字节/段布局在 tiered-store SegmentArena。
 //! P4.8:co-locate **仅同 node**（跨节点需 transfer + source/target，defer P5）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lake_proto::lake::*;
 
@@ -112,12 +112,15 @@ impl Authority {
 fn plan_compact(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove> {
     // (node, segment) → sorted offsets
     let mut groups: HashMap<(String, u64), Vec<u64>> = HashMap::new();
+    let mut frozen_segments: HashSet<(String, u64)> = HashSet::new();
     for entry in pool.by_flat.values() {
-        if pool.global_refs.get(&entry.seq_hash).copied().unwrap_or(0) > 0 {
-            continue;
-        }
+        let frozen = pool.global_refs.get(&entry.seq_hash).copied().unwrap_or(0) > 0;
         for loc in &entry.meta.locations {
             if loc.tier != Tier::L2 as i32 {
+                continue;
+            }
+            if frozen {
+                frozen_segments.insert((loc.node_id.clone(), loc.segment_id));
                 continue;
             }
             groups
@@ -130,6 +133,9 @@ fn plan_compact(pool: &crate::authority::PoolView, slot: u64) -> Vec<DefragMove>
     let mut keys: Vec<_> = groups.keys().cloned().collect();
     keys.sort();
     for (node_id, segment_id) in keys {
+        if frozen_segments.contains(&(node_id.clone(), segment_id)) {
+            continue;
+        }
         let mut offs = groups.remove(&(node_id.clone(), segment_id)).unwrap();
         offs.sort_unstable();
         offs.dedup();

@@ -27,6 +27,14 @@ pub enum AdmitWrite {
         hard_bytes: i64,
         deficit_bytes: i64,
     },
+    /// Under per-namespace hard quota, but the shared pool has no free or
+    /// reclaimable borrowed capacity for this over-soft write.
+    PoolCapacity {
+        used_bytes: i64,
+        soft_bytes: i64,
+        hard_bytes: i64,
+        deficit_bytes: i64,
+    },
 }
 
 impl AdmitWrite {
@@ -45,6 +53,20 @@ impl AdmitWrite {
                 hard_bytes: *hard_bytes,
                 deficit_bytes: *deficit_bytes,
                 reason: "HARD_QUOTA".into(),
+            }),
+            AdmitWrite::PoolCapacity {
+                used_bytes,
+                soft_bytes,
+                hard_bytes,
+                deficit_bytes,
+            } => Some(BackpressureSignal {
+                model_id: model_id.into(),
+                revision: revision.into(),
+                used_bytes: *used_bytes,
+                soft_bytes: *soft_bytes,
+                hard_bytes: *hard_bytes,
+                deficit_bytes: *deficit_bytes,
+                reason: "POOL_CAPACITY".into(),
             }),
             _ => None,
         }

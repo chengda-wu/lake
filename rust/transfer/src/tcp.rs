@@ -195,9 +195,10 @@ impl Transport for TcpTransport {
             }
         }
 
-        // 2) 再校验全部源/目标范围(全有或全无,对齐 P4.2 ReportRef 风格)。
+        // 2) 再校验全部源/目标范围并完成 CPU 拷贝。整个 segment 校验+拷贝
+        // 放在同一把锁下,避免并发 free_segment 在校验后删除段导致 panic。
         {
-            let segs = self.segments.lock().unwrap();
+            let mut segs = self.segments.lock().unwrap();
             for op in ops {
                 let src = segs
                     .get(&op.source.segment_id)
@@ -238,31 +239,31 @@ impl Transport for TcpTransport {
                     });
                 }
             }
-        }
 
-        // 3) CPU 拷贝(TCP 语义)。同段重叠区用临时缓冲。
-        let payloads: Vec<Vec<u8>> = {
-            let segs = self.segments.lock().unwrap();
-            ops.iter()
+            // TCP 语义是 CPU 拷贝;先 snapshot source payload,同段重叠也安全。
+            let payloads: Result<Vec<Vec<u8>>> = ops
+                .iter()
                 .map(|op| {
-                    let src = segs.get(&op.source.segment_id).unwrap();
+                    let src = segs
+                        .get(&op.source.segment_id)
+                        .ok_or(TransferError::UnknownSegment(op.source.segment_id))?;
                     let start = op.source.offset as usize;
                     let end = start + op.length as usize;
-                    src.buf[start..end].to_vec()
+                    Ok(src.buf[start..end].to_vec())
                 })
-                .collect()
-        };
-        {
-            let mut segs = self.segments.lock().unwrap();
+                .collect();
+            let payloads = payloads?;
             for (op, data) in ops.iter().zip(payloads.iter()) {
-                let dst = segs.get_mut(&op.target_segment_id).unwrap();
+                let dst = segs
+                    .get_mut(&op.target_segment_id)
+                    .ok_or(TransferError::UnknownSegment(op.target_segment_id))?;
                 let start = op.target_offset as usize;
                 let end = start + data.len();
                 dst.buf[start..end].copy_from_slice(data);
             }
         }
 
-        // 4) 更新批状态(batch 已在步骤 1 校验存在且容量足够)。
+        // 3) 更新批状态(batch 已在步骤 1 校验存在且容量足够)。
         let mut batches = self.batches.lock().unwrap();
         let batch = batches
             .get_mut(&batch_id)

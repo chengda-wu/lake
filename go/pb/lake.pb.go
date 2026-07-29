@@ -758,7 +758,7 @@ func (x *Quota) GetBorrowEnabled() bool {
 	return false
 }
 
-// 写入背压信号:触硬配额时填入 Ack.backpressure / GetModelQuotaResponse。
+// 写入背压信号:触硬配额或池容量不足时填入 Ack.backpressure / GetModelQuotaResponse。
 //
 //	lake 只上报;请求级 shedding 归 gateway(见 features/slo.md「过载控制」)。
 type BackpressureSignal struct {
@@ -768,8 +768,8 @@ type BackpressureSignal struct {
 	UsedBytes     int64                  `protobuf:"varint,3,opt,name=used_bytes,json=usedBytes,proto3" json:"used_bytes,omitempty"`
 	SoftBytes     int64                  `protobuf:"varint,4,opt,name=soft_bytes,json=softBytes,proto3" json:"soft_bytes,omitempty"`
 	HardBytes     int64                  `protobuf:"varint,5,opt,name=hard_bytes,json=hardBytes,proto3" json:"hard_bytes,omitempty"`
-	DeficitBytes  int64                  `protobuf:"varint,6,opt,name=deficit_bytes,json=deficitBytes,proto3" json:"deficit_bytes,omitempty"` // projected - hard(触硬时 >0)
-	Reason        string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`                                  // 初版固定 "HARD_QUOTA"
+	DeficitBytes  int64                  `protobuf:"varint,6,opt,name=deficit_bytes,json=deficitBytes,proto3" json:"deficit_bytes,omitempty"` // HARD_QUOTA: projected-hard;POOL_CAPACITY: 缺口字节
+	Reason        string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`                                  // "HARD_QUOTA" | "POOL_CAPACITY"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

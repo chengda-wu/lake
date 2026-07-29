@@ -778,17 +778,16 @@ impl Authority {
                     let avail = self.reclaimable_borrowed_bytes(&key);
                     if avail < want
                         && self.pool_capacity_bytes > 0
-                        && q.hard_bytes > 0
-                        && projected <= q.hard_bytes
+                        && (q.hard_bytes == 0 || projected <= q.hard_bytes)
                     {
-                        let bp = AdmitWrite::HardQuota {
-                            used_bytes: sim_used,
+                        let bp = AdmitWrite::PoolCapacity {
+                            used_bytes: projected,
                             soft_bytes: q.soft_bytes,
                             hard_bytes: q.hard_bytes,
                             deficit_bytes: want - avail,
                         }
                         .backpressure(model_id, revision)
-                        .expect("HardQuota");
+                        .expect("PoolCapacity");
                         return Ok(AdmitPlan::Reject(bp));
                     }
                     reclaim_bytes = want.min(avail);
@@ -800,6 +799,9 @@ impl Authority {
             r @ AdmitWrite::HardQuota { .. } => {
                 let bp = r.backpressure(model_id, revision).expect("HardQuota");
                 Ok(AdmitPlan::Reject(bp))
+            }
+            AdmitWrite::PoolCapacity { .. } => {
+                unreachable!("classify_write does not produce PoolCapacity")
             }
             AdmitWrite::WithinSoft | AdmitWrite::OverSoft => Ok(AdmitPlan::Accept {
                 own_evict_n,
