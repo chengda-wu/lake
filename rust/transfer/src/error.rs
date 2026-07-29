@@ -19,6 +19,8 @@ pub enum TransferError {
         capacity: usize,
     },
     BatchFull,
+    BatchInFlight(u64),
+    BatchSubmitted(u64),
     EmptyBatch,
     Other(String),
 }
@@ -45,6 +47,8 @@ impl fmt::Display for TransferError {
                 "segment {segment_id} OOB offset={offset} length={length} capacity={capacity}"
             ),
             Self::BatchFull => write!(f, "batch task slots exhausted"),
+            Self::BatchInFlight(id) => write!(f, "batch_id={id} is in flight"),
+            Self::BatchSubmitted(id) => write!(f, "batch_id={id} already submitted"),
             Self::EmptyBatch => write!(f, "empty transfer batch"),
             Self::Other(s) => write!(f, "{s}"),
         }
@@ -62,6 +66,8 @@ impl From<TransferError> for tonic::Status {
             | TransferError::UnknownSegment(_) => tonic::Status::not_found(e.to_string()),
             TransferError::OutOfRange { .. }
             | TransferError::BatchFull
+            | TransferError::BatchInFlight(_)
+            | TransferError::BatchSubmitted(_)
             | TransferError::EmptyBatch => tonic::Status::failed_precondition(e.to_string()),
             TransferError::Other(_) => tonic::Status::internal(e.to_string()),
         }

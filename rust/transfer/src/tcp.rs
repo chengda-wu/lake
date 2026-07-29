@@ -32,6 +32,7 @@ struct Task {
 struct Batch {
     tasks: Vec<Task>,
     submitted: bool,
+    in_flight: bool,
 }
 
 /// TCP 退化传输引擎(进程内段 arena + 批状态)。
@@ -163,6 +164,7 @@ impl Transport for TcpTransport {
             Batch {
                 tasks,
                 submitted: false,
+                in_flight: false,
             },
         );
         Ok(id)
@@ -170,10 +172,14 @@ impl Transport for TcpTransport {
 
     fn free_batch_id(&self, batch_id: BatchId) -> Result<()> {
         let mut batches = self.batches.lock().unwrap();
-        batches
-            .remove(&batch_id)
-            .map(|_| ())
-            .ok_or(TransferError::UnknownBatch(batch_id))
+        let Some(batch) = batches.get(&batch_id) else {
+            return Err(TransferError::UnknownBatch(batch_id));
+        };
+        if batch.in_flight {
+            return Err(TransferError::BatchInFlight(batch_id));
+        }
+        batches.remove(&batch_id);
+        Ok(())
     }
 
     fn submit_transfer(&self, batch_id: BatchId, ops: &[TransferOp]) -> Result<()> {
@@ -184,20 +190,27 @@ impl Transport for TcpTransport {
             validate_location_tier(&op.source)?;
         }
 
-        // 1) 先校验 batch(未知 / 超容)——**禁止**在校验失败前改写目标段。
+        // 1) 先 claim batch(未知 / 超容 / in-flight)——**禁止**在校验失败前改写目标段。
         {
-            let batches = self.batches.lock().unwrap();
+            let mut batches = self.batches.lock().unwrap();
             let batch = batches
-                .get(&batch_id)
+                .get_mut(&batch_id)
                 .ok_or(TransferError::UnknownBatch(batch_id))?;
             if ops.len() > batch.tasks.len() {
                 return Err(TransferError::BatchFull);
             }
+            if batch.submitted {
+                return Err(TransferError::BatchSubmitted(batch_id));
+            }
+            if batch.in_flight {
+                return Err(TransferError::BatchInFlight(batch_id));
+            }
+            batch.in_flight = true;
         }
 
         // 2) 再校验全部源/目标范围并完成 CPU 拷贝。整个 segment 校验+拷贝
         // 放在同一把锁下,避免并发 free_segment 在校验后删除段导致 panic。
-        {
+        let copy_result: Result<()> = (|| {
             let mut segs = self.segments.lock().unwrap();
             for op in ops {
                 let src = segs
@@ -261,6 +274,13 @@ impl Transport for TcpTransport {
                 let end = start + data.len();
                 dst.buf[start..end].copy_from_slice(data);
             }
+            Ok(())
+        })();
+        if let Err(e) = copy_result {
+            if let Some(batch) = self.batches.lock().unwrap().get_mut(&batch_id) {
+                batch.in_flight = false;
+            }
+            return Err(e);
         }
 
         // 3) 更新批状态(batch 已在步骤 1 校验存在且容量足够)。
@@ -276,6 +296,7 @@ impl Transport for TcpTransport {
         }
         // 未使用的预分配槽保持 Pending
         batch.submitted = true;
+        batch.in_flight = false;
         Ok(())
     }
 
@@ -402,5 +423,90 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, TransferError::BatchFull));
         assert_eq!(t.read_segment(dst, 0, 16).unwrap(), before);
+    }
+
+    #[test]
+    fn failed_submit_after_claim_releases_batch() {
+        let t = TcpTransport::new();
+        let src = t.open_segment("src", 8).unwrap();
+        let dst = t.open_segment("dst", 8).unwrap();
+        t.write_segment(src, 0, b"PAYLOAD!").unwrap();
+        t.write_segment(dst, 0, b"........").unwrap();
+        let before = t.read_segment(dst, 0, 8).unwrap();
+
+        let batch = t.allocate_batch_id(1).unwrap();
+        let err = t
+            .submit_transfer(
+                batch,
+                &[TransferOp {
+                    source: loc(src, 0, Tier::L2),
+                    target_segment_id: dst,
+                    target_offset: 4,
+                    length: 8,
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransferError::OutOfRange { .. }));
+        assert_eq!(t.read_segment(dst, 0, 8).unwrap(), before);
+        // Failure after claim must clear in_flight so caller can free the batch.
+        t.free_batch_id(batch).unwrap();
+    }
+
+    #[test]
+    fn free_batch_rejects_in_flight_batch() {
+        let t = TcpTransport::new();
+        let batch = t.allocate_batch_id(1).unwrap();
+        {
+            let mut batches = t.batches.lock().unwrap();
+            batches.get_mut(&batch).unwrap().in_flight = true;
+        }
+        let err = t.free_batch_id(batch).unwrap_err();
+        assert!(matches!(err, TransferError::BatchInFlight(id) if id == batch));
+        assert_eq!(t.batch_count(), 1);
+        {
+            let mut batches = t.batches.lock().unwrap();
+            batches.get_mut(&batch).unwrap().in_flight = false;
+        }
+        t.free_batch_id(batch).unwrap();
+    }
+
+    #[test]
+    fn submitted_batch_cannot_be_submitted_again() {
+        let t = TcpTransport::new();
+        let src = t.open_segment("src", 8).unwrap();
+        let dst = t.open_segment("dst", 8).unwrap();
+        t.write_segment(src, 0, b"AAAA").unwrap();
+        t.write_segment(dst, 0, b"........").unwrap();
+
+        let batch = t.allocate_batch_id(1).unwrap();
+        t.submit_transfer(
+            batch,
+            &[TransferOp {
+                source: loc(src, 0, Tier::L2),
+                target_segment_id: dst,
+                target_offset: 0,
+                length: 4,
+            }],
+        )
+        .unwrap();
+        assert_eq!(&t.read_segment(dst, 0, 8).unwrap(), b"AAAA....");
+
+        t.write_segment(src, 0, b"BBBB").unwrap();
+        let err = t
+            .submit_transfer(
+                batch,
+                &[TransferOp {
+                    source: loc(src, 0, Tier::L2),
+                    target_segment_id: dst,
+                    target_offset: 0,
+                    length: 4,
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransferError::BatchSubmitted(id) if id == batch));
+        assert_eq!(&t.read_segment(dst, 0, 8).unwrap(), b"AAAA....");
+        let st = t.get_transfer_status(batch, 0).unwrap();
+        assert_eq!(st.state, TaskState::Done);
+        assert_eq!(st.bytes_done, 4);
     }
 }
