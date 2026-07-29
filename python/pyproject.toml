@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 # lake_pb2_grpc.py 校验 grpcio ≥ 1.82.1。低于此 import 即炸,故钉到生成版本。
 dependencies = [
     "grpcio>=1.82.1",
+    "numpy",
     "protobuf>=7.35.0",
     "torch",
 ]
