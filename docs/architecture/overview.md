@@ -11,25 +11,29 @@ flowchart TB
 
     subgraph computePool["计算节点池"]
         worker["Python Worker\nscheduler + ModelRunner"]
-        agent["Rust storage-agent\nFFI + L0 slot + transfer endpoint"]
+        agent["Rust storage-agent\nFFI + transfer endpoint"]
+        localOverlay["agent local overlay\nL0/L1/L2 state + local ref"]
         l0["L0 HBM"]
         l1Local["L1 DRAM\n本机载体"]
         l2Local["L2 NVMe\n本机载体"]
         worker <--> agent
-        agent --- l0
-        agent --- l1Local
-        agent --- l2Local
+        agent <--> localOverlay
+        localOverlay --- l0
+        localOverlay --- l1Local
+        localOverlay --- l2Local
     end
 
     subgraph storagePool["存储池"]
-        storageCp["Rust Storage Control Plane\nAuthority"]
-        kvAgent["KV Node agent\nDRAM donor + NVMe serve"]
+        storageCp["Rust Storage Control Plane\nAuthority global view"]
+        kvAgent["KV Node agent\nlocal tier serve"]
+        kvOverlay["agent local overlay\nL1 MR + L2 NVMe"]
         l1Remote["L1 DRAM\n池化载体"]
         l2Remote["L2 NVMe\n池化载体"]
         objectStore[("L3 Object Store\nSSOT")]
         storageCp -->|"放置 / GC / defrag / shard"| kvAgent
-        kvAgent --- l1Remote
-        kvAgent --- l2Remote
+        kvAgent <--> kvOverlay
+        kvOverlay --- l1Remote
+        kvOverlay --- l2Remote
         storageCp --> objectStore
     end
 
@@ -39,12 +43,13 @@ flowchart TB
 
     router -->|"Dispatch"| worker
     router <-->|"view stream / snapshot"| storageCp
-    agent <-->|"ControlPlane RPC"| storageCp
+    agent -->|"async events / batched commit"| storageCp
+    agent <-->|"Locate confirm / barrier"| storageCp
     agent <-->|"TransferService\nRDMA / TCP fallback"| kvAgent
     storageCp <-->|"checkpoint / lease"| etcd
 ```
 
-计算节点不拥有内存——HBM/RAM/NVMe 是存储池的物理载体,不是 worker 私有状态。计算服务向存储池申请"把所需 KV 放进本机 HBM",而非自行管理本地缓存。
+计算节点不拥有内存——HBM/RAM/NVMe 是存储池的物理载体,不是 worker 私有状态。热路径上由本机 agent 写 `local overlay`（slot/free-list/local ref/L1-L2 本地状态）,再把可全局可见的事件批量提交给存储控制面；`Authority` 维护的是全局提交态视图,不是每 token/step 的同步热路径。
 
 ## 架构图索引
 

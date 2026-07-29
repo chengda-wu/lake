@@ -69,7 +69,7 @@ message BlockMeta { KVBlockID id; BlockKind block_kind; repeated Location locati
 
 radix tree 归存储池,按 `(model_id, revision)` 分命名空间(每命名空间一个 `BlockRegistry` / 一棵 radix)。节点 = block hash,路径 = token 序列;给定 prompt 沿树匹配最长公共前缀,确定可复用 KV block 范围。下线级联删 = drop 整个命名空间(强句柄释放 → radix Weak 失效)。
 
-**权威与镜像**：radix tree 的**权威**在存储控制面进程内存（位置视图权威的一部分,见 [`control-plane.md`](control-plane.md)「位置视图权威的归属」）。Router 与各 agent 各持一份**只读镜像**（控制面 gRPC stream 推送的副本,见 [`control-plane.md`](control-plane.md)「Router 持位置视图镜像」）——它们只读、不写、不拥有;满块注册写权威（控制面内存,release 一致,不进 etcd）,不写任何本地索引。
+**权威、镜像与本地 overlay**：radix tree 的**全局提交态权威**在存储控制面进程内存（位置视图权威的一部分,见 [`control-plane.md`](control-plane.md)「位置视图权威的归属」）。Router 与各 agent 各持一份**只读 global view mirror**（控制面 gRPC stream 推送的副本,见 [`control-plane.md`](control-plane.md)「Router 持位置视图镜像」）。这不等于 agent 没有可写本地状态：每个 agent 还维护自己的 **local overlay**（本机 L0/L1/L2 状态、slot/free-list、local ref、writeback/in-flight 状态）,热路径先写本地 overlay,再把满块注册、位置变化、ref 汇总、barrier 等事件批量/异步提交给 CP。换言之:mirror 只读;local overlay 可写;CP 只接收全局可见的提交态事件。
 
 **两类查询走不同的树**（别混）：
 
@@ -106,7 +106,7 @@ node_id = hash(KVBlockID) % N
 ```mermaid
 flowchart TB
     subgraph cp["Rust 存储控制面"]
-        authority["Authority\nradix + locations + refs"]
+        authority["Authority\nradix + global locations + ref summary"]
         quotaGc["quota / GC / defrag / shard"]
         checkpoint["CheckpointStore\n内存 mock / etcd 后续"]
         authority --- quotaGc
@@ -116,32 +116,45 @@ flowchart TB
     subgraph computeNode["计算节点"]
         worker["Python Worker\nscheduler + ModelRunner"]
         computeAgent["storage-agent\nFFI + mirror + block table"]
+        computeOverlay["local overlay\nslot/free-list + local ref\nwriteback + in-flight"]
         l0["L0 HBM\n池放置的计算载体"]
         l1Local["L1 DRAM\n本机池化载体"]
         l2Local["L2 NVMe\n本机池化载体"]
         worker <--> computeAgent
-        computeAgent --- l0
-        computeAgent --- l1Local
-        computeAgent --- l2Local
+        computeAgent <--> computeOverlay
+        computeOverlay --- l0
+        computeOverlay --- l1Local
+        computeOverlay --- l2Local
     end
 
     subgraph kvNode["KV Node"]
         kvAgent["KV Node agent\nTransfer core + NVMe serve"]
+        kvOverlay["local overlay\nL1 MR + L2 segment arena"]
         l1Remote["L1 DRAM\nRDMA donor"]
         l2Remote["L2 NVMe\nbounce serve"]
-        kvAgent --- l1Remote
-        kvAgent --- l2Remote
+        kvAgent <--> kvOverlay
+        kvOverlay --- l1Remote
+        kvOverlay --- l2Remote
     end
 
     l3[("L3 Object Store\nSSOT")]
 
-    computeAgent <-->|"ControlPlane RPC\nRegister / Locate / ReportRef"| authority
-    kvAgent <-->|"lease / location events"| authority
+    computeAgent -->|"async events\nRegister / LocationEvent / RefSummary"| authority
+    computeAgent <-->|"Locate confirm / Barrier"| authority
+    kvAgent -->|"lease / location events"| authority
     computeAgent <-->|"TransferService\nRDMA / TCP fallback"| kvAgent
     authority -->|"l3_present / lifecycle"| l3
 ```
 
-上图只画模块边界:KV 身份与位置权威在 `Authority`;计算节点和 KV Node 的 agent 都只是池伸到各节点的本地执行手,负责本地介质操作与传输端点。L3 不进 `Location`,由 `l3_present` 与对象 key 规则表示。
+上图区分三层状态:agent 的 `local overlay` 是本机热路径可写状态;`Authority` 是全局提交态权威;Router/agent 的 mirror 是从 `Authority` 派生的只读副本。计算节点和 KV Node 的 agent 是池伸到各节点的本地执行手,负责本地介质操作与传输端点;CP 不进每 token/step 热路径。L3 不进 `Location`,由 `l3_present` 与对象 key 规则表示。
+
+**当前实现对齐(P4 原型)**：
+
+- `rust/tiered-store::LocalTierEngine` 是 agent local overlay 的进程内骨架:维护 L0/L1/L2/L3 字节映射、L2 `SegmentArena`、本地 `pin`（≈ local ref / writeback / in-flight 冻结）与本地 promotion/demotion/compaction。
+- `rust/storage-agent::PutEndSession` 体现“本地先落介质、再提交全局”的边界:满块先做 quota preflight,再写 L2 durable,随后 `RegisterBlocks` / `ReportRefs` / `RequestBarrier` 提交给 CP。
+- `rust/transfer::TransferServer` / `TcpTransport` 体现数据面本地状态:pull handle、publish stream、segment/batch 生命周期都在 transfer/agent 侧,不进 CP。
+- `rust/controlplane::Authority` 维护全局提交态 radix / locations / ref summary / quota / GC / defrag / shard。
+- 仍未真实化的部分:跨进程 agent event stream、真 RDMA、真 NVMe/object store、生产级 local overlay 持久化/恢复。P4 用 in-process trait、HashMap 字节后端和 TCP 站位验证职责边界;P5/P7 再替换介质与传输实现。
 
 ### KV Node 上的 agent
 

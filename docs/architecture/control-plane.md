@@ -76,7 +76,7 @@ flowchart TB
     locations -->|"l3_present only"| l3
 ```
 
-图中只有 `Authority` 是 KV 元数据权威。Router 和 agent 的 mirror 都是只读派生视图,用于降低热路径查询成本；etcd 只承载 leader lease 与降频 checkpoint,不在每次命中判断中做强一致读写。
+图中只有 `Authority` 是全局提交态 KV 元数据权威。Router 和 agent 的 global view mirror 都是只读派生视图,用于降低跨节点可见状态的查询成本；agent 另有本机可写的 local overlay（slot/free-list/local ref/L1-L2 本地状态）,热路径先写本地 overlay,再以事件/批量提交方式更新 `Authority`。etcd 只承载 leader lease 与降频 checkpoint,不在每次命中判断中做强一致读写。
 
 ## Router 持位置视图镜像（对应 #4）
 
