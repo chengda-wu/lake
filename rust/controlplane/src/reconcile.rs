@@ -186,6 +186,10 @@ impl Authority {
 
         for (seq, bid) in victims {
             if pool.global_refs.get(&seq).copied().unwrap_or(0) > 0 {
+                // Inactive victims should be ref=0 because report_ref 0→>0
+                // removes them from inactive. If stale defensive state slips in,
+                // dropping this allocation result is safe: the next >0→0 transition
+                // will enqueue it again.
                 continue;
             }
             let Some(flat) = pool.seq_to_flat.get(&seq).cloned() else {
@@ -285,7 +289,9 @@ impl Authority {
                 id: Some(bk.to_id()),
                 kind: RefKind::Unspecified as i32,
                 delta: -(count as i32),
-                node_id: String::new(), // avoid re-entering node_refs
+                // `track_node=false` below is the primary guard; keep node_id
+                // empty too so dead-node cleanup cannot re-enter node_refs.
+                node_id: String::new(),
             };
             // Best-effort: block may already be gone.
             let _ = self.report_ref_raw(&delta, /*track_node*/ false);

@@ -57,7 +57,7 @@ flowchart LR
     subgraph HZ["横切: 按层分主 (否定)"]
         direction TB
         H_L0["L0 HBM ── agent 拥有"]
-        H_CUT["──── 切在这里 ────<br/>demotion 时 owner 换手"]
+        H_CUT["──── 切在这里 ────\ndemotion 时 owner 换手"]
         H_L1["L1 DRAM ── 全局拥有"]
         H_L2["L2 NVMe ── 全局拥有"]
         H_L3["L3 对象  ── 全局拥有"]
@@ -66,8 +66,8 @@ flowchart LR
     end
     subgraph VT["纵切: 按职责 (采用)"]
         direction TB
-        V_GLOBAL["全局控制面 ── 所有层元数据<br/>block 在哪 / ref / 放置 / GC"]
-        V_AGENT["每节点 agent ── 所有层本地操作<br/>注册 MR / 分 slot / serve / 搬字节"]
+        V_GLOBAL["全局控制面 ── 所有层元数据\nblock 在哪 / ref / 放置 / GC"]
+        V_AGENT["每节点 agent ── 所有层本地操作\n注册 MR / 分 slot / serve / 搬字节"]
         V_GLOBAL -->|"指令/视图推送"| V_AGENT
         V_AGENT -->|"上报 (产出/ref/done)"| V_GLOBAL
         V_L0["L0 HBM ── agent 注册+分slot, 全局记位置"]

@@ -3,7 +3,7 @@
 //! 挂在 storage-agent(边7/8,非控制面)。Pull 仿 SGLang prefetch 三策略;
 //! Publish 仿 `on_publish` layer-wise + **按 request_id 分作用域**的 seq fence。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +33,8 @@ struct PublishStream {
     last_seq: u32,
     /// (block_hash, layer_idx) → 累计长度(layer-wise 增量)。
     layers: HashMap<(Vec<u8>, u32), u64>,
+    /// 已计入的 slice,用于让同 seq 重发保持幂等。
+    seen_slices: HashSet<(Vec<u8>, u32, u64)>,
 }
 
 fn publish_scope(request_id: &str) -> &str {
@@ -80,6 +82,21 @@ impl TransferServer {
     /// 观测用:未 FreePull 的 handle 数。
     pub fn pull_handle_count(&self) -> usize {
         self.pulls.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn published_layer_bytes(
+        &self,
+        request_id: &str,
+        id: &KvBlockId,
+        layer_idx: u32,
+    ) -> Option<u64> {
+        let scope = publish_scope(request_id).to_string();
+        self.publish
+            .lock()
+            .unwrap()
+            .get(&scope)
+            .and_then(|st| st.layers.get(&(id.block_hash.clone(), layer_idx)).copied())
     }
 
     fn task_state_to_proto(s: TaskState) -> i32 {
@@ -266,7 +283,7 @@ impl TransferService for TransferServer {
         let scope = publish_scope(&req.request_id).to_string();
         let mut map = self.publish.lock().unwrap();
         let st = map.entry(scope).or_default();
-        // seq fence(本 request_id 内):允许 seq==0、seq==last、seq>last;拒绝 0<seq<last。
+        // seq fence(本 request_id 内):seq==last 视作重发,由 seen_slices 去重。
         if req.seq > 0 && req.seq < st.last_seq {
             return Ok(Response::new(Ack {
                 ok: false,
@@ -286,6 +303,10 @@ impl TransferService for TransferServer {
             let Some(id) = slice.id.as_ref() else {
                 continue;
             };
+            let slice_key = (id.block_hash.clone(), slice.layer_idx, slice.offset);
+            if !st.seen_slices.insert(slice_key) {
+                continue;
+            }
             let key = (id.block_hash.clone(), slice.layer_idx);
             *st.layers.entry(key).or_insert(0) += slice.length;
         }
@@ -448,13 +469,13 @@ mod tests {
                 seq: 1,
                 slices: vec![
                     LayerSlice {
-                        id: Some(b0),
+                        id: Some(b0.clone()),
                         layer_idx: 0,
                         offset: 0,
                         length: 64,
                     },
                     LayerSlice {
-                        id: Some(b1),
+                        id: Some(b1.clone()),
                         layer_idx: 1,
                         offset: 0,
                         length: 64,
@@ -465,6 +486,25 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(ack.ok);
+        assert_eq!(svc.published_layer_bytes("req-a", &b0, 0), Some(64));
+
+        // 同 seq / 同 slice 重发应幂等,不能重复累加 layer bytes。
+        let dup = svc
+            .publish(Request::new(PublishRequest {
+                request_id: "req-a".into(),
+                seq: 1,
+                slices: vec![LayerSlice {
+                    id: Some(b0.clone()),
+                    layer_idx: 0,
+                    offset: 0,
+                    length: 64,
+                }],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(dup.ok);
+        assert_eq!(svc.published_layer_bytes("req-a", &b0, 0), Some(64));
 
         // 同 request 内:步进到 3 后再发 2 → fence 拒绝
         svc.publish(Request::new(PublishRequest {

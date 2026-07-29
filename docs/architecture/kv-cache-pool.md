@@ -101,30 +101,51 @@ node_id = hash(KVBlockID) % N
 - 写:产出节点的 agent 通过传输引擎 RDMA write 推到目标 KV Node。
 - 读:消费节点的 agent 通过传输引擎 RDMA read 拉取(跨实例传输机制见上节)。
 
-### KV Node 上的 agent
-
-**KV Node = 存储池的远端物理载体节点**:贡献 DRAM(L1)+ NVMe(L2),无 HBM、无计算、无 worker。计算节点本机的 HBM/DRAM/NVMe 也是池的载体,但**远端**那部分就是 KV Node。每个有介质的节点上都跑一个 agent（池伸到该机的本地手）。
+### KV Pool 模块图
 
 ```mermaid
 flowchart TB
-    subgraph CN["计算节点 (Python worker + Rust agent, 同进程)"]
-        HBM["HBM (L0)"]
-        DRAM_CN["DRAM (L1, 本机载体)"]
-        NVMe_CN["NVMe (L2, 本机载体)"]
-        AGENT_CN["agent (Rust .so, FFI 接 worker)<br/>+ view mirror + block table 组装<br/>+ NVMe serve (本机 L2)"]
+    subgraph cp["Rust 存储控制面"]
+        authority["Authority\nradix + locations + refs"]
+        quotaGc["quota / GC / defrag / shard"]
+        checkpoint["CheckpointStore\n内存 mock / etcd 后续"]
+        authority --- quotaGc
+        authority --> checkpoint
     end
-    subgraph KVN["KV Node (远端, 无 HBM/无计算)"]
-        DRAM_KV["DRAM (L1, 远端载体)"]
-        NVMe_KV["NVMe (L2, 远端载体)"]
-        AGENT_KV["agent (Rust, 无 FFI/无镜像)<br/>+ NVMe serve"]
+
+    subgraph computeNode["计算节点"]
+        worker["Python Worker\nscheduler + ModelRunner"]
+        computeAgent["storage-agent\nFFI + mirror + block table"]
+        l0["L0 HBM\n池放置的计算载体"]
+        l1Local["L1 DRAM\n本机池化载体"]
+        l2Local["L2 NVMe\n本机池化载体"]
+        worker <--> computeAgent
+        computeAgent --- l0
+        computeAgent --- l1Local
+        computeAgent --- l2Local
     end
-    subgraph CP["存储控制面 (Rust, 独立进程)"]
-        AUTH["位置视图权威 (进程内存)<br/>radix + 位置 + ref + 配额 + GC"]
+
+    subgraph kvNode["KV Node"]
+        kvAgent["KV Node agent\nTransfer core + NVMe serve"]
+        l1Remote["L1 DRAM\nRDMA donor"]
+        l2Remote["L2 NVMe\nbounce serve"]
+        kvAgent --- l1Remote
+        kvAgent --- l2Remote
     end
-    AGENT_CN -->|"gRPC 上报/回查 + stream 订阅"| AUTH
-    AGENT_KV -->|"gRPC lease + stream"| AUTH
-    AGENT_CN -->|"RDMA 传/读写 (L0-L0 / L0-远端L1L2)"| AGENT_KV
+
+    l3[("L3 Object Store\nSSOT")]
+
+    computeAgent <-->|"ControlPlane RPC\nRegister / Locate / ReportRef"| authority
+    kvAgent <-->|"lease / location events"| authority
+    computeAgent <-->|"TransferService\nRDMA / TCP fallback"| kvAgent
+    authority -->|"l3_present / lifecycle"| l3
 ```
+
+上图只画模块边界:KV 身份与位置权威在 `Authority`;计算节点和 KV Node 的 agent 都只是池伸到各节点的本地执行手,负责本地介质操作与传输端点。L3 不进 `Location`,由 `l3_present` 与对象 key 规则表示。
+
+### KV Node 上的 agent
+
+**KV Node = 存储池的远端物理载体节点**:贡献 DRAM(L1)+ NVMe(L2),无 HBM、无计算、无 worker。计算节点本机的 HBM/DRAM/NVMe 也是池的载体,但**远端**那部分就是 KV Node。每个有介质的节点上都跑一个 agent（池伸到该机的本地手）。
 
 两类 agent 共用一个 Rust crate `lake-storage-agent`，**共用传输 core**（传输引擎 + lease/段挂摘），再**按角色 feature 出两套能力**：计算侧独有 FFI / mirror / block table / fence / slot；KV Node 侧独有 NVMe serve（bounce）。**不是**"谁是谁的真子集"——两者共用 core，各自叠加对方没有的能力。
 

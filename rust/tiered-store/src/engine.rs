@@ -302,9 +302,6 @@ impl LocalTierEngine {
                     Some(old) => {
                         self.l2.insert(h.to_vec(), old);
                         Self::touch(&mut self.l2_order, h);
-                        if !had_placement {
-                            // keep placement from note_l2_present
-                        }
                     }
                     None => {
                         self.l2.remove(h);
