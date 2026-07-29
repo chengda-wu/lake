@@ -136,7 +136,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 - **Python 开发环境用 `uv` 管理**：从仓库根执行 `uv venv --python 3.12`、`source .venv/bin/activate`、`uv pip install -e "./python[dev]"`。
 - **边界**：`uv` 只管 Python 开发依赖与本地测试环境；Rust / Go 仍分别使用 `cargo` / `go`，三语言构建入口不合并到 uv。
-- **Torch/CUDA/Triton**：Torch 是 Python 计算层基础依赖；本机 CUDA wheel 由安装源/平台解析决定（如 PyPI 默认 CUDA wheel 或 PyTorch 指定 CUDA index），`cuda` extra 仅补 Triton 开发路径。
+- **Torch/CUDA/Triton**：Torch 是 Python 计算层基础依赖；本机 CUDA wheel 由安装源/平台解析决定（如 PyPI 默认 CUDA wheel 或 PyTorch 指定 CUDA index），`cuda` extra 仅补 Triton 开发路径。对照 vLLM 与 SGLang：两者都在包依赖和 `ModelRunner` / `InputBatch` / Qwen3 模型热路径中硬依赖 `torch`，因此 lake 的生产 Qwen3 backend 也不把 Torch 伪装成可选依赖；但 `engine` / `runtime` 轻量 import、mock 和旧 `tiny_lm` 测试路径仍应避免顶层触发 Torch。
 - **参考取向**：vLLM 更偏 uv-first（推荐 `uv venv`、`uv pip install ... --torch-backend=auto`）；SGLang 也推荐 uv 并在 CI/Docker 中使用，但保留平台 fallback。lake 采用其开发环境管理经验，不改变既定语言技术选型。
 
 ### 模块与目录划分
