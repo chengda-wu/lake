@@ -37,14 +37,21 @@ impl SkeletonKvService for KvPool {
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
         let mut store = self.inner.lock().unwrap();
+        let mut skipped_missing_id = 0usize;
         for blk in req.blocks {
-            let Some(id) = blk.id else { continue };
+            let Some(id) = blk.id else {
+                skipped_missing_id += 1;
+                continue;
+            };
             store.data.insert(key(&id), blk.data);
         }
-        Ok(Response::new(Ack {
-            ok: true,
-            err: String::new(),
-        }))
+        let ok = skipped_missing_id == 0;
+        let err = if ok {
+            String::new()
+        } else {
+            format!("skipped {skipped_missing_id} block(s) without id")
+        };
+        Ok(Response::new(Ack { ok, err }))
     }
 
     async fn get_blocks(
