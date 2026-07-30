@@ -52,7 +52,7 @@ impl TcpDataService for KvPool {
             store.data.insert(key(&id), blk.data);
         }
         Ok(Response::new(Ack {
-            ok: true,
+            ok: skipped_missing_id == 0,
             err: if skipped_missing_id == 0 {
                 String::new()
             } else {
@@ -78,5 +78,29 @@ impl TcpDataService for KvPool {
             }
         }
         Ok(Response::new(GetBlocksResponse { blocks }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn put_blocks_missing_id_is_not_ok() {
+        let pool = KvPool::default();
+        let ack = pool
+            .put_blocks(Request::new(PutBlocksRequest {
+                node_id: "n0".into(),
+                blocks: vec![OpaqueBlock {
+                    id: None,
+                    data: b"bad".to_vec(),
+                }],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert!(ack.err.contains("skipped 1 block"));
     }
 }
