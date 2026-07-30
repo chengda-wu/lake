@@ -108,10 +108,12 @@ impl ControlPlane {
 }
 
 impl ControlPlane {
-    fn lock_authority(&self) -> Result<MutexGuard<'_, Authority>, Status> {
-        self.inner
-            .lock()
-            .map_err(|_| Status::internal("controlplane authority unavailable"))
+    fn lock_authority(&self) -> Result<MutexGuard<'_, Authority>, ()> {
+        self.inner.lock().map_err(|_| ())
+    }
+
+    fn lock_authority_status(_: ()) -> Status {
+        Status::internal("controlplane authority unavailable")
     }
 }
 
@@ -134,7 +136,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<LookupPrefixRequest>,
     ) -> Result<Response<LookupPrefixResponse>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         let (blocks, hit_length, all_local_hit) = auth.lookup_prefix(
             &req.model_id,
             &req.revision,
@@ -154,7 +156,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<LocateRequest>,
     ) -> Result<Response<LocateResponse>, Status> {
         let req = request.into_inner();
-        let auth = self.lock_authority()?;
+        let auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         let blocks = auth.locate(&req.ids);
         Ok(Response::new(LocateResponse { blocks }))
     }
@@ -174,7 +176,7 @@ impl ControlPlaneService for ControlPlane {
                 }));
             }
         };
-        let auth = self.lock_authority()?;
+        let auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.preflight_register(&keys.model_id, &keys.revision, keys.pool_kind, &keys.hashes)
         {
             Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
@@ -203,7 +205,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RegisterBlocksRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.register(&req.node_id, &req.prefix_hashes, req.blocks) {
             Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
                 ok: true,
@@ -235,7 +237,7 @@ impl ControlPlaneService for ControlPlane {
         while let Some(delta) = stream.message().await? {
             deltas.push(delta);
         }
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.report_refs(&deltas) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -255,7 +257,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RequestBarrierRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         // P4.3: agent must flush L2 + ReportRef(WRITEBACK,-1) before this call.
         match auth.complete_barrier(&req.request_id, &req.node_id) {
             Ok(()) => Ok(Response::new(Ack {
@@ -296,7 +298,7 @@ impl ControlPlaneService for ControlPlane {
                 backpressure: None,
             }));
         };
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.register_model(model) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -316,7 +318,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<DeregisterModelRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.deregister_model(&req.model_id, &req.revision) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -343,7 +345,7 @@ impl ControlPlaneService for ControlPlane {
                 backpressure: None,
             }));
         };
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.set_model_quota(&req.model_id, &req.revision, quota) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -363,7 +365,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<GetModelQuotaRequest>,
     ) -> Result<Response<GetModelQuotaResponse>, Status> {
         let req = request.into_inner();
-        let auth = self.lock_authority()?;
+        let auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.get_model_quota(&req.model_id, &req.revision) {
             Ok(resp) => Ok(Response::new(resp)),
             Err(e) => Ok(Response::new(GetModelQuotaResponse {
@@ -382,7 +384,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<ReconcileOrphansRequest>,
     ) -> Result<Response<ReconcileOrphansResponse>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.reconcile_orphans(&req) {
             Ok(resp) => Ok(Response::new(resp)),
             Err(e) => Ok(Response::new(ReconcileOrphansResponse {
@@ -400,7 +402,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<DiscardBlocksRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.discard_blocks(&req.ids) {
             Ok(_) => Ok(Response::new(Ack {
                 ok: true,
@@ -419,7 +421,7 @@ impl ControlPlaneService for ControlPlane {
         &self,
         _request: Request<SaveCheckpointRequest>,
     ) -> Result<Response<SaveCheckpointResponse>, Status> {
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         auth.checkpoint_seq = auth.checkpoint_seq.saturating_add(1);
         let snap = auth.export_snapshot(auth.checkpoint_seq);
         drop(auth);
@@ -463,7 +465,7 @@ impl ControlPlaneService for ControlPlane {
                 }
             }
         };
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.import_snapshot(&snap) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -484,7 +486,7 @@ impl ControlPlaneService for ControlPlane {
     ) -> Result<Response<TriggerDefragResponse>, Status> {
         let req = request.into_inner();
         let mode = DefragMode::try_from(req.mode).unwrap_or(DefragMode::Both);
-        let auth = self.lock_authority()?;
+        let auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.plan_defrag(
             &req.model_id,
             &req.revision,
@@ -527,7 +529,7 @@ impl ControlPlaneService for ControlPlane {
         &self,
         _request: Request<GetShardMapRequest>,
     ) -> Result<Response<GetShardMapResponse>, Status> {
-        let auth = self.lock_authority()?;
+        let auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         Ok(Response::new(GetShardMapResponse {
             map: Some(auth.shard_map()),
             ok: true,
@@ -540,7 +542,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<JoinShardNodeRequest>,
     ) -> Result<Response<JoinShardNodeResponse>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.join_shard_node(&req.node_id, req.vnode_count) {
             Ok((map, migrations)) => {
                 let migration_count = migrations.len() as u32;
@@ -567,7 +569,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<DrainShardNodeRequest>,
     ) -> Result<Response<DrainShardNodeResponse>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.drain_shard_node(&req.node_id) {
             Ok((map, migrations, push_l2)) => {
                 let migration_count = migrations.len() as u32;
@@ -596,7 +598,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RemoveShardNodeRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.lock_authority()?;
+        let mut auth = self.lock_authority().map_err(Self::lock_authority_status)?;
         match auth.remove_shard_node(&req.node_id) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
