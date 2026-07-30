@@ -22,6 +22,7 @@ mod shard;
 mod tier;
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::mpsc;
@@ -83,6 +84,7 @@ pub struct ControlPlane {
     checkpoints: Arc<MemoryCheckpointStore>,
     /// Shared pause flag for promote/demote/GC/defrag (agent syncs BandwidthPool).
     background_paused: Arc<Mutex<bool>>,
+    authority_poisoned_reported: Arc<AtomicBool>,
 }
 
 impl ControlPlane {
@@ -95,6 +97,7 @@ impl ControlPlane {
             inner: Arc::new(Mutex::new(Authority::default())),
             checkpoints: Arc::new(store),
             background_paused: Arc::new(Mutex::new(false)),
+            authority_poisoned_reported: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -105,11 +108,22 @@ impl ControlPlane {
     pub fn set_background_paused(&self, paused: bool) {
         *self.background_paused.lock().unwrap() = paused;
     }
+
+    pub fn authority_poisoned_reported(&self) -> bool {
+        self.authority_poisoned_reported.load(Ordering::Relaxed)
+    }
 }
 
 impl ControlPlane {
     fn lock_authority(&self) -> Result<MutexGuard<'_, Authority>, ()> {
-        self.inner.lock().map_err(|_| ())
+        self.inner.lock().map_err(|_| {
+            if !self
+                .authority_poisoned_reported
+                .swap(true, Ordering::Relaxed)
+            {
+                eprintln!("controlplane authority lock poisoned; returning INTERNAL until restart");
+            }
+        })
     }
 
     fn lock_authority_status(_: ()) -> Status {
@@ -1115,6 +1129,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(cp.authority_poisoned_reported());
     }
 
     #[test]

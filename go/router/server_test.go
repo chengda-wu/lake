@@ -11,6 +11,7 @@ import (
 	lakepb "github.com/chengda-wu/lake/go/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -55,6 +56,28 @@ func TestChatBodyLimit(t *testing.T) {
 	rec := postChat(t, srv, strings.Repeat("x", maxChatRequestBytes+1))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServerCloseClosesClientConnections(t *testing.T) {
+	workerConn, err := grpc.NewClient("passthrough:///worker", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentConn, err := grpc.NewClient("passthrough:///agent", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{workerConn: workerConn, agentConn: agentConn}
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if state := workerConn.GetState().String(); state != "SHUTDOWN" {
+		t.Fatalf("workerConn state = %s, want SHUTDOWN", state)
+	}
+	if state := agentConn.GetState().String(); state != "SHUTDOWN" {
+		t.Fatalf("agentConn state = %s, want SHUTDOWN", state)
 	}
 }
 
