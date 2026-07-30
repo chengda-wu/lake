@@ -1,9 +1,10 @@
-//! KV Pool:SkeletonKv 内存字节存储（dumb 后端）。
+//! KV Pool:`TcpDataService` 内存字节存储（dumb 后端）。
 //!
 //! P4.2:索引 / radix / ref 归 controlplane；本 crate 只按
-//! `(model_id, pool_kind, block_hash) → bytes` 存取，无 lookup 职责。
-//! 生产字节走 RDMA；此处 gRPC 传不透明 bytes。
-//! 参考:LMCache MemoryObj；Mooncake store Put/Get。
+//! `(model_id, revision, pool_kind, block_hash) → bytes` 存取，无 lookup 职责。
+//! P4.4:正名自 SkeletonKv；对齐 Mooncake `MC_FORCE_TCP` fallback——
+//! 无 RDMA 时 gRPC 传不透明 bytes；生产旁路走 TransferService + Transport。
+//! 参考:LMCache MemoryObj；Mooncake store Put/Get；`TcpTransport`。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,16 +13,21 @@ use tonic::{Request, Response, Status};
 
 pub use lake_proto::lake::*;
 
-use skeleton_kv_service_server::SkeletonKvService;
+use tcp_data_service_server::TcpDataService;
 
 #[derive(Default)]
 struct Store {
-    /// key = (model_id, pool_kind, block_hash)
-    data: HashMap<(String, i32, Vec<u8>), Vec<u8>>,
+    /// key = (model_id, revision, pool_kind, block_hash)
+    data: HashMap<(String, String, i32, Vec<u8>), Vec<u8>>,
 }
 
-fn key(id: &KvBlockId) -> (String, i32, Vec<u8>) {
-    (id.model_id.clone(), id.pool_kind, id.block_hash.clone())
+fn key(id: &KvBlockId) -> (String, String, i32, Vec<u8>) {
+    (
+        id.model_id.clone(),
+        id.revision.clone(),
+        id.pool_kind,
+        id.block_hash.clone(),
+    )
 }
 
 #[derive(Clone, Default)]
@@ -30,7 +36,7 @@ pub struct KvPool {
 }
 
 #[tonic::async_trait]
-impl SkeletonKvService for KvPool {
+impl TcpDataService for KvPool {
     async fn put_blocks(
         &self,
         request: Request<PutBlocksRequest>,
@@ -45,13 +51,15 @@ impl SkeletonKvService for KvPool {
             };
             store.data.insert(key(&id), blk.data);
         }
-        let ok = skipped_missing_id == 0;
-        let err = if ok {
-            String::new()
-        } else {
-            format!("skipped {skipped_missing_id} block(s) without id")
-        };
-        Ok(Response::new(Ack { ok, err }))
+        Ok(Response::new(Ack {
+            ok: true,
+            err: if skipped_missing_id == 0 {
+                String::new()
+            } else {
+                format!("skipped {skipped_missing_id} block(s) without id")
+            },
+            backpressure: None,
+        }))
     }
 
     async fn get_blocks(
