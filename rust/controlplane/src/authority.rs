@@ -338,6 +338,10 @@ impl Authority {
 
     /// Validate a ref delta can be applied (block known). Does not mutate.
     pub fn check_report_ref(&self, delta: &RefDelta) -> Result<(), String> {
+        self.ref_target(delta).map(|_| ())
+    }
+
+    fn ref_target(&self, delta: &RefDelta) -> Result<(String, SequenceHash), String> {
         let id = delta
             .id
             .as_ref()
@@ -345,10 +349,11 @@ impl Authority {
         let ns = self
             .ns(&id.model_id)
             .ok_or_else(|| format!("unknown model_id {}", id.model_id))?;
-        if !ns.by_flat.contains_key(&id.block_hash) {
-            return Err("RefDelta: unknown block_hash".to_string());
-        }
-        Ok(())
+        let entry = ns
+            .by_flat
+            .get(&id.block_hash)
+            .ok_or_else(|| "RefDelta: unknown block_hash".to_string())?;
+        Ok((id.model_id.clone(), entry.seq_hash))
     }
 
     /// Apply one ref delta (sum into `global_refs`). Returns error if block unknown.
@@ -356,21 +361,26 @@ impl Authority {
     /// P4.2: `delta.kind` is intentionally ignored (合账骨架). Per-kind buckets
     /// and agent `ReportRef` producers land in a later slice.
     pub fn report_ref(&mut self, delta: &RefDelta) -> Result<(), String> {
-        self.check_report_ref(delta)?;
+        let (_model_id, seq) = self.ref_target(delta)?;
         let id = delta.id.as_ref().expect("checked");
         let ns = self.namespaces.get_mut(&id.model_id).expect("checked");
         let entry = ns.by_flat.get(&id.block_hash).expect("checked");
-        let seq = entry.seq_hash;
         let block_id = entry.block_id;
         let _kind = delta.kind; // reserved; not booked separately in P4.2
 
         let cur = ns.global_refs.entry(seq).or_insert(0);
         let before = *cur;
-        *cur = cur.saturating_add(i64::from(delta.delta));
-        if *cur < 0 {
-            *cur = 0;
+        let after = before
+            .checked_add(i64::from(delta.delta))
+            .ok_or_else(|| "RefDelta: ref_count overflow".to_string())?;
+        if after < 0 {
+            return Err(format!(
+                "RefDelta: ref_count underflow for model_id={} block_hash_len={}",
+                id.model_id,
+                id.block_hash.len()
+            ));
         }
-        let after = *cur;
+        *cur = after;
 
         if before > 0 && after == 0 {
             // Candidate for eviction — do not delete the view (Dynamo
@@ -396,9 +406,24 @@ impl Authority {
     /// later delta cannot see a peer deleted by an earlier one (would panic on
     /// the post-check `expect` and break all-or-nothing).
     pub fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
+        let mut projected: HashMap<(String, SequenceHash), i64> = HashMap::new();
         for (i, d) in deltas.iter().enumerate() {
-            self.check_report_ref(d)
+            let key = self
+                .ref_target(d)
                 .map_err(|e| format!("ReportRef batch[{i}]: {e}"))?;
+            let cur = *projected.entry(key.clone()).or_insert_with(|| {
+                self.namespaces
+                    .get(&key.0)
+                    .and_then(|ns| ns.global_refs.get(&key.1).copied())
+                    .unwrap_or(0)
+            });
+            let next = cur
+                .checked_add(i64::from(d.delta))
+                .ok_or_else(|| format!("ReportRef batch[{i}]: ref_count overflow"))?;
+            if next < 0 {
+                return Err(format!("ReportRef batch[{i}]: ref_count underflow"));
+            }
+            projected.insert(key, next);
         }
         for d in deltas {
             self.report_ref(d)

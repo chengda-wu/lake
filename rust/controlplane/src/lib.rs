@@ -11,7 +11,7 @@ mod hash_chain;
 mod tier;
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -25,6 +25,14 @@ use control_plane_service_server::ControlPlaneService;
 #[derive(Clone, Default)]
 pub struct ControlPlane {
     inner: Arc<Mutex<Authority>>,
+}
+
+impl ControlPlane {
+    fn lock_authority(&self) -> Result<MutexGuard<'_, Authority>, Status> {
+        self.inner
+            .lock()
+            .map_err(|_| Status::internal("controlplane authority unavailable"))
+    }
 }
 
 #[tonic::async_trait]
@@ -46,7 +54,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<LookupPrefixRequest>,
     ) -> Result<Response<LookupPrefixResponse>, Status> {
         let req = request.into_inner();
-        let mut auth = self.inner.lock().unwrap();
+        let mut auth = self.lock_authority()?;
         let (blocks, hit_length, all_local_hit) =
             auth.lookup_prefix(&req.model_id, &req.prefix_hashes, &req.requester_node_id);
         Ok(Response::new(LookupPrefixResponse {
@@ -61,7 +69,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<LocateRequest>,
     ) -> Result<Response<LocateResponse>, Status> {
         let req = request.into_inner();
-        let auth = self.inner.lock().unwrap();
+        let auth = self.lock_authority()?;
         let blocks = auth.locate(&req.ids);
         Ok(Response::new(LocateResponse { blocks }))
     }
@@ -71,7 +79,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RegisterBlocksRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.inner.lock().unwrap();
+        let mut auth = self.lock_authority()?;
         match auth.register(&req.node_id, &req.prefix_hashes, req.blocks) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -90,7 +98,7 @@ impl ControlPlaneService for ControlPlane {
         while let Some(delta) = stream.message().await? {
             deltas.push(delta);
         }
-        let mut auth = self.inner.lock().unwrap();
+        let mut auth = self.lock_authority()?;
         match auth.report_refs(&deltas) {
             Ok(()) => Ok(Response::new(Ack {
                 ok: true,
@@ -105,7 +113,7 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RequestBarrierRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
-        let mut auth = self.inner.lock().unwrap();
+        let mut auth = self.lock_authority()?;
         // P4.3: agent must flush L2 + ReportRef(WRITEBACK,-1) before this call.
         match auth.complete_barrier(&req.request_id, &req.node_id) {
             Ok(()) => Ok(Response::new(Ack {
@@ -579,6 +587,91 @@ mod tests {
         let mut auth = Authority::default();
         assert!(auth.complete_barrier("", "n0").is_err());
         assert!(auth.complete_barrier("r", "").is_err());
+    }
+
+    #[test]
+    fn report_ref_underflow_is_rejected() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"under"]);
+        auth.register("n0", &full, vec![meta("m", b"under")])
+            .unwrap();
+        let minus = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"under".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: -1,
+            node_id: "n0".into(),
+        };
+        let err = auth.report_ref(&minus).unwrap_err();
+        assert!(err.contains("underflow"));
+        assert_eq!(auth.global_ref("m", b"under"), 0);
+        assert_eq!(auth.inactive_len("m"), 0);
+    }
+
+    #[test]
+    fn report_refs_underflow_is_all_or_nothing() {
+        let mut auth = Authority::default();
+        let full = prefix(&[b"ok", b"bad"]);
+        auth.register("n0", &full, vec![meta("m", b"ok"), meta("m", b"bad")])
+            .unwrap();
+        let plus_ok = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"ok".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: 1,
+            node_id: "n0".into(),
+        };
+        let minus_bad = RefDelta {
+            id: Some(KvBlockId {
+                model_id: "m".into(),
+                block_hash: b"bad".to_vec(),
+                pool_kind: PoolKind::Target as i32,
+                scope: "public".into(),
+            }),
+            kind: RefKind::Request as i32,
+            delta: -1,
+            node_id: "n0".into(),
+        };
+        let err = auth.report_refs(&[plus_ok, minus_bad]).unwrap_err();
+        assert!(err.contains("underflow"));
+        assert_eq!(auth.global_ref("m", b"ok"), 0);
+        assert_eq!(auth.global_ref("m", b"bad"), 0);
+    }
+
+    #[test]
+    fn inactive_duplicate_insert_does_not_panic() {
+        use kvbm_logical::{FrequencyTrackingCapacity, InactiveIndex, LineageBackend};
+        let tracker = FrequencyTrackingCapacity::Small.create_tracker();
+        let mut inactive =
+            LineageBackend::with_frequency(4, [3, 8, 15], std::sync::Arc::clone(&tracker) as _)
+                .unwrap();
+        let seq = super::hash_chain::lineage_from_prefix(&prefix(&[b"dup"]))[0];
+        inactive.insert(seq, 1);
+        inactive.insert(seq, 1);
+        assert!(inactive.has(seq));
+    }
+
+    #[tokio::test]
+    async fn poisoned_authority_lock_returns_status() {
+        let cp = ControlPlane::default();
+        let inner = cp.inner.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = inner.lock().unwrap();
+            panic!("poison authority");
+        });
+        let err = cp
+            .locate(Request::new(LocateRequest { ids: Vec::new() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
     }
 
     #[test]

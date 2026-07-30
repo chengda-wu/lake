@@ -7,7 +7,9 @@
 use crate::bandwidth::BandwidthPool;
 use crate::engine::{LocalTier, LocalTierEngine, TierSideEffects};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const MAX_ACTION_FAILURES: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PipelineAction {
     Promote { hash: Vec<u8> },
     DemoteL0 { hash: Vec<u8> },
@@ -46,6 +48,7 @@ pub struct TierPipeline {
     pub engine: LocalTierEngine,
     pub bandwidth: BandwidthPool,
     queue: std::collections::VecDeque<PipelineAction>,
+    failures: std::collections::HashMap<PipelineAction, usize>,
 }
 
 impl TierPipeline {
@@ -54,6 +57,7 @@ impl TierPipeline {
             engine,
             bandwidth,
             queue: std::collections::VecDeque::new(),
+            failures: std::collections::HashMap::new(),
         }
     }
 
@@ -118,6 +122,7 @@ impl TierPipeline {
                     }
                     done += 1;
                     consecutive_fail = 0;
+                    self.failures.remove(&action);
                 }
                 (PipelineAction::DemoteL0 { hash }, Ok(_)) => {
                     events.push(LocationEvent::Absent {
@@ -126,6 +131,7 @@ impl TierPipeline {
                     });
                     done += 1;
                     consecutive_fail = 0;
+                    self.failures.remove(&action);
                 }
                 (PipelineAction::DemoteL2 { hash }, Ok(_)) => {
                     events.push(LocationEvent::Absent {
@@ -138,13 +144,20 @@ impl TierPipeline {
                     });
                     done += 1;
                     consecutive_fail = 0;
+                    self.failures.remove(&action);
                 }
                 (_, Err(_)) => {
                     if cost > 0 {
                         self.bandwidth.refund(cost);
                     }
-                    // Requeue at back; stop if we rotate the whole queue without progress.
-                    self.queue.push_back(action);
+                    // Requeue transient failures, but tombstone permanently bad work.
+                    let failures = self.failures.entry(action.clone()).or_insert(0);
+                    *failures += 1;
+                    if *failures >= MAX_ACTION_FAILURES {
+                        self.failures.remove(&action);
+                    } else {
+                        self.queue.push_back(action.clone());
+                    }
                     consecutive_fail += 1;
                     if consecutive_fail >= q0 {
                         break;
@@ -217,5 +230,19 @@ mod tests {
         let (n, _) = p.tick(1);
         assert_eq!(n, 0);
         assert_eq!(p.pending(), 1, "failed action requeued");
+    }
+
+    #[test]
+    fn pipeline_drops_permanently_failed_action() {
+        let eng = LocalTierEngine::with_caps(TierCaps::default());
+        let mut p = TierPipeline::new(eng, BandwidthPool::new(1024));
+        p.enqueue(PipelineAction::DemoteL0 {
+            hash: b"missing".to_vec(),
+        });
+        for _ in 0..MAX_ACTION_FAILURES {
+            let (n, _) = p.tick(1);
+            assert_eq!(n, 0);
+        }
+        assert_eq!(p.pending(), 0, "bad action should be tombstoned");
     }
 }
