@@ -48,6 +48,11 @@ class RecordingExecutor:
         return ModelRunnerOutput(step_id=inp.output.step_id)
 
 
+class FailingExecutor:
+    def execute_model(self, inp: ExecutorInput) -> ModelRunnerOutput:
+        raise RuntimeError(f"boom step={inp.output.step_id}")
+
+
 def test_single_process_executor_calls_runner() -> None:
     class FakeRunner:
         def __init__(self) -> None:
@@ -83,6 +88,23 @@ def test_node_scheduler_uses_executor() -> None:
     assert pool.done_steps == [output.step_id]
 
 
+def test_node_scheduler_done_on_executor_exception() -> None:
+    pool = FakePool()
+    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    sched = NodeScheduler(pool, runner, role, executor=FailingExecutor())  # type: ignore[arg-type]
+    sched.add_request(build_req_from_generate("r-boom", "m", list(range(4)), 1, "n0"))
+    output = sched.schedule()
+
+    try:
+        sched._run_batch(output)  # noqa: SLF001
+        raise AssertionError("expected executor failure")
+    except RuntimeError as e:
+        assert "boom" in str(e)
+    assert pool.done_steps == [output.step_id]
+    assert not sched._result_queue  # noqa: SLF001
+
+
 def test_worker_engine_wires_executor() -> None:
     pool = FakePool()
     runner = ModelRunner(pool)  # type: ignore[arg-type]
@@ -101,5 +123,6 @@ def test_worker_engine_wires_executor() -> None:
 if __name__ == "__main__":
     test_single_process_executor_calls_runner()
     test_node_scheduler_uses_executor()
+    test_node_scheduler_done_on_executor_exception()
     test_worker_engine_wires_executor()
     print("test_executor OK")

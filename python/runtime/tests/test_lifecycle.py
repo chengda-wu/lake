@@ -135,6 +135,32 @@ def test_submit_after_stop_raises() -> None:
         assert "not running" in str(e).lower()
 
 
+def test_step_exception_stops_engine_loop() -> None:
+    pool = FakePool()
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+
+    def boom(before_schedule=None, should_stop=None):  # noqa: ANN001
+        raise RuntimeError("fatal forward")
+
+    eng._sched.run_until_idle = boom  # type: ignore[method-assign]  # noqa: SLF001
+    eng.start()
+    req = build_req_from_generate("fatal", "m", list(range(4)), 1, "n0")
+    item = _Inbound(req=req, hint=None, done=threading.Event(), error=[], result=[])
+    eng._inflight[req.req_id] = item  # noqa: SLF001
+    eng.scheduler.add_request(req)
+
+    assert item.done.wait(timeout=2.0)
+    eng._thread.join(timeout=2.0)  # noqa: SLF001
+    assert not eng._thread.is_alive()  # noqa: SLF001
+    assert item.error and "fatal forward" in str(item.error[0])
+    try:
+        eng.submit(build_req_from_generate("after-fatal", "m", list(range(4)), 1, "n0"))
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "not running" in str(e).lower()
+
+
 def test_submit_stop_race_no_hang() -> None:
     """Medium：submit 与 stop 交错时，要么完成要么 raise，不得 hang。"""
     pool = FakePool()

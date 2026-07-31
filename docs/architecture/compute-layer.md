@@ -632,7 +632,7 @@ Python 落点：`runtime/scheduler_output.py`（dataclass）← `node_scheduler`
 
 **C14 状态（2026-07-28）**：已把 `pool_iface` 从 mock 门面收紧为生产 agent FFI 契约：`PoolIface` 统一包装非 `PoolError` 为 `DOWNSTREAM`、校验 `ReadyHandle.step_id` / `effective_*_set` / stats req 集合、记录 prepare/done/commit/finish/error 会计；`commit_write_extent` 不再特判 InMemory，而是调用 agent 同名方法（GrpcSkeleton no-op，占位生产 PyO3 agent）；`on_request_finished` 做一次性去重，保证同一 req 只打一次 agent。单测覆盖旧 commit 不压新 prepare HWM、partial-hit 未开启时缩批判协议错误、`TIMEOUT` 保持原 exec mode 不触发 mode fallback、finish 去重。真 device-side commit 序号 / PyO3 FFI ABI / CAPACITY 注入后置。
 
-**C15 状态（2026-07-28）**：已落 `runtime/executor.py`，定义 `ExecutorInput` / `RuntimeExecutor` / `SingleProcessExecutor`；`NodeScheduler._run_batch()` 改为通过 executor 消费同一份 `SchedulerOutput + ReadyHandle + Host Req 映射`，并在 executor 成功返回后由 scheduler 对 `pool.done(step_id)` 做 exactly-once ack，失败则不 ack。`WorkerEngine` 支持注入 executor，默认仍是单进程 runner。单测覆盖 single-process executor 调 runner、NodeScheduler 走 executor 且成功后 done、WorkerEngine 注入 executor 后请求仍完成。TP/PP 真 `collective_rpc`、PP 激活传递、跨 worker 结果聚合后置；Host `Req` 权威仍留在 `NodeScheduler`，不复制进 runner/executor。
+**C15 状态（2026-07-28）**：已落 `runtime/executor.py`，定义 `ExecutorInput` / `RuntimeExecutor` / `SingleProcessExecutor`；`NodeScheduler._run_batch()` 改为通过 executor 消费同一份 `SchedulerOutput + ReadyHandle + Host Req 映射`，并用 `finally` 保证本步 `pool.done(step_id)` 释放 ready fence。executor/model 执行异常按 vLLM fatal 语义继续上抛，不入 result queue；`WorkerEngine` 收到后 fail inflight、拒绝 inbound、退出计算 loop，等待进程管理器重拉。单测覆盖 single-process executor 调 runner、NodeScheduler 成功/异常路径 done、WorkerEngine 注入 executor 后请求仍完成。TP/PP 真 `collective_rpc`、PP 激活传递、跨 worker 结果聚合后置；Host `Req` 权威仍留在 `NodeScheduler`，不复制进 runner/executor。
 
 #### 本轮不做
 

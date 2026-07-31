@@ -256,10 +256,12 @@ class NodeScheduler:
         # D2：allow_partial_hit 缩批后须按 effective_* 执行（默认与 plan 相同）
         output = self._respect_effective_sets(output, ready)
         self.timeline.append(("execute", output.step_id))
-        runner_out = self._executor.execute_model(
-            ExecutorInput(output=output, ready=ready, host_reqs=self._reqs)
-        )
-        self._pool.done(output.step_id)
+        try:
+            runner_out = self._executor.execute_model(
+                ExecutorInput(output=output, ready=ready, host_reqs=self._reqs)
+            )
+        finally:
+            self._pool.done(output.step_id)
         self._result_queue.append(_BatchResult(output=output, runner_out=runner_out, ready=ready))
 
     def _respect_effective_sets(self, output: SchedulerOutput, ready: ReadyHandle) -> SchedulerOutput:
@@ -586,7 +588,9 @@ class NodeScheduler:
 
     def _process_batch_result(self, output: SchedulerOutput, runner_out: ModelRunnerOutput) -> None:
         for rid, scheduled_n in output.num_scheduled_tokens.items():
-            req = self._reqs[rid]
+            req = self._reqs.get(rid)
+            if req is None:
+                continue
             prompt_len = len(req.prompt_token_ids)
             computed_before = output.req_num_computed_at_schedule.get(rid, req.num_computed_tokens)
             spec = (output.scheduled_spec_decode_tokens or {}).get(rid)

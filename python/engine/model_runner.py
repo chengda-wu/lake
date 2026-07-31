@@ -380,6 +380,10 @@ class ModelRunner:
         assert self._tiny is not None
         last_logits: Dict[str, List[float]] = {}
         drafts_prompt: Dict[str, List[int]] = {}
+        spec_map = output.scheduled_spec_decode_tokens or {}
+        for req_id, draft in list(spec_map.items()):
+            n = batch.num_scheduled_tokens.get(req_id, 0)
+            spec_map[req_id] = list(draft)[: max(0, n - 1)]
 
         for req_id in batch.req_ids:
             tokens = batch.token_ids[req_id]
@@ -400,7 +404,6 @@ class ModelRunner:
                 last_logits[req_id] = logits_rows[-1]
 
         # TARGET_VERIFY：走 sample 内 reject（可能无 last_logits）
-        spec_map = output.scheduled_spec_decode_tokens or {}
         for req_id, draft in spec_map.items():
             if draft and req_id not in last_logits and req_id in batch.req_ids:
                 last_logits[req_id] = [0.0] * self._tiny.vocab_size
