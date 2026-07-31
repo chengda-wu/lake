@@ -259,6 +259,9 @@ class WorkerEngine:
             except Exception as e:  # noqa: BLE001
                 LOG.exception("WorkerEngine step loop failed: %s", e)
                 self._fail_inflight(e)
+                self._reject_inbound(e)
+                self._stop.set()
+                break
         # 正常停机：由 loop 自己收尾（调用方 stop 不得再碰 scheduler）
         stopped = RuntimeError("WorkerEngine stopped")
         self._reject_inbound(stopped)
