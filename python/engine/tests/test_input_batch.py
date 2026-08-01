@@ -50,6 +50,33 @@ def test_prepare_inputs_attn_metadata() -> None:
     assert meta.block_table_tensor == [[0, 1]]
 
 
+def test_decode_slot_mapping_matches_query_position() -> None:
+    pool = PoolIface(InMemoryAgent())
+    runner = ModelRunner(pool, model_backend="mock")
+    req = build_req_from_generate("r", "m", list(range(4)), 1, "n0")
+    req.num_computed_tokens = len(req.prompt_token_ids)
+    out = SchedulerOutput(
+        step_id=2,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"r": 1},
+        total_num_scheduled_tokens=1,
+        req_num_computed_at_schedule={"r": len(req.prompt_token_ids)},
+        req_forward_modes={"r": ForwardMode.DECODE},
+    )
+    batch = runner.prepare_inputs(out, {"r": req})
+    assert batch.query_start["r"] == 3
+    assert batch.query_end["r"] == 4
+
+    ready = ReadyHandle(
+        step_id=2,
+        block_table_by_req={"r": [0]},
+        slot_mapping_by_req={"r": [3]},
+    )
+    meta = runner.prepare_attn(batch, ready)
+    assert meta.positions == [3]
+    assert meta.slot_mapping == [3]
+
+
 def test_two_reqs_same_batch_mock() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)

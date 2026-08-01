@@ -111,6 +111,24 @@ def test_decode_priority_over_extend() -> None:
     assert out.total_num_scheduled_tokens == 4
 
 
+def test_decode_read_write_sets_target_query_token() -> None:
+    role = RoleConfig(
+        model_backend="mock",
+        enable_overlap=False,
+        max_num_scheduled_tokens=4,
+    )
+    sched, _ = _make(role)
+    req = build_req_from_generate("d", "m", list(range(4)), 1, "n0")
+    req.num_computed_tokens = 4
+    sched.add_request(req)
+
+    out = sched.schedule()
+    assert out.req_forward_modes["d"] == ForwardMode.DECODE
+    assert out.num_scheduled_tokens["d"] == 1
+    assert [(io.token_start, io.token_end) for io in out.read_set] == [(0, 3)]
+    assert [(io.token_start, io.token_end) for io in out.write_set] == [(3, 4)]
+
+
 def test_admission_rejects_over_max_model_length() -> None:
     role = RoleConfig(max_model_length=10, model_backend="mock")
     sched, _ = _make(role)
