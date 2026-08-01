@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelLoadInfo, ModelRunner
 from engine.pool_iface import PoolIface
@@ -12,8 +10,7 @@ from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams, SchedulerOutput
 
 
-ROOT = Path(__file__).resolve().parents[3]
-QWEN3_0_6B_MODEL_ID = str(ROOT / "examples/models/Qwen/Qwen3-0.6B")
+QWEN3_0_6B_MODEL_ID = "Qwen/Qwen3-0.6B"
 
 
 def test_commit_does_not_undercut_newer_prepare() -> None:

@@ -154,11 +154,6 @@ lake/
 > git clone --recurse-submodules --depth 1 --shallow-submodules <repo>
 > ```
 > （浅克隆后无法在 submodule 内切换 ref，升级 submodule 需先 `git submodule deinit -f <path>` 再重新深克隆 init。）
->
-> `examples/models/Qwen/Qwen3-0.6B` 是 Hugging Face 模型仓库 submodule，只用于读取 config/tokenizer 等测试 fixture。初始化它时建议跳过 LFS smudge，避免下载权重：
-> ```bash
-> GIT_LFS_SKIP_SMUDGE=1 git submodule update --init --depth 1 examples/models/Qwen/Qwen3-0.6B
-> ```
 
 ## Python 开发环境（uv）
 
