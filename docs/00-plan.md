@@ -137,7 +137,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 - **Python 开发环境用 `uv` 管理**：从仓库根执行 `uv venv --python 3.12`、`source .venv/bin/activate`、`uv pip install -e "./python[dev]"`。
 - **边界**：`uv` 只管 Python 开发依赖与本地测试环境；Rust / Go 仍分别使用 `cargo` / `go`，三语言构建入口不合并到 uv。
 - **Torch/CUDA/Triton/Transformers**：Torch 是 Python 计算层基础依赖；模型加载用安装依赖 `transformers` 的 `AutoConfig.from_pretrained(model_path)` 读取 HF config，再按 `config.architectures` 进入 lake model registry，`3rdparty/transformers` 只作源码参考、不进安装路径。本机 CUDA wheel 由安装源/平台解析决定（如 PyPI 默认 CUDA wheel 或 PyTorch 指定 CUDA index），`cuda` extra 仅补 Triton 开发路径。对照 vLLM 与 SGLang：两者都在包依赖和 `ModelRunner` / `InputBatch` / Qwen3 模型热路径中硬依赖 `torch`，因此 lake 的生产 Qwen3 backend 也不把 Torch 伪装成可选依赖；但 `engine` / `runtime` 轻量 import、mock 测试路径仍应避免顶层触发 Torch。
-- **模型启动参数**：计算 worker 使用 `LAKE_MODEL_PATH`（或测试里显式传 `RoleConfig.model_path` / 本地模型目录）作为加载源；不再有 `default_model_id`。对外名称用 `LAKE_SERVED_MODEL_NAME`，默认 `"model"`，不从模型路径派生，避免暴露本地存储路径。加载时由 `AutoConfig.from_pretrained(model_path)` / loader 自然抛出加载错误，再按 HF config 的 `architectures` 判断模型类是否支持；KV Pool 命名空间仍按 #49 单独讨论。
+- **模型启动参数**：计算 worker 使用 `LAKE_MODEL_PATH`（或测试里显式传 `RoleConfig.model_path` / 本地模型目录）作为加载源；不再有 `default_model_id`。对外名称用 `LAKE_SERVED_MODEL_NAME`，默认 `"model"`，不从模型路径派生，避免暴露本地存储路径。加载时由 `AutoConfig.from_pretrained(model_path)` / loader 自然抛出加载错误，再按 HF config 的 `architectures` 判断模型类是否支持；KV Pool 命名空间仍按 #49 单独讨论。`examples/models/Qwen/Qwen3-0.6B` 作为 HF 模型仓库 submodule 提供本地 config/tokenizer fixture，初始化时用 `GIT_LFS_SKIP_SMUDGE=1` 避免下载权重。
 - **参考取向**：vLLM 更偏 uv-first（推荐 `uv venv`、`uv pip install ... --torch-backend=auto`）；SGLang 也推荐 uv 并在 CI/Docker 中使用，但保留平台 fallback。lake 采用其开发环境管理经验，不改变既定语言技术选型。
 
 ### 模块与目录划分
