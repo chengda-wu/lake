@@ -43,6 +43,7 @@ class LoadedModel:
     model_id: str
     revision: str
     backend: str
+    load_format: str = "dummy"
     config: Any | None = None
     model: object | None = None
     load_dummy_weights: bool = False
@@ -106,6 +107,7 @@ def load_registered_model(
     backend: str,
     model_id: str,
     revision: str = "",
+    load_format: str = "dummy",
     config_override: Any | None = None,
 ) -> LoadedModel:
     _require_model_id(model_id)
@@ -113,17 +115,16 @@ def load_registered_model(
     architectures = list(getattr(config, "architectures", None) or [])
     model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
-    from engine.model_executor.models.loader import DummyModelLoader
+    from engine.model_executor.models.loader import get_model_loader
 
-    model = DummyModelLoader(
-        model_cls,
-        config,
-    ).load_model()
+    loader = get_model_loader(load_format, model_id=model_id, revision=revision)
+    model = loader.load_model(model_cls, config)
     return LoadedModel(
         model_id=model_id,
         revision=revision,
         backend=backend,
+        load_format=load_format,
         config=config,
         model=model,
-        load_dummy_weights=True,
+        load_dummy_weights=load_format == "dummy",
     )

@@ -1,4 +1,9 @@
-from engine.model_executor.models.loader import DummyModelLoader
+from engine.model_executor.models.loader import (
+    BaseModelLoader,
+    DefaultModelLoader,
+    DummyModelLoader,
+    get_model_loader,
+)
 from engine.model_executor.models.registry import (
     LoadedModel,
     ModelRegistry,
@@ -9,11 +14,14 @@ from transformers import Qwen3Config
 
 __all__ = [
     "DummyModelLoader",
+    "BaseModelLoader",
+    "DefaultModelLoader",
     "LoadedModel",
     "ModelRegistry",
     "Qwen3Config",
     "Qwen3ForCausalLM",
     "Qwen3Model",
+    "get_model_loader",
     "load_hf_config",
     "load_registered_model",
 ]

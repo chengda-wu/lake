@@ -33,6 +33,7 @@ class ModelLoadInfo:
     model_id: str
     revision: str
     backend: str
+    load_format: str = "dummy"
     load_dummy_weights: bool = False
     weight_pinned: bool = False
 
@@ -94,6 +95,7 @@ class ModelRunner:
         *,
         model_id: str = "",
         revision: str = "",
+        load_format: str = "dummy",
         load_dummy_weights: bool = False,
         pin_weights: bool = True,
     ) -> ModelLoadInfo:
@@ -114,6 +116,7 @@ class ModelRunner:
                 model_id=self._model_id,
                 revision=self._model_revision,
                 backend=self.model_backend,
+                load_format=load_format,
                 load_dummy_weights=load_dummy_weights,
                 weight_pinned=pin_weights,
             )
@@ -122,6 +125,7 @@ class ModelRunner:
             backend=self.model_backend,
             model_id=model_id,
             revision=revision,
+            load_format=load_format,
             config_override=self._config_override,
         )
         self._model = loaded.model
@@ -133,6 +137,7 @@ class ModelRunner:
             model_id=self._model_id,
             revision=self._model_revision,
             backend=self.model_backend,
+            load_format=loaded.load_format,
             load_dummy_weights=load_dummy_weights or loaded.load_dummy_weights,
             weight_pinned=pin_weights,
         )
