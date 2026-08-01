@@ -1,5 +1,6 @@
-"""共置投机：同一 Drafter 的 post_forward / pre_forward（仿 SGLang）。"""
+"""共置投机占位。
 
-from engine.drafter.tiny_mtp import TinyMTPDrafter
+TinyLM 版 drafter 已移除；后续随真实 draft/spec 模型重新接入。
+"""
 
-__all__ = ["TinyMTPDrafter"]
+__all__: list[str] = []

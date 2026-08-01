@@ -1,4 +1,4 @@
-"""C8：InputBatch + AttentionMetadata + TinyLM 残差 / 同批两请求。"""
+"""C8：InputBatch + AttentionMetadata + 同批两请求。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from engine.agents.memory import InMemoryAgent
 from engine.model_executor.layers.attentions import build_attn_metadata
 from engine.input_batch import InputBatch, InputBuffers
 from engine.model_runner import ModelRunner
-from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan, ReadyHandle
 from kernels.attn_ref import causal_attn_queries
@@ -26,18 +25,9 @@ def test_causal_attn_queries_matches_full_slice() -> None:
         assert all(abs(x - y) < 1e-9 for x, y in zip(a, b))
 
 
-def test_tiny_residual_matches_full_last() -> None:
-    m = TinyLM(vocab_size=64, d_model=16, n_heads=4, seed=3, attn_backend="ref")
-    toks = [1, 2, 3, 4, 5]
-    full = m.forward_logits(toks)
-    rows = m.forward_query_logits(toks, 4, 5)
-    assert len(rows) == 1
-    assert all(abs(a - b) < 1e-9 for a, b in zip(full, rows[0]))
-
-
 def test_prepare_inputs_attn_metadata() -> None:
     pool = PoolIface(InMemoryAgent())
-    runner = ModelRunner(pool, model_backend="tiny_lm", tiny_lm=TinyLM(attn_backend="ref"))
+    runner = ModelRunner(pool, model_backend="mock")
     req = build_req_from_generate("r", "m", list(range(8)), 2, "n0")
     out = SchedulerOutput(
         step_id=1,
@@ -60,21 +50,19 @@ def test_prepare_inputs_attn_metadata() -> None:
     assert meta.block_table_tensor == [[0, 1]]
 
 
-def test_two_reqs_same_batch_tiny() -> None:
+def test_two_reqs_same_batch_mock() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     role = RoleConfig(
-        model_backend="tiny_lm",
+        model_backend="mock",
         enable_overlap=False,
         max_running_reqs=4,
         max_num_scheduled_tokens=64,
     )
-    runner = ModelRunner(
-        pool, model_backend="tiny_lm", tiny_lm=TinyLM(vocab_size=128, d_model=16, n_heads=4, attn_backend="ref")
-    )
+    runner = ModelRunner(pool, model_backend="mock")
     sched = NodeScheduler(pool, runner, role)
-    sched.add_request(build_req_from_generate("a", "tiny", list(range(6)), 2, "n0"))
-    sched.add_request(build_req_from_generate("b", "tiny", list(range(6, 12)), 2, "n0"))
+    sched.add_request(build_req_from_generate("a", "mock", list(range(6)), 2, "n0"))
+    sched.add_request(build_req_from_generate("b", "mock", list(range(6, 12)), 2, "n0"))
     out = sched.schedule()
     assert len(out.num_scheduled_tokens) == 2
     assert out.forward_mode == ForwardMode.EXTEND

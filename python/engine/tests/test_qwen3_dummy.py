@@ -16,9 +16,7 @@ from engine.model_executor.models.qwen.qwen3 import (
 )
 from engine.model_executor.models.registry import (
     ModelRegistry,
-    ModelSpec,
     load_hf_config,
-    register_model_spec,
 )
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
@@ -136,6 +134,9 @@ class UnitCustomForCausalLM:
         self.config = config
         self.loaded_weights: set[str] = set()
 
+    def state_dict(self) -> dict[str, object]:
+        return {"unit.weight": object()}
+
     def load_weights(self, weights) -> set[str]:
         self.loaded_weights = {name for name, _ in weights}
         return set(self.loaded_weights)
@@ -151,20 +152,13 @@ class UnitUnsupportedConfig:
 
 def test_model_runner_uses_registered_architecture_for_load_model() -> None:
     ModelRegistry.register_model("UnitCustomForCausalLM", UnitCustomForCausalLM)
-    register_model_spec(
-        ModelSpec(
-            backend="unit_custom",
-            dummy_weight_names=("unit.weight",),
-            load_dummy_weights=True,
-        )
-    )
     ag = InMemoryAgent()
     pool = PoolIface(ag)
-    runner = ModelRunner(pool, model_backend="unit_custom", model_config=UnitCustomConfig())
+    runner = ModelRunner(pool, model_backend="qwen3", model_config=UnitCustomConfig())
     info = runner.load_model(model_id="unit/custom", revision="r1")
     assert info.model_id == "unit/custom"
     assert info.revision == "r1"
-    assert info.backend == "unit_custom"
+    assert info.backend == "qwen3"
     assert info.load_dummy_weights is True
 
 

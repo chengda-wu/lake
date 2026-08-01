@@ -79,11 +79,11 @@ class NodeScheduler:
 
     @property
     def _use_runner_tokens(self) -> bool:
-        return self._role.model_backend in ("qwen3", "tiny_lm")
+        return self._role.model_backend == "qwen3"
 
     @property
     def _spec_enabled(self) -> bool:
-        return self._role.enable_drafter and self._use_runner_tokens
+        return False
 
     @property
     def future_map(self) -> FutureMap:

@@ -8,24 +8,17 @@ C8：`prepare_inputs` / `prepare_attn` / `sample_tokens` 拆步；残差 query �
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from engine.model_executor.layers.attentions import AttentionMetadata, build_attn_metadata
-from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.input_batch import InputBatch, InputBuffers
 from engine.model_executor.models.registry import load_registered_model
-from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from engine.sample.greedy import greedy_sample
 from engine.sample.grammar import apply_token_bitmask
-from engine.sample.reject import chain_reject_sample
 from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, SamplingParams, SchedulerOutput
-
-if TYPE_CHECKING:
-    from engine.model_executor.models.qwen.qwen3 import Qwen3ForCausalLM
-
 
 @dataclass
 class ModelRunnerOutput:
@@ -60,10 +53,6 @@ class ModelRunner:
         *,
         model_backend: str = "qwen3",
         model_config: Optional[Any] = None,
-        tiny_lm: Optional[TinyLM] = None,
-        enable_drafter: bool = False,
-        num_draft_tokens: int = 2,
-        drafter: Optional[TinyMTPDrafter] = None,
         weight_pin_callback: Optional[Callable[[ModelLoadInfo], None]] = None,
     ) -> None:
         self._pool = pool
@@ -72,17 +61,12 @@ class ModelRunner:
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
         self._config_override = model_config
-        self._qwen3: Optional["Qwen3ForCausalLM"] = None
-        self._tiny: Optional[TinyLM] = tiny_lm
-        self.enable_drafter = enable_drafter
-        self._num_draft_tokens = num_draft_tokens
-        self._drafter: Optional[TinyMTPDrafter] = drafter
+        self._model: Optional[Any] = None
         self._weight_pin_callback = weight_pin_callback
         self._model_id = ""
         self._model_revision = ""
         self._model_loaded = False
         self._model_warmed = False
-        self._ensure_backend_initialized()
 
     @property
     def model_loaded(self) -> bool:
@@ -105,17 +89,6 @@ class ModelRunner:
             warmed=self._model_warmed,
         )
 
-    def _ensure_backend_initialized(self) -> None:
-        if self.model_backend == "tiny_lm" and self._tiny is None:
-            self._tiny = TinyLM()
-        if self.enable_drafter and self._drafter is None and self._tiny is not None:
-            self._drafter = TinyMTPDrafter(
-                num_draft_tokens=self._num_draft_tokens,
-                vocab_size=self._tiny.vocab_size,
-                d_model=self._tiny.d_model,
-                n_heads=self._tiny.n_heads,
-            )
-
     def load_model(
         self,
         *,
@@ -131,15 +104,27 @@ class ModelRunner:
         权重所有权仍归存储池。
         """
 
-        self._ensure_backend_initialized()
+        if self.model_backend == "mock":
+            self._model = None
+            self._model_id = model_id
+            self._model_revision = revision
+            self._model_loaded = True
+            self._model_warmed = False
+            return ModelLoadInfo(
+                model_id=self._model_id,
+                revision=self._model_revision,
+                backend=self.model_backend,
+                load_dummy_weights=load_dummy_weights,
+                weight_pinned=pin_weights,
+            )
+
         loaded = load_registered_model(
             backend=self.model_backend,
             model_id=model_id,
             revision=revision,
             config_override=self._config_override,
         )
-        if loaded.runner_attr:
-            setattr(self, loaded.runner_attr, loaded.model)
+        self._model = loaded.model
         self._model_id = loaded.model_id
         self._model_revision = loaded.revision
         self._model_loaded = True
@@ -246,7 +231,8 @@ class ModelRunner:
         """从本步 logits 采样；接口预留与 `execute_model` 拆分（对齐 V2）。"""
         out: Dict[str, List[int]] = {}
         drafts_out: Dict[str, List[int]] = {}
-        spec_map = output.scheduled_spec_decode_tokens or {}
+        if output.scheduled_spec_decode_tokens:
+            raise NotImplementedError("speculative verification requires a draft model")
         grammar = output.grammar_output
         deferred = set(grammar.deferred_req_ids if grammar is not None else [])
         bitmasks = grammar.token_bitmask_by_req if grammar is not None else {}
@@ -256,22 +242,10 @@ class ModelRunner:
             req = host_reqs.get(req_id)
             if req is None:
                 continue
-            draft = list(spec_map.get(req_id) or [])
-            if draft:
-                assert self._tiny is not None
-                accepted = chain_reject_sample(
-                    req.all_token_ids, draft, self._tiny.greedy_token
-                )
-                out[req_id] = accepted
-            else:
-                masked_logits = logits
-                if req_id in bitmasks:
-                    masked_logits = apply_token_bitmask(logits, bitmasks[req_id])
-                out[req_id] = [greedy_sample(masked_logits)]
-            if self._drafter is not None and req_id in out:
-                new_ctx = list(req.all_token_ids) + list(out[req_id])
-                self._drafter.post_forward(req_id, new_ctx)
-                drafts_out[req_id] = self._drafter.pre_forward(req_id)
+            masked_logits = logits
+            if req_id in bitmasks:
+                masked_logits = apply_token_bitmask(logits, bitmasks[req_id])
+            out[req_id] = [greedy_sample(masked_logits)]
         return out, drafts_out
 
     def execute_model(
@@ -303,10 +277,8 @@ class ModelRunner:
 
         batch = self.prepare_inputs(output, host)
         _meta = self.prepare_attn(batch, ready)
-        if self.model_backend == "tiny_lm":
-            next_tokens, next_drafts = self._forward_tiny(output, host, batch)
-        elif self.model_backend == "qwen3":
-            next_tokens, next_drafts = self._forward_qwen3(output, host, batch)
+        if self.model_backend == "qwen3":
+            next_tokens, next_drafts = self._forward_model(output, host, batch)
         else:
             for req_id, n in output.num_scheduled_tokens.items():
                 if n <= 0:
@@ -324,13 +296,13 @@ class ModelRunner:
             model_backend=self.model_backend,
         )
 
-    def _forward_qwen3(
+    def _forward_model(
         self,
         output: SchedulerOutput,
         host_reqs: Mapping[str, Req],
         batch: InputBatch,
     ) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
-        assert self._qwen3 is not None
+        assert self._model is not None
         last_logits: Dict[str, List[float]] = {}
         for req_id in batch.req_ids:
             if batch.is_prompt_phase.get(req_id, False):
@@ -338,66 +310,24 @@ class ModelRunner:
             req = host_reqs.get(req_id)
             if req is None:
                 continue
-            last_logits[req_id] = self._qwen3_dummy_logits(req.all_token_ids)
+            last_logits[req_id] = self._dummy_model_logits(req.all_token_ids)
         return self.sample_tokens(output, host_reqs, last_logits)
 
-    def _qwen3_dummy_logits(self, context: List[int]) -> List[float]:
-        assert self._qwen3 is not None
-        cfg = self._qwen3.config
+    def _dummy_model_logits(self, context: List[int]) -> List[float]:
+        assert self._model is not None
+        cfg = self._model.config
         logits = [0.0] * cfg.vocab_size
-        logits[self._qwen3_dummy_token(context)] = 1.0
+        logits[self._dummy_model_token(context)] = 1.0
         return logits
 
-    def _qwen3_dummy_token(self, context: List[int]) -> int:
-        assert self._qwen3 is not None
-        cfg = self._qwen3.config
+    def _dummy_model_token(self, context: List[int]) -> int:
+        assert self._model is not None
+        cfg = self._model.config
         seed = context[-1] if context else cfg.bos_token_id
         return (int(seed) + len(context) + cfg.num_hidden_layers) % cfg.vocab_size
 
-    def _forward_tiny(
-        self,
-        output: SchedulerOutput,
-        host_reqs: Mapping[str, Req],
-        batch: InputBatch,
-    ) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
-        assert self._tiny is not None
-        last_logits: Dict[str, List[float]] = {}
-        drafts_prompt: Dict[str, List[int]] = {}
-        spec_map = output.scheduled_spec_decode_tokens or {}
-        for req_id, draft in list(spec_map.items()):
-            n = batch.num_scheduled_tokens.get(req_id, 0)
-            spec_map[req_id] = list(draft)[: max(0, n - 1)]
-
-        for req_id in batch.req_ids:
-            tokens = batch.token_ids[req_id]
-            qs = batch.query_start[req_id]
-            qe = batch.query_end[req_id]
-            logits_rows = self._tiny.forward_query_logits(tokens, qs, qe)
-            if batch.is_prompt_phase.get(req_id, False):
-                # EXTEND：不产出 user token；整段 prompt 算完后挂 draft
-                req = host_reqs[req_id]
-                prompt_len = len(req.prompt_token_ids)
-                computed = batch.num_computed_tokens[req_id]
-                n = batch.num_scheduled_tokens[req_id]
-                if self._drafter is not None and computed + n >= prompt_len:
-                    self._drafter.post_forward(req_id, req.prompt_token_ids)
-                    drafts_prompt[req_id] = self._drafter.pre_forward(req_id)
-                continue
-            if logits_rows:
-                last_logits[req_id] = logits_rows[-1]
-
-        # TARGET_VERIFY：走 sample 内 reject（可能无 last_logits）
-        for req_id, draft in spec_map.items():
-            if draft and req_id not in last_logits and req_id in batch.req_ids:
-                last_logits[req_id] = [0.0] * self._tiny.vocab_size
-
-        sampled, drafts = self.sample_tokens(output, host_reqs, last_logits)
-        drafts.update(drafts_prompt)
-        return sampled, drafts
-
     def clear_drafter(self, req_id: str) -> None:
-        if self._drafter is not None:
-            self._drafter.clear(req_id)
+        return None
 
     def dummy_run(
         self,
