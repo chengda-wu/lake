@@ -2,27 +2,35 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
+from transformers import Qwen3Config
 
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelRunner
 from engine.model_executor.models.loader import DummyModelLoader
 
-from engine.model_executor.models.qwen.qwen3_meta import (
-    QWEN3_0_6B_CONFIG,
-    QWEN3_0_6B_MODEL_ID,
-    Qwen3Config,
-)
 from engine.model_executor.models.qwen.qwen3 import (
     Qwen3ForCausalLM,
 )
-from engine.model_executor.models.registry import ModelRegistry, ModelSpec, register_model_spec
+from engine.model_executor.models.registry import (
+    ModelRegistry,
+    ModelSpec,
+    load_hf_config,
+    register_model_spec,
+)
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from runtime.req import Req
 from runtime.node_scheduler import NodeScheduler, build_req_from_generate
 from runtime.role import RoleConfig
 from runtime.scheduler_output import ForwardMode, GrammarOutput, SamplingParams, SchedulerOutput
+
+
+ROOT = Path(__file__).resolve().parents[3]
+QWEN3_0_6B_MODEL_ID = str(ROOT / "examples/models/Qwen/Qwen3-0.6B")
+QWEN3_0_6B_CONFIG = load_hf_config(QWEN3_0_6B_MODEL_ID)
 
 
 def test_qwen3_config_matches_dense_0_6b_shape() -> None:
@@ -38,7 +46,8 @@ def test_qwen3_config_matches_dense_0_6b_shape() -> None:
     assert cfg.head_dim == 128
     assert cfg.vocab_size == 151936
     assert cfg.max_position_embeddings == 40960
-    assert cfg.dtype is torch.bfloat16
+    dtype = getattr(cfg, "dtype", None) or getattr(cfg, "torch_dtype", None)
+    assert dtype is torch.bfloat16
 
 
 def test_dummy_model_loader_loads_qwen3() -> None:
@@ -104,7 +113,7 @@ def test_qwen3_module_tree_matches_vllm_packed_layout() -> None:
     assert model.lm_head is model.model.embed_tokens
 
 
-def test_qwen3_load_model_requires_explicit_supported_model_id() -> None:
+def test_qwen3_load_model_requires_explicit_model_id_and_supported_architecture() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="qwen3")
@@ -114,11 +123,12 @@ def test_qwen3_load_model_requires_explicit_supported_model_id() -> None:
     except ValueError as e:
         assert "model_id is required" in str(e)
 
+    unsupported = ModelRunner(pool, model_backend="qwen3", model_config=UnitUnsupportedConfig())
     try:
-        runner.load_model(model_id="Qwen/Other")
-        raise AssertionError("expected unsupported model_id")
+        unsupported.load_model(model_id="unit/unsupported")
+        raise AssertionError("expected unsupported architecture")
     except NotImplementedError as e:
-        assert "unsupported model_id" in str(e)
+        assert "Model architectures" in str(e)
 
 
 class UnitCustomForCausalLM:
@@ -135,20 +145,22 @@ class UnitCustomConfig:
     architectures = ["UnitCustomForCausalLM"]
 
 
+class UnitUnsupportedConfig:
+    architectures = ["UnitUnsupportedForCausalLM"]
+
+
 def test_model_runner_uses_registered_architecture_for_load_model() -> None:
     ModelRegistry.register_model("UnitCustomForCausalLM", UnitCustomForCausalLM)
     register_model_spec(
         ModelSpec(
-            model_id="unit/custom",
             backend="unit_custom",
-            config=UnitCustomConfig(),
             dummy_weight_names=("unit.weight",),
             load_dummy_weights=True,
         )
     )
     ag = InMemoryAgent()
     pool = PoolIface(ag)
-    runner = ModelRunner(pool, model_backend="unit_custom")
+    runner = ModelRunner(pool, model_backend="unit_custom", model_config=UnitCustomConfig())
     info = runner.load_model(model_id="unit/custom", revision="r1")
     assert info.model_id == "unit/custom"
     assert info.revision == "r1"

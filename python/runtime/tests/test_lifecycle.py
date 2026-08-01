@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import threading
 import time
 
 from engine.model_runner import ModelRunner
-from engine.model_executor.models.qwen.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from runtime.lifecycle import WorkerLifecycle, WorkerState
 from runtime.node_scheduler import build_req_from_generate
 from runtime.role import RoleConfig
 from runtime.worker_engine import WorkerEngine, _Inbound
+
+
+ROOT = Path(__file__).resolve().parents[3]
+QWEN3_0_6B_MODEL_ID = str(ROOT / "examples/models/Qwen/Qwen3-0.6B")
 
 
 class FakePool:

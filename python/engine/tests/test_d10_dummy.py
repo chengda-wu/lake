@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelLoadInfo, ModelRunner
-from engine.model_executor.models.qwen.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan
 from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams, SchedulerOutput
+
+
+ROOT = Path(__file__).resolve().parents[3]
+QWEN3_0_6B_MODEL_ID = str(ROOT / "examples/models/Qwen/Qwen3-0.6B")
 
 
 def test_commit_does_not_undercut_newer_prepare() -> None:
@@ -127,8 +132,9 @@ def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
     assert pins == [info]
     assert runner.model_loaded is True
     assert runner.model_warmed is False
-    assert runner.qwen3_config.num_hidden_layers == 28
-    assert runner.qwen3_config.num_key_value_heads == 8
+    assert runner._qwen3 is not None  # noqa: SLF001
+    assert runner._qwen3.config.num_hidden_layers == 28  # noqa: SLF001
+    assert runner._qwen3.config.num_key_value_heads == 8  # noqa: SLF001
 
     out = runner.warmup(num_reqs=2, tokens_per_req=1)
     assert out.step_id == -1

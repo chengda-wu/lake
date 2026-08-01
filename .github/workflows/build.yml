@@ -68,7 +68,7 @@ jobs:
         with:
           python-version: "3.12"
       # stub 顶部校验 protobuf runtime ≥ 7.35.0 / grpcio ≥ 1.82.1(见 python/pyproject.toml)；
-      # Qwen3 config 直接来自 transformers，轻量 import 路径不安装 torch。
+      # Qwen3 config 由 transformers AutoConfig 读取，轻量 import 路径不安装 torch。
       # 装运行时依赖即可,空壳阶段不 pip install -e .(PEP 668 机器会炸;
       # worker 包就在 python/ 下,PYTHONPATH 直接 import,与本地验证一致)。
       - run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0" "transformers"

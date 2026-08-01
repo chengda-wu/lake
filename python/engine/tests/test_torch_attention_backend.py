@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from engine.model_executor.layers.attention import TorchAttentionBackend
+from engine.model_executor.layers.attentions import TorchAttentionBackend
 from engine.model_executor.models.qwen.qwen3 import Qwen3PagedAttention
 
 

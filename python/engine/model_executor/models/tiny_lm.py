@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Sequence
 
-from engine.model_executor.layers.attention import AttentionBackend, build_attn_backend
+from engine.model_executor.layers.attentions import AttentionBackend, build_attn_backend
 
 
 def _lcg(seed: int) -> int:
