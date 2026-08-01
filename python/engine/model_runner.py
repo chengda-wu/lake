@@ -30,7 +30,8 @@ class ModelRunnerOutput:
 
 @dataclass(frozen=True)
 class ModelLoadInfo:
-    model_id: str
+    model_path: str
+    served_model_name: str
     revision: str
     backend: str
     load_format: str = "dummy"
@@ -40,7 +41,8 @@ class ModelLoadInfo:
 
 @dataclass(frozen=True)
 class ModelRunnerStatus:
-    model_id: str
+    model_path: str
+    served_model_name: str
     revision: str
     backend: str
     loaded: bool
@@ -64,7 +66,8 @@ class ModelRunner:
         self._config_override = model_config
         self._model: Optional[Any] = None
         self._weight_pin_callback = weight_pin_callback
-        self._model_id = ""
+        self._model_path = ""
+        self._served_model_name = "model"
         self._model_revision = ""
         self._model_loaded = False
         self._model_warmed = False
@@ -78,12 +81,17 @@ class ModelRunner:
         return self._model_warmed
 
     @property
-    def model_id(self) -> str:
-        return self._model_id
+    def model_path(self) -> str:
+        return self._model_path
+
+    @property
+    def served_model_name(self) -> str:
+        return self._served_model_name
 
     def status(self) -> ModelRunnerStatus:
         return ModelRunnerStatus(
-            model_id=self._model_id,
+            model_path=self._model_path,
+            served_model_name=self._served_model_name,
             revision=self._model_revision,
             backend=self.model_backend,
             loaded=self._model_loaded,
@@ -93,7 +101,8 @@ class ModelRunner:
     def load_model(
         self,
         *,
-        model_id: str = "",
+        model_path: str = "",
+        served_model_name: str = "model",
         revision: str = "",
         load_format: str = "dummy",
         load_dummy_weights: bool = False,
@@ -108,12 +117,14 @@ class ModelRunner:
 
         if self.model_backend == "mock":
             self._model = None
-            self._model_id = model_id
+            self._model_path = model_path
+            self._served_model_name = served_model_name or "model"
             self._model_revision = revision
             self._model_loaded = True
             self._model_warmed = False
             return ModelLoadInfo(
-                model_id=self._model_id,
+                model_path=self._model_path,
+                served_model_name=self._served_model_name,
                 revision=self._model_revision,
                 backend=self.model_backend,
                 load_format=load_format,
@@ -123,18 +134,20 @@ class ModelRunner:
 
         loaded = load_registered_model(
             backend=self.model_backend,
-            model_id=model_id,
+            model_path=model_path,
             revision=revision,
             load_format=load_format,
             config_override=self._config_override,
         )
         self._model = loaded.model
-        self._model_id = loaded.model_id
+        self._model_path = loaded.model_path
+        self._served_model_name = served_model_name or "model"
         self._model_revision = loaded.revision
         self._model_loaded = True
         self._model_warmed = False
         info = ModelLoadInfo(
-            model_id=self._model_id,
+            model_path=self._model_path,
+            served_model_name=self._served_model_name,
             revision=self._model_revision,
             backend=self.model_backend,
             load_format=loaded.load_format,
@@ -154,9 +167,10 @@ class ModelRunner:
         """C12：warmup 复用生产 dummy 入口，但跳过 pool.done。"""
 
         if not self._model_loaded:
-            if not self._model_id:
-                raise ValueError("model must be loaded before warmup; model_id is required")
-            self.load_model(model_id=self._model_id)
+            self.load_model(
+                model_path=self._model_path,
+                served_model_name=self._served_model_name,
+            )
         out = self.dummy_run(
             num_reqs=num_reqs,
             tokens_per_req=tokens_per_req,
@@ -346,13 +360,13 @@ class ModelRunner:
         用于 warmup / graph capture 占位；构造 dummy host req / ready，不触发
         pool.prepare_step 或 pool.done。
         """
-        if not self._model_id:
-            raise ValueError("model must be loaded before dummy_run; model_id is required")
+        if not self._model_loaded:
+            raise ValueError("model must be loaded before dummy_run")
         num_tokens = {f"dummy-{i}": tokens_per_req for i in range(num_reqs)}
         host_reqs = {
             rid: Req(
                 req_id=rid,
-                model_id=self._model_id,
+                served_model_name=self._served_model_name,
                 prompt_token_ids=list(range(tokens_per_req)),
                 sampling_params=SamplingParams(max_new_tokens=1),
             )

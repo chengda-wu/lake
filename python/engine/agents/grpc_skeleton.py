@@ -91,10 +91,10 @@ class GrpcSkeletonAgent:
         if not hashes:
             return PrefixHint()
         try:
-            self._ensure_model(req.model_id)
+            self._ensure_model(req.served_model_name)
             lookup = self._cp.LookupPrefix(
                 lake_pb2.LookupPrefixRequest(
-                    model_id=req.model_id,
+                    model_id=req.served_model_name,
                     prefix_hashes=hashes,
                     requester_node_id=req.node_id,
                     revision="",
@@ -177,10 +177,10 @@ class GrpcSkeletonAgent:
     def _ensure_prefix_kv(self, req: Req) -> StepStats:
         prompt = req.prompt_token_ids
         hashes = chain_block_hashes(prompt)
-        self._ensure_model(req.model_id)
+        self._ensure_model(req.served_model_name)
         ids = [
             schema_pb2.KVBlockID(
-                model_id=req.model_id,
+                model_id=req.served_model_name,
                 block_hash=h,
                 pool_kind=schema_pb2.TARGET,
                 scope="public",
@@ -191,7 +191,7 @@ class GrpcSkeletonAgent:
 
         lookup = self._cp.LookupPrefix(
             lake_pb2.LookupPrefixRequest(
-                model_id=req.model_id,
+                model_id=req.served_model_name,
                 prefix_hashes=hashes,
                 requester_node_id=req.node_id,
                 revision="",

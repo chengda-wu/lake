@@ -55,7 +55,6 @@ def _make_engine(max_running: int = 8, coalesce_s: float = 0.005) -> Tuple[Worke
         enable_overlap=True,
         max_running_reqs=max_running,
         model_backend="mock",
-        model_id="mock-llm",
     )
     eng = WorkerEngine(pool, runner, role, coalesce_s=coalesce_s)  # type: ignore[arg-type]
     eng.start()
@@ -107,7 +106,8 @@ def test_role_config_from_env() -> None:
         "LAKE_ENABLE_DRAFTER",
         "LAKE_MAX_RUNNING_REQS",
         "LAKE_ENABLE_OVERLAP",
-        "LAKE_MODEL_ID",
+        "LAKE_MODEL_PATH",
+        "LAKE_SERVED_MODEL_NAME",
         "LAKE_MODEL_REVISION",
         "LAKE_WARMUP_NUM_REQS",
         "LAKE_WARMUP_TOKENS_PER_REQ",
@@ -119,14 +119,16 @@ def test_role_config_from_env() -> None:
         os.environ["LAKE_ENABLE_DRAFTER"] = "1"
         os.environ["LAKE_MAX_RUNNING_REQS"] = "3"
         os.environ["LAKE_ENABLE_OVERLAP"] = "0"
-        os.environ["LAKE_MODEL_ID"] = QWEN3_0_6B_MODEL_ID
+        os.environ["LAKE_MODEL_PATH"] = QWEN3_0_6B_MODEL_ID
+        os.environ["LAKE_SERVED_MODEL_NAME"] = "public-qwen"
         os.environ["LAKE_MODEL_REVISION"] = "r1"
         os.environ["LAKE_WARMUP_NUM_REQS"] = "2"
         os.environ["LAKE_WARMUP_TOKENS_PER_REQ"] = "3"
         cfg = RoleConfig.from_env()
         assert cfg.role == WorkerRole.PREFILL
         assert cfg.model_backend == "qwen3"
-        assert cfg.model_id == QWEN3_0_6B_MODEL_ID
+        assert cfg.model_path == QWEN3_0_6B_MODEL_ID
+        assert cfg.served_model_name == "public-qwen"
         assert cfg.model_revision == "r1"
         assert cfg.enable_drafter is True
         assert cfg.max_running_reqs == 3
@@ -141,17 +143,24 @@ def test_role_config_from_env() -> None:
                 os.environ[k] = v
 
 
-def test_role_config_from_env_does_not_default_model_id() -> None:
-    saved = os.environ.get("LAKE_MODEL_ID")
+def test_role_config_from_env_defaults_served_model_name_not_model_path() -> None:
+    saved_path = os.environ.get("LAKE_MODEL_PATH")
+    saved_name = os.environ.get("LAKE_SERVED_MODEL_NAME")
     try:
-        os.environ.pop("LAKE_MODEL_ID", None)
+        os.environ.pop("LAKE_MODEL_PATH", None)
+        os.environ.pop("LAKE_SERVED_MODEL_NAME", None)
         cfg = RoleConfig.from_env()
-        assert cfg.model_id == ""
+        assert cfg.model_path == ""
+        assert cfg.served_model_name == "model"
     finally:
-        if saved is None:
-            os.environ.pop("LAKE_MODEL_ID", None)
+        if saved_path is None:
+            os.environ.pop("LAKE_MODEL_PATH", None)
         else:
-            os.environ["LAKE_MODEL_ID"] = saved
+            os.environ["LAKE_MODEL_PATH"] = saved_path
+        if saved_name is None:
+            os.environ.pop("LAKE_SERVED_MODEL_NAME", None)
+        else:
+            os.environ["LAKE_SERVED_MODEL_NAME"] = saved_name
 
 
 def test_role_config_rejects_non_positive_budget() -> None:

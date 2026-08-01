@@ -132,7 +132,11 @@ class PoolIface:
         self._call_agent(
             "on_request_finished",
             lambda: self._agent.on_request_finished(
-                FinishRequest(req_id=req.req_id, node_id=req.node_id, model_id=req.model_id)
+                FinishRequest(
+                    req_id=req.req_id,
+                    node_id=req.node_id,
+                    model_id=req.served_model_name,
+                )
             ),
         )
         self._finished_req_ids.add(req.req_id)

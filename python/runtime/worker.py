@@ -94,7 +94,7 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             node = request.requester_node_id or NODE_ID
             req = build_req_from_generate(
                 request_id=request.request_id,
-                model_id=request.model_id,
+                served_model_name=request.model_id or self._role.served_model_name,
                 prompt_tokens=list(request.prompt_tokens),
                 max_new_tokens=request.max_new_tokens or 4,
                 node_id=node,

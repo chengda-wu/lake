@@ -104,7 +104,7 @@ def test_pool_iface_facade() -> None:
     pool = PoolIface(ag, pull_budget_ms=0)
     req = Req(
         req_id="r1",
-        model_id="m",
+        served_model_name="model",
         prompt_token_ids=list(range(8)),
         sampling_params=SamplingParams(max_new_tokens=1),
     )
@@ -137,7 +137,7 @@ def test_pool_iface_finish_idempotent() -> None:
     pool = PoolIface(ag)
     req = Req(
         req_id="r1",
-        model_id="m",
+        served_model_name="model",
         prompt_token_ids=[],
         sampling_params=SamplingParams(max_new_tokens=1),
     )
@@ -211,7 +211,7 @@ def test_timeout_preserves_request_exec_mode() -> None:
     pool = PoolIface(ag, pull_budget_ms=10, allow_partial_hit=False)
     req = Req(
         req_id="r1",
-        model_id="m",
+        served_model_name="model",
         prompt_token_ids=list(range(8)),
         sampling_params=SamplingParams(max_new_tokens=1),
     )

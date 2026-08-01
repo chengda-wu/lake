@@ -658,16 +658,16 @@ class NodeScheduler:
 
 def build_req_from_generate(
     request_id: str,
-    model_id: str,
+    served_model_name: str,
     prompt_tokens: List[int],
     max_new_tokens: int,
     node_id: str,
 ) -> Req:
-    if not model_id:
-        raise ValueError("model_id is required for Generate")
+    if not served_model_name:
+        raise ValueError("served_model_name is required for Generate")
     return Req(
         req_id=request_id,
-        model_id=model_id,
+        served_model_name=served_model_name,
         prompt_token_ids=list(prompt_tokens),
         sampling_params=SamplingParams(max_new_tokens=max_new_tokens or 4),
         node_id=node_id,

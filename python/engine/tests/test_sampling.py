@@ -26,7 +26,7 @@ def test_sample_tokens_uses_grammar_bitmask() -> None:
     runner = ModelRunner(pool, model_backend="mock")
     req = Req(
         req_id="g1",
-        model_id="mock",
+        served_model_name="model",
         prompt_token_ids=[0],
         sampling_params=SamplingParams(max_new_tokens=1, structured_output="json"),
     )
@@ -51,7 +51,7 @@ def test_sample_tokens_can_defer_structured_output() -> None:
     runner = ModelRunner(pool, model_backend="mock")
     req = Req(
         req_id="g2",
-        model_id="mock",
+        served_model_name="model",
         prompt_token_ids=[0],
         sampling_params=SamplingParams(max_new_tokens=1, structured_output="json"),
     )
