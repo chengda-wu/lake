@@ -35,7 +35,7 @@ class CapacitySignal:
     state: WorkerState
     role: str
     model_backend: str
-    model_id: str = ""
+    served_model_name: str = "model"
     model_loaded: bool = False
     model_warmed: bool = False
 

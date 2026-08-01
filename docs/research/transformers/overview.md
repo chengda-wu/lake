@@ -1,6 +1,6 @@
 # Hugging Face Transformers Qwen3 参考
 
-Transformers 是 lake 计算层的**模型定义与 config 依赖**：运行时依赖来自安装包 `transformers`，模型加载时用 `AutoConfig.from_pretrained(model_id/path)` 读取 HF config；`3rdparty/transformers` 只作源码参考，不进入安装路径。它不是推理服务框架参考；服务端调度、KV 管理、并行通信仍以 vLLM/SGLang/Dynamo 为主。
+Transformers 是 lake 计算层的**模型定义与 config 依赖**：运行时依赖来自安装包 `transformers`，模型加载时用 `AutoConfig.from_pretrained(model_path)` 读取 HF config；`3rdparty/transformers` 只作源码参考，不进入安装路径。它不是推理服务框架参考；服务端调度、KV 管理、并行通信仍以 vLLM/SGLang/Dynamo 为主。
 
 ## 借鉴点
 

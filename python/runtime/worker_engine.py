@@ -96,7 +96,7 @@ class WorkerEngine:
             state=self._life.state,
             role=self._role.role.value,
             model_backend=self._role.model_backend,
-            model_id=self._runner.model_id,
+            served_model_name=self._runner.served_model_name,
             model_loaded=self._runner.model_loaded,
             model_warmed=self._runner.model_warmed,
         )
@@ -109,7 +109,8 @@ class WorkerEngine:
             self._life.advance(WorkerState.BOOT)
             self._life.warm()
             self._runner.load_model(
-                model_id=self._role.model_id,
+                model_path=self._role.model_path,
+                served_model_name=self._role.served_model_name,
                 revision=self._role.model_revision,
             )
             self._runner.warmup(

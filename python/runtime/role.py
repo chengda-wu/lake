@@ -45,8 +45,9 @@ class RoleConfig:
     allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
     # qwen3=Qwen3 load/forward 骨架；mock 仅测试用
     model_backend: str = "qwen3"  # qwen3 | mock
-    # C12：模型加载 / warmup 骨架
-    model_id: str = ""
+    # C12：模型加载 / warmup 骨架。model_path 是加载源，不作为 API 名称暴露。
+    model_path: str = ""
+    served_model_name: str = "model"
     model_revision: str = ""
     warmup_num_reqs: int = 1
     warmup_tokens_per_req: int = 1
@@ -76,7 +77,7 @@ class RoleConfig:
         LAKE_NUM_DRAFT_TOKENS / LAKE_MAX_RUNNING_REQS / LAKE_PULL_BUDGET_MS
         LAKE_MAX_NUM_SCHEDULED_TOKENS / LAKE_LONG_PREFILL_TOKEN_THRESHOLD
         LAKE_MAX_MODEL_LENGTH
-        LAKE_MODEL_ID / LAKE_MODEL_REVISION
+        LAKE_MODEL_PATH / LAKE_SERVED_MODEL_NAME / LAKE_MODEL_REVISION
         LAKE_WARMUP_NUM_REQS / LAKE_WARMUP_TOKENS_PER_REQ
         """
         role_raw = os.environ.get("LAKE_WORKER_ROLE", "hybrid").strip().lower()
@@ -89,7 +90,9 @@ class RoleConfig:
         return cls(
             role=role,
             model_backend=backend,
-            model_id=os.environ.get("LAKE_MODEL_ID", "").strip(),
+            model_path=os.environ.get("LAKE_MODEL_PATH", "").strip(),
+            served_model_name=os.environ.get("LAKE_SERVED_MODEL_NAME", "model").strip()
+            or "model",
             model_revision=os.environ.get("LAKE_MODEL_REVISION", "").strip(),
             enable_drafter=_env_bool("LAKE_ENABLE_DRAFTER", False),
             enable_overlap=_env_bool("LAKE_ENABLE_OVERLAP", True),

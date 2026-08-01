@@ -58,7 +58,7 @@ def test_dummy_model_loader_loads_qwen3() -> None:
 
 
 def test_default_model_loader_is_real_weight_boundary() -> None:
-    loader = get_model_loader("hf", model_id=QWEN3_0_6B_MODEL_ID)
+    loader = get_model_loader("hf", model_path=QWEN3_0_6B_MODEL_ID)
     try:
         loader.load_model(Qwen3ForCausalLM, QWEN3_0_6B_CONFIG)
         raise AssertionError("expected real weight loader to be pending")
@@ -117,19 +117,12 @@ def test_qwen3_module_tree_matches_vllm_packed_layout() -> None:
     assert model.lm_head is model.model.embed_tokens
 
 
-def test_qwen3_load_model_requires_explicit_model_id_and_supported_architecture() -> None:
+def test_qwen3_load_model_rejects_unsupported_architecture() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
-    runner = ModelRunner(pool, model_backend="qwen3")
-    try:
-        runner.load_model()
-        raise AssertionError("expected missing model_id")
-    except ValueError as e:
-        assert "model_id is required" in str(e)
-
     unsupported = ModelRunner(pool, model_backend="qwen3", model_config=UnitUnsupportedConfig())
     try:
-        unsupported.load_model(model_id="unit/unsupported")
+        unsupported.load_model(model_path="unit/unsupported")
         raise AssertionError("expected unsupported architecture")
     except NotImplementedError as e:
         assert "Model architectures" in str(e)
@@ -161,8 +154,9 @@ def test_model_runner_uses_registered_architecture_for_load_model() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="qwen3", model_config=UnitCustomConfig())
-    info = runner.load_model(model_id="unit/custom", revision="r1")
-    assert info.model_id == "unit/custom"
+    info = runner.load_model(model_path="unit/custom", revision="r1")
+    assert info.model_path == "unit/custom"
+    assert info.served_model_name == "model"
     assert info.revision == "r1"
     assert info.backend == "qwen3"
     assert info.load_format == "dummy"
@@ -174,14 +168,14 @@ def test_scheduler_qwen3_dummy_finishes() -> None:
     pool = PoolIface(ag)
     role = RoleConfig(
         model_backend="qwen3",
-        model_id=QWEN3_0_6B_MODEL_ID,
+        model_path=QWEN3_0_6B_MODEL_ID,
         enable_overlap=False,
         max_running_reqs=2,
     )
     runner = ModelRunner(pool, model_backend="qwen3")
-    runner.load_model(model_id=QWEN3_0_6B_MODEL_ID)
+    runner.load_model(model_path=QWEN3_0_6B_MODEL_ID)
     sched = NodeScheduler(pool, runner, role)
-    sched.add_request(build_req_from_generate("q1", QWEN3_0_6B_MODEL_ID, list(range(8)), 3, "n0"))
+    sched.add_request(build_req_from_generate("q1", "model", list(range(8)), 3, "n0"))
     sched.run_until_idle()
     done = sched.get_req("q1")
     assert done.finished
@@ -194,10 +188,10 @@ def test_qwen3_dummy_decode_uses_sampling_bitmask() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="qwen3")
-    runner.load_model(model_id=QWEN3_0_6B_MODEL_ID)
+    runner.load_model(model_path=QWEN3_0_6B_MODEL_ID)
     req = Req(
         req_id="q-mask",
-        model_id=QWEN3_0_6B_MODEL_ID,
+        served_model_name="model",
         prompt_token_ids=[3],
         sampling_params=SamplingParams(max_new_tokens=1, structured_output="json"),
     )

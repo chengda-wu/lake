@@ -56,8 +56,8 @@ class DefaultModelLoader(BaseModelLoader[TModel, TConfig]):
     boundary that future safetensors/bin loading will fill in.
     """
 
-    def __init__(self, model_id: str, revision: str = "") -> None:
-        self.model_id = model_id
+    def __init__(self, model_path: str, revision: str = "") -> None:
+        self.model_path = model_path
         self.revision = revision
 
     def load_weights(self, model: TModel) -> set[str] | None:
@@ -67,11 +67,11 @@ class DefaultModelLoader(BaseModelLoader[TModel, TConfig]):
 def get_model_loader(
     load_format: LoadFormat,
     *,
-    model_id: str = "",
+    model_path: str = "",
     revision: str = "",
 ) -> BaseModelLoader[TModel, TConfig]:
     if load_format == "dummy":
         return DummyModelLoader()
     if load_format == "hf":
-        return DefaultModelLoader(model_id=model_id, revision=revision)
+        return DefaultModelLoader(model_path=model_path, revision=revision)
     raise ValueError(f"unsupported load_format={load_format!r}")

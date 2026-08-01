@@ -50,7 +50,7 @@ def test_engine_capacity_signal() -> None:
     eng = WorkerEngine(
         pool,
         runner,
-        RoleConfig(model_id=QWEN3_0_6B_MODEL_ID),
+        RoleConfig(model_path=QWEN3_0_6B_MODEL_ID, served_model_name="public-qwen"),
         coalesce_s=0,
     )  # type: ignore[arg-type]
     eng.start()
@@ -61,7 +61,7 @@ def test_engine_capacity_signal() -> None:
         assert sig.remaining_slots == 8
         assert sig.inflight_reqs == 0
         assert sig.role == "hybrid"
-        assert sig.model_id == QWEN3_0_6B_MODEL_ID
+        assert sig.served_model_name == "public-qwen"
         assert sig.model_loaded is True
         assert sig.model_warmed is True
     finally:
@@ -88,7 +88,7 @@ def test_stop_fails_orphaned_inflight() -> None:
     eng = WorkerEngine(
         pool,
         runner,
-        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        RoleConfig(model_backend="mock"),
         coalesce_s=0,
     )  # type: ignore[arg-type]
     eng.start()
@@ -109,7 +109,7 @@ def test_stop_timeout_does_not_clear_inflight() -> None:
     eng = WorkerEngine(
         pool,
         runner,
-        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        RoleConfig(model_backend="mock"),
         coalesce_s=0,
     )  # type: ignore[arg-type]
     release = threading.Event()
@@ -147,7 +147,7 @@ def test_submit_after_stop_raises() -> None:
     eng = WorkerEngine(
         pool,
         runner,
-        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        RoleConfig(model_backend="mock"),
         coalesce_s=0,
     )  # type: ignore[arg-type]
     eng.start()
@@ -165,7 +165,7 @@ def test_step_exception_stops_engine_loop() -> None:
     eng = WorkerEngine(
         pool,
         runner,
-        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        RoleConfig(model_backend="mock"),
         coalesce_s=0,
     )  # type: ignore[arg-type]
 
@@ -197,7 +197,7 @@ def test_submit_stop_race_no_hang() -> None:
     eng = WorkerEngine(
         pool,
         runner,
-        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        RoleConfig(model_backend="mock"),
         coalesce_s=0,
     )  # type: ignore[arg-type]
     eng.start()

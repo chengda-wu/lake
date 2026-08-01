@@ -13,7 +13,7 @@ from runtime.scheduler_output import SamplingParams
 @dataclass
 class Req:
     req_id: str
-    model_id: str
+    served_model_name: str
     prompt_token_ids: List[int]
     sampling_params: SamplingParams
     node_id: str = "worker-0"

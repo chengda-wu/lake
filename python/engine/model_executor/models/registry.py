@@ -40,7 +40,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
 @dataclass(frozen=True)
 class LoadedModel:
-    model_id: str
+    model_path: str
     revision: str
     backend: str
     load_format: str = "dummy"
@@ -84,43 +84,37 @@ class _ModelRegistry:
         )
 
 
-def _require_model_id(model_id: str) -> None:
-    if not model_id:
-        raise ValueError("model_id is required to load a model")
-
-
 ModelRegistry = _ModelRegistry(models={})
 ModelRegistry.register_model(
     "Qwen3ForCausalLM",
     "engine.model_executor.models.qwen.qwen3:Qwen3ForCausalLM",
 )
 
-def load_hf_config(model_id: str, revision: str = "") -> Any:
+def load_hf_config(model_path: str, revision: str = "") -> Any:
     kwargs: dict[str, object] = {}
-    if revision and not Path(model_id).expanduser().exists():
+    if revision and not Path(model_path).expanduser().exists():
         kwargs["revision"] = revision
-    return AutoConfig.from_pretrained(model_id, **kwargs)
+    return AutoConfig.from_pretrained(model_path, **kwargs)
 
 
 def load_registered_model(
     *,
     backend: str,
-    model_id: str,
+    model_path: str,
     revision: str = "",
     load_format: str = "dummy",
     config_override: Any | None = None,
 ) -> LoadedModel:
-    _require_model_id(model_id)
-    config = config_override or load_hf_config(model_id, revision)
+    config = config_override or load_hf_config(model_path, revision)
     architectures = list(getattr(config, "architectures", None) or [])
     model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
     from engine.model_executor.models.loader import get_model_loader
 
-    loader = get_model_loader(load_format, model_id=model_id, revision=revision)
+    loader = get_model_loader(load_format, model_path=model_path, revision=revision)
     model = loader.load_model(model_cls, config)
     return LoadedModel(
-        model_id=model_id,
+        model_path=model_path,
         revision=revision,
         backend=backend,
         load_format=load_format,

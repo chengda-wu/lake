@@ -104,7 +104,7 @@ def test_forward_exception_does_not_call_done() -> None:
     runner._forward_model = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: SLF001
     req = Req(
         req_id="r1",
-        model_id="m",
+        served_model_name="model",
         prompt_token_ids=[1, 2, 3, 4],
         sampling_params=SamplingParams(max_new_tokens=1),
         node_id="n",

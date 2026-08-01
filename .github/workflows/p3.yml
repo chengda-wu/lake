@@ -52,7 +52,7 @@ jobs:
         env:
           # P3 smoke 只验证三语言骨架联通性；不安装 Torch，避免触发 Qwen3 backend。
           LAKE_MODEL_BACKEND: mock
-          LAKE_MODEL_ID: mock-llm
+          LAKE_SERVED_MODEL_NAME: mock-llm
         run: |
           ./deploy/run-local.sh &
           echo $! > /tmp/lake-stack.pid

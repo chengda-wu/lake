@@ -47,7 +47,6 @@ def _make_sched(overlap: bool = True, max_running: int = 8) -> Tuple[NodeSchedul
     runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
     role = RoleConfig(
         model_backend="mock",
-        model_id="mock-llm",
         enable_overlap=overlap,
         max_running_reqs=max_running,
     )
@@ -71,12 +70,12 @@ def test_extend_then_decode_finishes() -> None:
     assert done.prefill_blocks == 2
 
 
-def test_build_req_requires_model_id() -> None:
+def test_build_req_requires_served_model_name() -> None:
     try:
         build_req_from_generate("missing-model", "", [1, 2], 1, "n0")
-        raise AssertionError("expected missing model_id")
+        raise AssertionError("expected missing served_model_name")
     except ValueError as e:
-        assert "model_id is required" in str(e)
+        assert "served_model_name is required" in str(e)
 
 
 def test_continuous_batching_two_reqs() -> None:

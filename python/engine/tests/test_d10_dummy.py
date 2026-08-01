@@ -62,7 +62,7 @@ def test_dummy_run_skips_pool_done() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="mock")
-    runner.load_model(model_id="mock-llm")
+    runner.load_model()
     out = runner.dummy_run(num_reqs=2, tokens_per_req=3, step_id=42)
     assert out.step_id == 42
     assert ag.done_calls == 0
@@ -72,15 +72,15 @@ def test_dummy_run_skips_pool_done() -> None:
     assert runner._attn_meta.num_actual_tokens == 6  # noqa: SLF001
 
 
-def test_dummy_run_requires_loaded_model_id() -> None:
+def test_dummy_run_requires_loaded_model() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="mock")
     try:
         runner.dummy_run(num_reqs=1, tokens_per_req=1)
-        raise AssertionError("expected missing model_id")
+        raise AssertionError("expected unloaded model")
     except ValueError as e:
-        assert "model_id is required" in str(e)
+        assert "model must be loaded" in str(e)
 
 
 def test_execute_model_does_not_done_failed_step() -> None:
@@ -89,7 +89,7 @@ def test_execute_model_does_not_done_failed_step() -> None:
     runner = ModelRunner(pool, model_backend="mock")
     req = Req(
         req_id="bad-ready",
-        model_id="m",
+        served_model_name="model",
         prompt_token_ids=[1],
         sampling_params=SamplingParams(max_new_tokens=1),
     )
@@ -123,8 +123,9 @@ def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
         model_backend="qwen3",
         weight_pin_callback=pins.append,
     )
-    info = runner.load_model(model_id=QWEN3_0_6B_MODEL_ID, revision="r1")
-    assert info.model_id == QWEN3_0_6B_MODEL_ID
+    info = runner.load_model(model_path=QWEN3_0_6B_MODEL_ID, revision="r1")
+    assert info.model_path == QWEN3_0_6B_MODEL_ID
+    assert info.served_model_name == "model"
     assert info.revision == "r1"
     assert info.backend == "qwen3"
     assert info.load_dummy_weights is True
@@ -141,4 +142,5 @@ def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
     assert runner.model_warmed is True
     assert ag.done_calls == 0
     assert ag.prepare_calls == 0
-    assert runner.status().model_id == QWEN3_0_6B_MODEL_ID
+    assert runner.status().model_path == QWEN3_0_6B_MODEL_ID
+    assert runner.status().served_model_name == "model"
