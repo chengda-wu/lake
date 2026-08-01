@@ -9,7 +9,7 @@ from transformers import Qwen3Config
 
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelRunner
-from engine.model_executor.models.loader import DummyModelLoader
+from engine.model_executor.models.loader import DummyModelLoader, get_model_loader
 
 from engine.model_executor.models.qwen.qwen3 import (
     Qwen3ForCausalLM,
@@ -49,15 +49,21 @@ def test_qwen3_config_matches_dense_0_6b_shape() -> None:
 
 
 def test_dummy_model_loader_loads_qwen3() -> None:
-    loader = DummyModelLoader(
-        Qwen3ForCausalLM,
-        QWEN3_0_6B_CONFIG,
-    )
-    model = loader.load_model()
+    loader = DummyModelLoader()
+    model = loader.load_model(Qwen3ForCausalLM, QWEN3_0_6B_CONFIG)
     assert model.loaded_dummy_weights is True
     assert "model.embed_tokens.weight" in model.loaded_weights
     assert "model.layers.0.self_attn.qkv_proj.weight" in model.loaded_weights
     assert "model.layers.0.mlp.gate_up_proj.weight" in model.loaded_weights
+
+
+def test_default_model_loader_is_real_weight_boundary() -> None:
+    loader = get_model_loader("hf", model_id=QWEN3_0_6B_MODEL_ID)
+    try:
+        loader.load_model(Qwen3ForCausalLM, QWEN3_0_6B_CONFIG)
+        raise AssertionError("expected real weight loader to be pending")
+    except NotImplementedError as e:
+        assert "real weight loading" in str(e)
 
 
 def test_qwen3_load_weights_keeps_model_api_plain() -> None:
@@ -159,6 +165,7 @@ def test_model_runner_uses_registered_architecture_for_load_model() -> None:
     assert info.model_id == "unit/custom"
     assert info.revision == "r1"
     assert info.backend == "qwen3"
+    assert info.load_format == "dummy"
     assert info.load_dummy_weights is True
 
 
