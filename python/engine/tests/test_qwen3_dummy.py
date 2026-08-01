@@ -11,7 +11,6 @@ from engine.model_executor.models.loader import DummyModelLoader
 from engine.model_executor.models.qwen.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
     QWEN3_0_6B_MODEL_ID,
-    QWEN3_DUMMY_WEIGHT_NAMES,
     Qwen3Config,
 )
 from engine.model_executor.models.qwen.qwen3 import (
@@ -46,11 +45,12 @@ def test_dummy_model_loader_loads_qwen3() -> None:
     loader = DummyModelLoader(
         Qwen3ForCausalLM,
         QWEN3_0_6B_CONFIG,
-        QWEN3_DUMMY_WEIGHT_NAMES,
     )
     model = loader.load_model()
     assert model.loaded_dummy_weights is True
-    assert "lm_head.weight" in model.loaded_weights
+    assert "model.embed_tokens.weight" in model.loaded_weights
+    assert "model.layers.0.self_attn.qkv_proj.weight" in model.loaded_weights
+    assert "model.layers.0.mlp.gate_up_proj.weight" in model.loaded_weights
 
 
 def test_qwen3_load_weights_keeps_model_api_plain() -> None:

@@ -2,7 +2,6 @@ from engine.model_executor.models.loader import DummyModelLoader
 from engine.model_executor.models.qwen.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
     QWEN3_0_6B_MODEL_ID,
-    QWEN3_DUMMY_WEIGHT_NAMES,
     Qwen3Config,
 )
 from engine.model_executor.models.registry import (
@@ -23,7 +22,6 @@ __all__ = [
     "ModelSpec",
     "QWEN3_0_6B_CONFIG",
     "QWEN3_0_6B_MODEL_ID",
-    "QWEN3_DUMMY_WEIGHT_NAMES",
     "Qwen3Config",
     "Qwen3ForCausalLM",
     "Qwen3Model",

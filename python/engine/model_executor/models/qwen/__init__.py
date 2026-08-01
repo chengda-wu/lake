@@ -11,14 +11,12 @@ from engine.model_executor.models.qwen.qwen3 import (
 from engine.model_executor.models.qwen.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
     QWEN3_0_6B_MODEL_ID,
-    QWEN3_DUMMY_WEIGHT_NAMES,
     Qwen3Config,
 )
 
 __all__ = [
     "QWEN3_0_6B_CONFIG",
     "QWEN3_0_6B_MODEL_ID",
-    "QWEN3_DUMMY_WEIGHT_NAMES",
     "Qwen3Attention",
     "Qwen3Config",
     "Qwen3DecoderLayer",

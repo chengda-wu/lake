@@ -31,10 +31,3 @@ QWEN3_0_6B_CONFIG = Qwen3Config(
     use_cache=True,
     use_sliding_window=False,
 )
-QWEN3_DUMMY_WEIGHT_NAMES = (
-    "model.embed_tokens.weight",
-    "model.layers.0.self_attn.qkv_proj.weight",
-    "model.layers.0.mlp.gate_up_proj.weight",
-    "model.norm.weight",
-    "lm_head.weight",
-)
