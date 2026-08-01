@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 from transformers import Qwen3Config
 
@@ -24,7 +26,9 @@ from runtime.role import RoleConfig
 from runtime.scheduler_output import ForwardMode, GrammarOutput, SamplingParams, SchedulerOutput
 
 
-QWEN3_0_6B_MODEL_ID = "Qwen/Qwen3-0.6B"
+QWEN3_0_6B_MODEL_ID = os.path.expanduser(
+    os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH", "Qwen/Qwen3-0.6B")
+)
 QWEN3_0_6B_CONFIG = load_hf_config(QWEN3_0_6B_MODEL_ID)
 
 

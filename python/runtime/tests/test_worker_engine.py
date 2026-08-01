@@ -15,7 +15,9 @@ from runtime.scheduler_output import ForwardMode, SchedulerOutput
 from runtime.worker_engine import WorkerEngine
 
 
-QWEN3_0_6B_MODEL_ID = "Qwen/Qwen3-0.6B"
+QWEN3_0_6B_MODEL_ID = os.path.expanduser(
+    os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH", "Qwen/Qwen3-0.6B")
+)
 
 
 class FakePool:
