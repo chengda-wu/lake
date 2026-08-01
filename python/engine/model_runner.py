@@ -8,15 +8,11 @@ C8：`prepare_inputs` / `prepare_attn` / `sample_tokens` 拆步；残差 query �
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from engine.model_executor.layers.attention_metadata import AttentionMetadata, build_attn_metadata
+from engine.model_executor.layers.attentions import AttentionMetadata, build_attn_metadata
 from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.input_batch import InputBatch, InputBuffers
-from engine.model_executor.models.qwen.qwen3_meta import (
-    QWEN3_0_6B_CONFIG,
-    Qwen3Config,
-)
 from engine.model_executor.models.registry import load_registered_model
 from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
@@ -63,7 +59,7 @@ class ModelRunner:
         pool: PoolIface,
         *,
         model_backend: str = "qwen3",
-        qwen3_config: Optional[Qwen3Config] = None,
+        model_config: Optional[Any] = None,
         tiny_lm: Optional[TinyLM] = None,
         enable_drafter: bool = False,
         num_draft_tokens: int = 2,
@@ -75,8 +71,7 @@ class ModelRunner:
         self._input_buffers = InputBuffers(max_num_reqs=64, max_num_tokens=8192)
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
-        self._qwen3_config = qwen3_config or QWEN3_0_6B_CONFIG
-        self._config_override = qwen3_config
+        self._config_override = model_config
         self._qwen3: Optional["Qwen3ForCausalLM"] = None
         self._tiny: Optional[TinyLM] = tiny_lm
         self.enable_drafter = enable_drafter
@@ -100,10 +95,6 @@ class ModelRunner:
     @property
     def model_id(self) -> str:
         return self._model_id
-
-    @property
-    def qwen3_config(self) -> Qwen3Config:
-        return self._qwen3_config
 
     def status(self) -> ModelRunnerStatus:
         return ModelRunnerStatus(

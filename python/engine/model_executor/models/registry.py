@@ -1,20 +1,18 @@
 """Model registry for compute runners.
 
-Mirrors vLLM's shape: model ids point to configs, configs name one or more
-architectures, and the registry resolves an architecture to a lazily imported
-model class.  The runner should not know concrete model classes.
+Mirrors vLLM's split: HF config loading happens at model load time, and the
+registry only resolves config.architectures to a lazily imported model class.
+The runner should not know concrete model classes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+from pathlib import Path
 from typing import Any
 
-from engine.model_executor.models.qwen.qwen3_meta import (
-    QWEN3_0_6B_CONFIG,
-    QWEN3_0_6B_MODEL_ID,
-)
+from transformers import AutoConfig
 
 
 class _BaseRegisteredModel:
@@ -42,16 +40,10 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    model_id: str
     backend: str
-    config: Any
     runner_attr: str = ""
     dummy_weight_names: tuple[str, ...] | None = None
     load_dummy_weights: bool = False
-
-    @property
-    def architectures(self) -> list[str]:
-        return list(getattr(self.config, "architectures", None) or [])
 
 
 @dataclass(frozen=True)
@@ -59,6 +51,7 @@ class LoadedModel:
     model_id: str
     revision: str
     backend: str
+    config: Any | None = None
     model: object | None = None
     runner_attr: str = ""
     load_dummy_weights: bool = False
@@ -112,22 +105,27 @@ ModelRegistry.register_model(
     "engine.model_executor.models.qwen.qwen3:Qwen3ForCausalLM",
 )
 
-_MODEL_SPECS: dict[str, ModelSpec] = {
-    QWEN3_0_6B_MODEL_ID: ModelSpec(
-        model_id=QWEN3_0_6B_MODEL_ID,
+_BACKEND_SPECS: dict[str, ModelSpec] = {
+    "qwen3": ModelSpec(
         backend="qwen3",
-        config=QWEN3_0_6B_CONFIG,
         runner_attr="_qwen3",
         load_dummy_weights=True,
     ),
 }
 
 
-def get_model_spec(model_id: str) -> ModelSpec:
+def get_model_spec(backend: str) -> ModelSpec:
     try:
-        return _MODEL_SPECS[model_id]
+        return _BACKEND_SPECS[backend]
     except KeyError as e:
-        raise NotImplementedError(f"unsupported model_id={model_id!r}") from e
+        raise NotImplementedError(f"unsupported model_backend={backend!r}") from e
+
+
+def load_hf_config(model_id: str, revision: str = "") -> Any:
+    kwargs: dict[str, object] = {}
+    if revision and not Path(model_id).expanduser().exists():
+        kwargs["revision"] = revision
+    return AutoConfig.from_pretrained(model_id, **kwargs)
 
 
 def load_registered_model(
@@ -141,15 +139,15 @@ def load_registered_model(
     if backend in _NOOP_BACKENDS:
         return LoadedModel(model_id=model_id, revision=revision, backend=backend)
 
-    spec = get_model_spec(model_id)
+    spec = get_model_spec(backend)
     if spec.backend != backend:
         raise NotImplementedError(
-            f"model_id={model_id!r} is registered for backend={spec.backend!r}, "
+            f"model backend spec is registered for backend={spec.backend!r}, "
             f"not backend={backend!r}"
         )
 
-    config = config_override or spec.config
-    architectures = list(getattr(config, "architectures", None) or spec.architectures)
+    config = config_override or load_hf_config(model_id, revision)
+    architectures = list(getattr(config, "architectures", None) or [])
     model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
     from engine.model_executor.models.loader import DummyModelLoader
@@ -160,9 +158,10 @@ def load_registered_model(
         spec.dummy_weight_names,
     ).load_model()
     return LoadedModel(
-        model_id=spec.model_id,
+        model_id=model_id,
         revision=revision,
         backend=spec.backend,
+        config=config,
         model=model,
         runner_attr=spec.runner_attr,
         load_dummy_weights=spec.load_dummy_weights,
@@ -170,9 +169,10 @@ def load_registered_model(
 
 
 def register_model_spec(spec: ModelSpec) -> None:
-    _require_model_id(spec.model_id)
-    _MODEL_SPECS[spec.model_id] = spec
+    if not spec.backend:
+        raise ValueError("backend is required to register a model spec")
+    _BACKEND_SPECS[spec.backend] = spec
 
 
 def supported_model_backends() -> tuple[str, ...]:
-    return tuple(sorted({spec.backend for spec in _MODEL_SPECS.values()} | _NOOP_BACKENDS))
+    return tuple(sorted(set(_BACKEND_SPECS) | _NOOP_BACKENDS))

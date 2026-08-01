@@ -1,8 +1,8 @@
-"""Qwen3 model config and runtime skeleton.
+"""Qwen3 model runtime skeleton.
 
-首个真实模型族先按 Qwen3-0.6B 的 Hugging Face config 固定接口；类名与
-vLLM `Qwen3ForCausalLM` 对齐。本阶段经通用 `DummyModelLoader` 建立权重
-加载边界和 deterministic forward 占位，不加载真实 safetensors。
+类名与 vLLM `Qwen3ForCausalLM` 对齐；config 由模型加载侧从 Hugging Face
+config 读取后传入。本阶段经通用 `DummyModelLoader` 建立权重加载边界和
+deterministic forward 占位，不加载真实 safetensors。
 """
 
 from __future__ import annotations
@@ -11,17 +11,20 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen3Config
 
-from engine.model_executor.layers.attention import TorchAttentionBackend
-from engine.model_executor.models.qwen.qwen3_meta import (
-    QWEN3_0_6B_CONFIG,
-    Qwen3Config,
-)
+from engine.model_executor.layers.attentions import TorchAttentionBackend
 
 
 def _param_dtype(config: Qwen3Config) -> torch.dtype:
-    dtype = getattr(config, "dtype", None)
-    return dtype if isinstance(dtype, torch.dtype) else torch.bfloat16
+    dtype = getattr(config, "dtype", None) or getattr(config, "torch_dtype", None)
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str) and hasattr(torch, dtype):
+        value = getattr(torch, dtype)
+        if isinstance(value, torch.dtype):
+            return value
+    return torch.bfloat16
 
 
 def _head_dim(config: Qwen3Config) -> int:
@@ -154,7 +157,7 @@ class Qwen3Model(nn.Module):
     lake 先钉住 module 边界和 config，真 attention/MLP 后续接 Torch/Triton。
     """
 
-    def __init__(self, config: Qwen3Config = QWEN3_0_6B_CONFIG) -> None:
+    def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         dtype = _param_dtype(config)
         self.config = config
@@ -220,7 +223,7 @@ class Qwen3ForCausalLM(nn.Module):
     `load_weights(weights)`；dummy 由 loader 层处理。
     """
 
-    def __init__(self, config: Qwen3Config = QWEN3_0_6B_CONFIG) -> None:
+    def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.config = config
         self.model = Qwen3Model(config)
