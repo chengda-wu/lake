@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import torch
+
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelRunner
-from engine.models.loader import DummyModelLoader
-from engine.models.qwen3_meta import (
+from engine.model_executor.models.loader import DummyModelLoader
+
+from engine.model_executor.models.qwen.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
     QWEN3_0_6B_MODEL_ID,
     QWEN3_DUMMY_WEIGHT_NAMES,
+    Qwen3Config,
 )
-from engine.models.qwen3 import (
+from engine.model_executor.models.qwen.qwen3 import (
     Qwen3ForCausalLM,
 )
+from engine.model_executor.models.registry import ModelRegistry, ModelSpec, register_model_spec
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from runtime.req import Req
@@ -23,9 +28,10 @@ from runtime.scheduler_output import ForwardMode, GrammarOutput, SamplingParams,
 
 def test_qwen3_config_matches_dense_0_6b_shape() -> None:
     cfg = QWEN3_0_6B_CONFIG
-    cfg.validate()
+    assert isinstance(cfg, Qwen3Config)
+    assert type(cfg).__module__.startswith("transformers.")
     assert cfg.model_type == "qwen3"
-    assert cfg.architecture == "Qwen3ForCausalLM"
+    assert cfg.architectures == ["Qwen3ForCausalLM"]
     assert cfg.hidden_size == 1024
     assert cfg.num_hidden_layers == 28
     assert cfg.num_attention_heads == 16
@@ -33,7 +39,7 @@ def test_qwen3_config_matches_dense_0_6b_shape() -> None:
     assert cfg.head_dim == 128
     assert cfg.vocab_size == 151936
     assert cfg.max_position_embeddings == 40960
-    assert cfg.torch_dtype == "bfloat16"
+    assert cfg.dtype is torch.bfloat16
 
 
 def test_dummy_model_loader_loads_qwen3() -> None:
@@ -61,12 +67,106 @@ def test_qwen3_load_weights_keeps_model_api_plain() -> None:
     assert loaded == {"model.norm.weight"}
 
 
+def test_qwen3_module_tree_matches_vllm_packed_layout() -> None:
+    model = Qwen3ForCausalLM(QWEN3_0_6B_CONFIG)
+    layer0 = model.model.layers[0]
+    head_dim = QWEN3_0_6B_CONFIG.head_dim
+    q_size = QWEN3_0_6B_CONFIG.num_attention_heads * head_dim
+    kv_size = QWEN3_0_6B_CONFIG.num_key_value_heads * head_dim
+
+    assert model.model.embed_tokens.weight.shape == (
+        QWEN3_0_6B_CONFIG.vocab_size,
+        QWEN3_0_6B_CONFIG.hidden_size,
+    )
+    assert layer0.self_attn.qkv_proj.weight.shape == (
+        q_size + (2 * kv_size),
+        QWEN3_0_6B_CONFIG.hidden_size,
+    )
+    assert layer0.self_attn.o_proj.weight.shape == (
+        QWEN3_0_6B_CONFIG.hidden_size,
+        q_size,
+    )
+    assert layer0.self_attn.q_norm.weight.shape == (head_dim,)
+    assert layer0.self_attn.k_norm.weight.shape == (head_dim,)
+    assert layer0.mlp.gate_up_proj.weight.shape == (
+        2 * QWEN3_0_6B_CONFIG.intermediate_size,
+        QWEN3_0_6B_CONFIG.hidden_size,
+    )
+    assert layer0.mlp.down_proj.weight.shape == (
+        QWEN3_0_6B_CONFIG.hidden_size,
+        QWEN3_0_6B_CONFIG.intermediate_size,
+    )
+    assert layer0.input_layernorm.weight.shape == (QWEN3_0_6B_CONFIG.hidden_size,)
+    assert layer0.post_attention_layernorm.weight.shape == (
+        QWEN3_0_6B_CONFIG.hidden_size,
+    )
+    assert model.model.norm.weight.shape == (QWEN3_0_6B_CONFIG.hidden_size,)
+    assert model.lm_head is model.model.embed_tokens
+
+
+def test_qwen3_load_model_requires_explicit_supported_model_id() -> None:
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    runner = ModelRunner(pool, model_backend="qwen3")
+    try:
+        runner.load_model()
+        raise AssertionError("expected missing model_id")
+    except ValueError as e:
+        assert "model_id is required" in str(e)
+
+    try:
+        runner.load_model(model_id="Qwen/Other")
+        raise AssertionError("expected unsupported model_id")
+    except NotImplementedError as e:
+        assert "unsupported model_id" in str(e)
+
+
+class UnitCustomForCausalLM:
+    def __init__(self, config) -> None:
+        self.config = config
+        self.loaded_weights: set[str] = set()
+
+    def load_weights(self, weights) -> set[str]:
+        self.loaded_weights = {name for name, _ in weights}
+        return set(self.loaded_weights)
+
+
+class UnitCustomConfig:
+    architectures = ["UnitCustomForCausalLM"]
+
+
+def test_model_runner_uses_registered_architecture_for_load_model() -> None:
+    ModelRegistry.register_model("UnitCustomForCausalLM", UnitCustomForCausalLM)
+    register_model_spec(
+        ModelSpec(
+            model_id="unit/custom",
+            backend="unit_custom",
+            config=UnitCustomConfig(),
+            dummy_weight_names=("unit.weight",),
+            load_dummy_weights=True,
+        )
+    )
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    runner = ModelRunner(pool, model_backend="unit_custom")
+    info = runner.load_model(model_id="unit/custom", revision="r1")
+    assert info.model_id == "unit/custom"
+    assert info.revision == "r1"
+    assert info.backend == "unit_custom"
+    assert info.load_dummy_weights is True
+
+
 def test_scheduler_qwen3_dummy_finishes() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
-    role = RoleConfig(model_backend="qwen3", enable_overlap=False, max_running_reqs=2)
+    role = RoleConfig(
+        model_backend="qwen3",
+        model_id=QWEN3_0_6B_MODEL_ID,
+        enable_overlap=False,
+        max_running_reqs=2,
+    )
     runner = ModelRunner(pool, model_backend="qwen3")
-    runner.load_model()
+    runner.load_model(model_id=QWEN3_0_6B_MODEL_ID)
     sched = NodeScheduler(pool, runner, role)
     sched.add_request(build_req_from_generate("q1", QWEN3_0_6B_MODEL_ID, list(range(8)), 3, "n0"))
     sched.run_until_idle()
@@ -81,7 +181,7 @@ def test_qwen3_dummy_decode_uses_sampling_bitmask() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
     runner = ModelRunner(pool, model_backend="qwen3")
-    runner.load_model()
+    runner.load_model(model_id=QWEN3_0_6B_MODEL_ID)
     req = Req(
         req_id="q-mask",
         model_id=QWEN3_0_6B_MODEL_ID,

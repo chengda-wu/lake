@@ -13,6 +13,7 @@ dependencies = [
     "numpy",
     "protobuf>=7.35.0",
     "torch",
+    "transformers",
 ]
 
 # 已定技术选型 Python+Torch+Triton；torch 是计算层基础依赖，triton 随 CUDA 开发路径安装。

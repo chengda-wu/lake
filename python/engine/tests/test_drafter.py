@@ -5,7 +5,7 @@ from __future__ import annotations
 from engine.agents.memory import InMemoryAgent
 from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.model_runner import ModelRunner
-from engine.models.tiny_lm import TinyLM
+from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.sample.reject import chain_reject_sample
 from runtime.node_scheduler import NodeScheduler, build_req_from_generate

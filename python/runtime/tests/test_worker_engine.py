@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 
 from engine.model_runner import ModelRunner
-from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
+from engine.model_executor.models.qwen.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import ReadyHandle, StepStats
 from runtime.node_scheduler import build_req_from_generate
 from runtime.role import RoleConfig, WorkerRole
@@ -47,7 +47,12 @@ class FakePool:
 def _make_engine(max_running: int = 8, coalesce_s: float = 0.005) -> Tuple[WorkerEngine, FakePool]:
     pool = FakePool()
     runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
-    role = RoleConfig(enable_overlap=True, max_running_reqs=max_running, model_backend="mock")
+    role = RoleConfig(
+        enable_overlap=True,
+        max_running_reqs=max_running,
+        model_backend="mock",
+        model_id="mock-llm",
+    )
     eng = WorkerEngine(pool, runner, role, coalesce_s=coalesce_s)  # type: ignore[arg-type]
     eng.start()
     return eng, pool
@@ -130,6 +135,19 @@ def test_role_config_from_env() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_role_config_from_env_does_not_default_model_id() -> None:
+    saved = os.environ.get("LAKE_MODEL_ID")
+    try:
+        os.environ.pop("LAKE_MODEL_ID", None)
+        cfg = RoleConfig.from_env()
+        assert cfg.model_id == ""
+    finally:
+        if saved is None:
+            os.environ.pop("LAKE_MODEL_ID", None)
+        else:
+            os.environ["LAKE_MODEL_ID"] = saved
 
 
 def test_role_config_rejects_non_positive_budget() -> None:

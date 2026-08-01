@@ -1,12 +1,13 @@
-"""Attention 后端边界（D4/C8）：metadata + 后端选择。"""
-
 from engine.model_executor.layers.attention import (
     AttentionBackend,
     RefAttentionBackend,
     TorchAttentionBackend,
     build_attn_backend,
 )
-from engine.model_executor.layers.attention_metadata import AttentionMetadata, build_attn_metadata
+from engine.model_executor.layers.attention_metadata import (
+    AttentionMetadata,
+    build_attn_metadata,
+)
 
 __all__ = [
     "AttentionBackend",

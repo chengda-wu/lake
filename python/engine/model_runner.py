@@ -10,16 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Dict, List, Mapping, Optional, Tuple
 
-from engine.attn.metadata import AttentionMetadata, build_attn_metadata
+from engine.model_executor.layers.attention_metadata import AttentionMetadata, build_attn_metadata
 from engine.drafter.tiny_mtp import TinyMTPDrafter
 from engine.input_batch import InputBatch, InputBuffers
-from engine.models.qwen3_meta import (
+from engine.model_executor.models.qwen.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
-    QWEN3_0_6B_MODEL_ID,
-    QWEN3_DUMMY_WEIGHT_NAMES,
     Qwen3Config,
 )
-from engine.models.tiny_lm import TinyLM
+from engine.model_executor.models.registry import load_registered_model
+from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from engine.sample.greedy import greedy_sample
@@ -29,7 +28,7 @@ from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, SamplingParams, SchedulerOutput
 
 if TYPE_CHECKING:
-    from engine.models.qwen3 import Qwen3ForCausalLM
+    from engine.model_executor.models.qwen.qwen3 import Qwen3ForCausalLM
 
 
 @dataclass
@@ -64,7 +63,7 @@ class ModelRunner:
         pool: PoolIface,
         *,
         model_backend: str = "qwen3",
-        qwen3_config: Qwen3Config = QWEN3_0_6B_CONFIG,
+        qwen3_config: Optional[Qwen3Config] = None,
         tiny_lm: Optional[TinyLM] = None,
         enable_drafter: bool = False,
         num_draft_tokens: int = 2,
@@ -76,7 +75,8 @@ class ModelRunner:
         self._input_buffers = InputBuffers(max_num_reqs=64, max_num_tokens=8192)
         self._attn_meta: Optional[AttentionMetadata] = None
         self.model_backend = model_backend
-        self._qwen3_config = qwen3_config
+        self._qwen3_config = qwen3_config or QWEN3_0_6B_CONFIG
+        self._config_override = qwen3_config
         self._qwen3: Optional["Qwen3ForCausalLM"] = None
         self._tiny: Optional[TinyLM] = tiny_lm
         self.enable_drafter = enable_drafter
@@ -115,10 +115,6 @@ class ModelRunner:
         )
 
     def _ensure_backend_initialized(self) -> None:
-        if self.model_backend == "qwen3" and self._qwen3 is None:
-            from engine.models.qwen3 import Qwen3ForCausalLM
-
-            self._qwen3 = Qwen3ForCausalLM(self._qwen3_config)
         if self.model_backend == "tiny_lm" and self._tiny is None:
             self._tiny = TinyLM()
         if self.enable_drafter and self._drafter is None and self._tiny is not None:
@@ -145,26 +141,23 @@ class ModelRunner:
         """
 
         self._ensure_backend_initialized()
-        default_model_id = QWEN3_0_6B_MODEL_ID if self.model_backend == "qwen3" else "mock-llm"
-        self._model_id = model_id or default_model_id
-        self._model_revision = revision
+        loaded = load_registered_model(
+            backend=self.model_backend,
+            model_id=model_id,
+            revision=revision,
+            config_override=self._config_override,
+        )
+        if loaded.runner_attr:
+            setattr(self, loaded.runner_attr, loaded.model)
+        self._model_id = loaded.model_id
+        self._model_revision = loaded.revision
         self._model_loaded = True
         self._model_warmed = False
-        if self.model_backend == "qwen3":
-            from engine.models.loader import DummyModelLoader
-            from engine.models.qwen3 import Qwen3ForCausalLM
-
-            self._qwen3 = DummyModelLoader(
-                Qwen3ForCausalLM,
-                self._qwen3_config,
-                QWEN3_DUMMY_WEIGHT_NAMES,
-            ).load_model()
-            load_dummy_weights = True
         info = ModelLoadInfo(
             model_id=self._model_id,
             revision=self._model_revision,
             backend=self.model_backend,
-            load_dummy_weights=load_dummy_weights,
+            load_dummy_weights=load_dummy_weights or loaded.load_dummy_weights,
             weight_pinned=pin_weights,
         )
         if pin_weights and self._weight_pin_callback is not None:
@@ -180,10 +173,9 @@ class ModelRunner:
         """C12：warmup 复用生产 dummy 入口，但跳过 pool.done。"""
 
         if not self._model_loaded:
-            default_model_id = (
-                QWEN3_0_6B_MODEL_ID if self.model_backend == "qwen3" else "mock-llm"
-            )
-            self.load_model(model_id=self._model_id or default_model_id)
+            if not self._model_id:
+                raise ValueError("model must be loaded before warmup; model_id is required")
+            self.load_model(model_id=self._model_id)
         out = self.dummy_run(
             num_reqs=num_reqs,
             tokens_per_req=tokens_per_req,
@@ -428,11 +420,13 @@ class ModelRunner:
         用于 warmup / graph capture 占位；构造 dummy host req / ready，不触发
         pool.prepare_step 或 pool.done。
         """
+        if not self._model_id:
+            raise ValueError("model must be loaded before dummy_run; model_id is required")
         num_tokens = {f"dummy-{i}": tokens_per_req for i in range(num_reqs)}
         host_reqs = {
             rid: Req(
                 req_id=rid,
-                model_id=self._model_id or QWEN3_0_6B_MODEL_ID,
+                model_id=self._model_id,
                 prompt_token_ids=list(range(tokens_per_req)),
                 sampling_params=SamplingParams(max_new_tokens=1),
             )

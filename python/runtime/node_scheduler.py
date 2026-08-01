@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from engine.model_runner import ModelRunner, ModelRunnerOutput
-from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface
 from engine.pool_types import ReadyHandle
 from runtime.executor import ExecutorInput, RuntimeExecutor, SingleProcessExecutor
@@ -664,9 +663,11 @@ def build_req_from_generate(
     max_new_tokens: int,
     node_id: str,
 ) -> Req:
+    if not model_id:
+        raise ValueError("model_id is required for Generate")
     return Req(
         req_id=request_id,
-        model_id=model_id or QWEN3_0_6B_MODEL_ID,
+        model_id=model_id,
         prompt_token_ids=list(prompt_tokens),
         sampling_params=SamplingParams(max_new_tokens=max_new_tokens or 4),
         node_id=node_id,

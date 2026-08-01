@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Sequence
 
-from engine.models.tiny_lm import TinyLM
+from engine.model_executor.models.tiny_lm import TinyLM
 
 
 class TinyMTPDrafter:

@@ -73,9 +73,9 @@ def test_single_process_executor_calls_runner() -> None:
 
 def test_node_scheduler_uses_executor() -> None:
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
     executor = RecordingExecutor()
-    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    role = RoleConfig(model_backend="mock", model_id="mock-llm", enable_overlap=False)
     sched = NodeScheduler(pool, runner, role, executor=executor)  # type: ignore[arg-type]
     sched.add_request(build_req_from_generate("r1", "m", list(range(4)), 1, "n0"))
 
@@ -90,8 +90,8 @@ def test_node_scheduler_uses_executor() -> None:
 
 def test_node_scheduler_done_on_executor_exception() -> None:
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
-    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    role = RoleConfig(model_backend="mock", model_id="mock-llm", enable_overlap=False)
     sched = NodeScheduler(pool, runner, role, executor=FailingExecutor())  # type: ignore[arg-type]
     sched.add_request(build_req_from_generate("r-boom", "m", list(range(4)), 1, "n0"))
     output = sched.schedule()
@@ -107,9 +107,9 @@ def test_node_scheduler_done_on_executor_exception() -> None:
 
 def test_worker_engine_wires_executor() -> None:
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
     executor = RecordingExecutor()
-    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    role = RoleConfig(model_backend="mock", model_id="mock-llm", enable_overlap=False)
     eng = WorkerEngine(pool, runner, role, coalesce_s=0, executor=executor)  # type: ignore[arg-type]
     eng.start()
     try:
