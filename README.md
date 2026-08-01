@@ -162,20 +162,20 @@ lake/
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e "./python[dev]"
+uv pip install -e ".[dev]"
 ```
 
 验证 Python 计算层：
 
 ```bash
-.venv/bin/python -m pytest python/engine/tests python/runtime/tests
-PYTHONPATH=python .venv/bin/python -c "from lake_pb import lake_pb2; import engine, runtime, kernels"
+.venv/bin/python -m pytest python/lake/engine/tests python/lake/runtime/tests
+.venv/bin/python -c "import lake; from lake.pb import lake_pb2; import lake.engine, lake.runtime, lake.kernels"
 ```
 
 需要 Torch / Triton 时再安装 CUDA extra：
 
 ```bash
-uv pip install -e "./python[dev,cuda]"
+uv pip install -e ".[dev,cuda]"
 ```
 
 ## 设计文档速览

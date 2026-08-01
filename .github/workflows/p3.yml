@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # 对齐 python/pyproject.toml 与生成 stub 校验；Qwen3 config 来自 transformers。
+      # 对齐根目录 pyproject.toml 与生成 stub 校验；Qwen3 config 来自 transformers。
       - name: Python runtime deps
         run: pip install "grpcio>=1.82.1" "protobuf>=7.35.0" "transformers"
       - name: verify-p3
