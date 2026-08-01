@@ -6,7 +6,7 @@ Transformers 是 lake 计算层的**模型定义与 config 依赖**：运行时�
 
 | Transformers 机制 | lake 对应 | 说明 |
 |------------------|-----------|------|
-| `Qwen3Config` 继承 `PreTrainedConfig`，声明 `model_type`、GQA、RoPE、sliding window、layer types 等 HF 字段 | `engine.model_executor.models.registry.load_hf_config()` 返回 `transformers.Qwen3Config` 实例 | 不再在 lake 自建 config dataclass，也不写死 Qwen3-0.6B config；测试 fixture 用 `examples/models/Qwen/Qwen3-0.6B/` HF submodule 提供，初始化时跳过 LFS 权重下载 |
+| `Qwen3Config` 继承 `PreTrainedConfig`，声明 `model_type`、GQA、RoPE、sliding window、layer types 等 HF 字段 | `engine.model_executor.models.registry.load_hf_config()` 返回 `transformers.Qwen3Config` 实例 | 不再在 lake 自建 config dataclass，也不写死 Qwen3-0.6B config；测试 example 对齐 vLLM，用 HF repo id `Qwen/Qwen3-0.6B` 触发 `AutoConfig.from_pretrained`，不在仓库内保存模型文件 |
 | `Qwen3Model` 是 decoder backbone，`Qwen3ForCausalLM` 顶层持有 `self.model = Qwen3Model(config)` 和 `lm_head` | `Qwen3Model(nn.Module)` + `Qwen3ForCausalLM(nn.Module)` | lake 的模型类应是普通 PyTorch 模型骨架，不应把 dummy 逻辑塞进模型类名或 `load_weights(dummy=True)` |
 | `Qwen3ForCausalLM.forward()` 调用 `self.model(...)` 后计算 logits，并返回 causal LM 输出 | lake 保留 `forward` / `compute_logits` 边界 | 当前 dummy decode 仍在 runner 层，后续真 Torch/Triton 后端接入时可替换为真实 hidden/logits |
 

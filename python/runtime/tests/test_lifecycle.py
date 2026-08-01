@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import threading
 import time
 
@@ -13,8 +12,7 @@ from runtime.role import RoleConfig
 from runtime.worker_engine import WorkerEngine, _Inbound
 
 
-ROOT = Path(__file__).resolve().parents[3]
-QWEN3_0_6B_MODEL_ID = str(ROOT / "examples/models/Qwen/Qwen3-0.6B")
+QWEN3_0_6B_MODEL_ID = "Qwen/Qwen3-0.6B"
 
 
 class FakePool:
