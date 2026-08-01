@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelLoadInfo, ModelRunner
 from engine.pool_iface import PoolIface
@@ -10,7 +12,9 @@ from runtime.req import Req
 from runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams, SchedulerOutput
 
 
-QWEN3_0_6B_MODEL_ID = "Qwen/Qwen3-0.6B"
+QWEN3_0_6B_MODEL_ID = os.path.expanduser(
+    os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH", "Qwen/Qwen3-0.6B")
+)
 
 
 def test_commit_does_not_undercut_newer_prepare() -> None:
@@ -120,10 +124,10 @@ def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
         model_backend="qwen3",
         weight_pin_callback=pins.append,
     )
-    info = runner.load_model(model_path=QWEN3_0_6B_MODEL_ID, revision="r1")
+    info = runner.load_model(model_path=QWEN3_0_6B_MODEL_ID)
     assert info.model_path == QWEN3_0_6B_MODEL_ID
     assert info.served_model_name == "model"
-    assert info.revision == "r1"
+    assert info.revision == ""
     assert info.backend == "qwen3"
     assert info.load_dummy_weights is True
     assert info.weight_pinned is True
