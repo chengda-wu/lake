@@ -136,7 +136,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 - **Python 开发环境用 `uv` 管理**：从仓库根执行 `uv venv --python 3.12`、`source .venv/bin/activate`、`uv pip install -e "./python[dev]"`。
 - **边界**：`uv` 只管 Python 开发依赖与本地测试环境；Rust / Go 仍分别使用 `cargo` / `go`，三语言构建入口不合并到 uv。
-- **Torch/CUDA/Triton/Transformers**：Torch 是 Python 计算层基础依赖；模型加载用安装依赖 `transformers` 的 `AutoConfig.from_pretrained(model_id/path)` 读取 HF config，再按 `config.architectures` 进入 lake model registry，`3rdparty/transformers` 只作源码参考、不进安装路径。本机 CUDA wheel 由安装源/平台解析决定（如 PyPI 默认 CUDA wheel 或 PyTorch 指定 CUDA index），`cuda` extra 仅补 Triton 开发路径。对照 vLLM 与 SGLang：两者都在包依赖和 `ModelRunner` / `InputBatch` / Qwen3 模型热路径中硬依赖 `torch`，因此 lake 的生产 Qwen3 backend 也不把 Torch 伪装成可选依赖；但 `engine` / `runtime` 轻量 import、mock 和旧 `tiny_lm` 测试路径仍应避免顶层触发 Torch。
+- **Torch/CUDA/Triton/Transformers**：Torch 是 Python 计算层基础依赖；模型加载用安装依赖 `transformers` 的 `AutoConfig.from_pretrained(model_id/path)` 读取 HF config，再按 `config.architectures` 进入 lake model registry，`3rdparty/transformers` 只作源码参考、不进安装路径。本机 CUDA wheel 由安装源/平台解析决定（如 PyPI 默认 CUDA wheel 或 PyTorch 指定 CUDA index），`cuda` extra 仅补 Triton 开发路径。对照 vLLM 与 SGLang：两者都在包依赖和 `ModelRunner` / `InputBatch` / Qwen3 模型热路径中硬依赖 `torch`，因此 lake 的生产 Qwen3 backend 也不把 Torch 伪装成可选依赖；但 `engine` / `runtime` 轻量 import、mock 测试路径仍应避免顶层触发 Torch。
 - **模型启动参数**：计算 worker 必须显式提供 `LAKE_MODEL_ID`（或测试里显式传 `RoleConfig.model_id` / 本地模型目录）；不再有 `default_model_id`。加载时按 HF config 的 `architectures` 判断模型类是否支持，未提供模型或 architecture 未注册时直接报错，因为 KV block spec / 量化 / 命名空间都依赖具体模型。
 - **参考取向**：vLLM 更偏 uv-first（推荐 `uv venv`、`uv pip install ... --torch-backend=auto`）；SGLang 也推荐 uv 并在 CI/Docker 中使用，但保留平台 fallback。lake 采用其开发环境管理经验，不改变既定语言技术选型。
 
@@ -247,8 +247,8 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [x] **C0**：D1 `SchedulerOutput` 定稿 + `python/engine`·`runtime/node_scheduler` 骨架 + P3 Generate 挂新路径（mock）
 - [x] **C1**：continuous batching + overlap 主循环 + FutureMap host 占位
 - [x] **C2**：`pool_iface` FFI 草签（D2/D5）
-- [x] **C3**：TinyLM + attn/sample 最小路径（现仅保留为旧单测/采样验证；主计算层已转向 Torch/Qwen3）
-- [x] **C4**：共置 TinyMTP（post/pre_forward）+ TARGET_VERIFY + chain reject
+- [x] **C3**：早期 TinyLM + attn/sample 最小路径（已移除；主计算层转向 Torch/Qwen3 + HF config）
+- [ ] **C4**：共置投机模型（post/pre_forward）+ TARGET_VERIFY + chain reject（等待后续真实 draft/spec 模型接入）
 - [x] **C5**：vLLM 调度几何（`num_computed` + 本步 token）+ 三模式选路骨架（`PrefixHint`/`mode_select`）；整段本地命中→`computed=prompt_len`（无 PREBUILT 分相）；Go Router 权威联调后续
 - [x] **C6–C10** 填充 scheduler/worker/runner（vLLM 为主）：详见 [`architecture/compute-layer.md`](architecture/compute-layer.md)「C6–C10 填充计划」
   - [x] **C6**：Worker 长期单环（一份 scheduler；Generate 入队；step 前 drain）

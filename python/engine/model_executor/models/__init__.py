@@ -2,30 +2,20 @@ from engine.model_executor.models.loader import DummyModelLoader
 from engine.model_executor.models.registry import (
     LoadedModel,
     ModelRegistry,
-    ModelSpec,
-    get_model_spec,
     load_hf_config,
     load_registered_model,
-    register_model_spec,
-    supported_model_backends,
 )
-from engine.model_executor.models.tiny_lm import TinyLM
 from transformers import Qwen3Config
 
 __all__ = [
     "DummyModelLoader",
     "LoadedModel",
     "ModelRegistry",
-    "ModelSpec",
     "Qwen3Config",
     "Qwen3ForCausalLM",
     "Qwen3Model",
-    "TinyLM",
-    "get_model_spec",
     "load_hf_config",
     "load_registered_model",
-    "register_model_spec",
-    "supported_model_backends",
 ]
 
 

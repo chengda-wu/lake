@@ -39,21 +39,12 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
 
 @dataclass(frozen=True)
-class ModelSpec:
-    backend: str
-    runner_attr: str = ""
-    dummy_weight_names: tuple[str, ...] | None = None
-    load_dummy_weights: bool = False
-
-
-@dataclass(frozen=True)
 class LoadedModel:
     model_id: str
     revision: str
     backend: str
     config: Any | None = None
     model: object | None = None
-    runner_attr: str = ""
     load_dummy_weights: bool = False
 
 
@@ -97,29 +88,11 @@ def _require_model_id(model_id: str) -> None:
         raise ValueError("model_id is required to load a model")
 
 
-_NOOP_BACKENDS = {"mock", "tiny_lm"}
-
 ModelRegistry = _ModelRegistry(models={})
 ModelRegistry.register_model(
     "Qwen3ForCausalLM",
     "engine.model_executor.models.qwen.qwen3:Qwen3ForCausalLM",
 )
-
-_BACKEND_SPECS: dict[str, ModelSpec] = {
-    "qwen3": ModelSpec(
-        backend="qwen3",
-        runner_attr="_qwen3",
-        load_dummy_weights=True,
-    ),
-}
-
-
-def get_model_spec(backend: str) -> ModelSpec:
-    try:
-        return _BACKEND_SPECS[backend]
-    except KeyError as e:
-        raise NotImplementedError(f"unsupported model_backend={backend!r}") from e
-
 
 def load_hf_config(model_id: str, revision: str = "") -> Any:
     kwargs: dict[str, object] = {}
@@ -136,16 +109,6 @@ def load_registered_model(
     config_override: Any | None = None,
 ) -> LoadedModel:
     _require_model_id(model_id)
-    if backend in _NOOP_BACKENDS:
-        return LoadedModel(model_id=model_id, revision=revision, backend=backend)
-
-    spec = get_model_spec(backend)
-    if spec.backend != backend:
-        raise NotImplementedError(
-            f"model backend spec is registered for backend={spec.backend!r}, "
-            f"not backend={backend!r}"
-        )
-
     config = config_override or load_hf_config(model_id, revision)
     architectures = list(getattr(config, "architectures", None) or [])
     model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
@@ -155,24 +118,12 @@ def load_registered_model(
     model = DummyModelLoader(
         model_cls,
         config,
-        spec.dummy_weight_names,
     ).load_model()
     return LoadedModel(
         model_id=model_id,
         revision=revision,
-        backend=spec.backend,
+        backend=backend,
         config=config,
         model=model,
-        runner_attr=spec.runner_attr,
-        load_dummy_weights=spec.load_dummy_weights,
+        load_dummy_weights=True,
     )
-
-
-def register_model_spec(spec: ModelSpec) -> None:
-    if not spec.backend:
-        raise ValueError("backend is required to register a model spec")
-    _BACKEND_SPECS[spec.backend] = spec
-
-
-def supported_model_backends() -> tuple[str, ...]:
-    return tuple(sorted(set(_BACKEND_SPECS) | _NOOP_BACKENDS))

@@ -30,8 +30,8 @@ def _env_int(name: str, default: int) -> int:
 @dataclass
 class RoleConfig:
     role: WorkerRole = WorkerRole.HYBRID
-    enable_drafter: bool = False
-    num_draft_tokens: int = 2  # C4：MTP 宽度
+    enable_drafter: bool = False  # 保留给后续真实 draft/spec 模型；当前未接入
+    num_draft_tokens: int = 2  # C4：MTP 宽度（当前未接入）
     enable_overlap: bool = True  # 默认开；对齐 SGLang event_loop_overlap
     max_running_reqs: int = 8  # continuous batching 上限（C1）
     # C7：对齐 vLLM Scheduler.token_budget / long_prefill_token_threshold
@@ -43,8 +43,8 @@ class RoleConfig:
     # D5：prepare 补拉预算；0=同步等到齐（P3 mock）
     pull_budget_ms: int = 0
     allow_partial_hit: bool = False  # False=缺块整批失败（all-or-nothing）
-    # qwen3=Qwen3 load/forward 骨架；mock 仅测试用；tiny_lm 为旧小模型单测
-    model_backend: str = "qwen3"  # qwen3 | mock | tiny_lm
+    # qwen3=Qwen3 load/forward 骨架；mock 仅测试用
+    model_backend: str = "qwen3"  # qwen3 | mock
     # C12：模型加载 / warmup 骨架
     model_id: str = ""
     model_revision: str = ""
@@ -71,7 +71,7 @@ class RoleConfig:
         """C6/D3 + C7：从环境变量读启动配置。
 
         LAKE_WORKER_ROLE=prefill|decode|hybrid
-        LAKE_MODEL_BACKEND=qwen3|mock|tiny_lm
+        LAKE_MODEL_BACKEND=qwen3|mock
         LAKE_ENABLE_DRAFTER / LAKE_ENABLE_OVERLAP / LAKE_ALLOW_PARTIAL_HIT
         LAKE_NUM_DRAFT_TOKENS / LAKE_MAX_RUNNING_REQS / LAKE_PULL_BUDGET_MS
         LAKE_MAX_NUM_SCHEDULED_TOKENS / LAKE_LONG_PREFILL_TOKEN_THRESHOLD

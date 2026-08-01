@@ -100,8 +100,8 @@ def test_partial_hit_prompt_residual_has_read_set() -> None:
 def test_forward_exception_does_not_call_done() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
-    runner = ModelRunner(pool, model_backend="tiny_lm")
-    runner._forward_tiny = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: SLF001
+    runner = ModelRunner(pool, model_backend="qwen3")
+    runner._forward_model = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: SLF001
     req = Req(
         req_id="r1",
         model_id="m",

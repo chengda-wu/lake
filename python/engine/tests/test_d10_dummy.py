@@ -132,9 +132,9 @@ def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
     assert pins == [info]
     assert runner.model_loaded is True
     assert runner.model_warmed is False
-    assert runner._qwen3 is not None  # noqa: SLF001
-    assert runner._qwen3.config.num_hidden_layers == 28  # noqa: SLF001
-    assert runner._qwen3.config.num_key_value_heads == 8  # noqa: SLF001
+    assert runner._model is not None  # noqa: SLF001
+    assert runner._model.config.num_hidden_layers == 28  # noqa: SLF001
+    assert runner._model.config.num_key_value_heads == 8  # noqa: SLF001
 
     out = runner.warmup(num_reqs=2, tokens_per_req=1)
     assert out.step_id == -1

@@ -1,5 +1,1 @@
-"""已废止为实现树——投机解码见 `engine/drafter/`（post/pre_forward）。"""
-
-from engine.drafter import TinyMTPDrafter
-
-_ = TinyMTPDrafter
+"""已废止为实现树——投机解码后续随真实 draft/spec 模型接入。"""
