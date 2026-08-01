@@ -77,6 +77,6 @@ jobs:
           pkill -f lake-controlplane 2>/dev/null || true
           pkill -f lake-kv-pool 2>/dev/null || true
           pkill -f lake-storage-agent 2>/dev/null || true
-          pkill -f 'python3 -m runtime' 2>/dev/null || true
+          pkill -f 'python3 -m lake.runtime' 2>/dev/null || true
           pkill -f lake-router 2>/dev/null || true
           true

@@ -96,7 +96,7 @@ wait_tcp 127.0.0.1:50054 storage-agent
 echo "==> start python worker"
 (
   cd python
-  PYTHONPATH=. python3 -m runtime
+  PYTHONPATH=. python3 -m lake.runtime
 ) &
 PIDS+=($!)
 wait_tcp 127.0.0.1:50053 worker
