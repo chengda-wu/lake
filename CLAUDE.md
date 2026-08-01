@@ -174,7 +174,7 @@ cd rust && cargo build
 # Go 请求控制面(pb.go 入仓)
 cd go && go build ./...
 # Python 计算层(stub 入仓,worker 包可 import)
-PYTHONPATH=python python3 -c "from lake_pb import lake_pb2; import prefill, runtime"
+python3 -c "import lake; from lake.pb import lake_pb2; import lake.prefill, lake.runtime"
 ```
 
 改 `proto/` 后重生成 Go/Python stub(入仓):`bash scripts/gen_stubs.sh`(工具链版本见脚本头注释)。CI(`.github/workflows/build.yml`)跑三语言 build + stub-drift 检查。
