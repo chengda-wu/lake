@@ -450,6 +450,7 @@ class NodeScheduler:
             pending = self._pending_drafts.get(rid) or []
             _ = self._future_map.resolve(rid)
             end = len(req.all_token_ids) + inflight
+            query_start = max(0, end - 1)
             # 守 max_model_length（生成不得越过）
             mml = self._role.max_model_length
             if mml > 0:
@@ -464,7 +465,13 @@ class NodeScheduler:
                 if max_accept <= 0:
                     continue
                 num_tokens[rid] = max_accept
-                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + max_accept))
+                write_set.append(
+                    ReqIoSet(
+                        req_id=rid,
+                        token_start=query_start,
+                        token_end=query_start + max_accept,
+                    )
+                )
                 req_modes[rid] = ForwardMode.TARGET_VERIFY
                 spec_tokens[rid] = list(pending[: max_accept - 1])
                 self._inflight_decode[rid] = inflight + max_accept
@@ -474,13 +481,15 @@ class NodeScheduler:
                 if n <= 0:
                     continue
                 num_tokens[rid] = n
-                write_set.append(ReqIoSet(req_id=rid, token_start=end, token_end=end + n))
+                write_set.append(
+                    ReqIoSet(req_id=rid, token_start=query_start, token_end=query_start + n)
+                )
                 req_modes[rid] = ForwardMode.DECODE
                 self._inflight_decode[rid] = inflight + n
                 budget -= n
 
             computed_at[rid] = computed
-            read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=end))
+            read_set.append(ReqIoSet(req_id=rid, token_start=0, token_end=query_start))
             cached.req_ids.append(rid)
             cached.num_computed_tokens.append(computed + inflight)
             cached.num_output_tokens.append(req.num_output_tokens + inflight)

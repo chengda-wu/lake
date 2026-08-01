@@ -150,17 +150,24 @@ class UnitUnsupportedConfig:
 
 
 def test_model_runner_uses_registered_architecture_for_load_model() -> None:
+    old = ModelRegistry.models.get("UnitCustomForCausalLM")
     ModelRegistry.register_model("UnitCustomForCausalLM", UnitCustomForCausalLM)
-    ag = InMemoryAgent()
-    pool = PoolIface(ag)
-    runner = ModelRunner(pool, model_backend="qwen3", model_config=UnitCustomConfig())
-    info = runner.load_model(model_path="unit/custom", revision="r1")
-    assert info.model_path == "unit/custom"
-    assert info.served_model_name == "model"
-    assert info.revision == "r1"
-    assert info.backend == "qwen3"
-    assert info.load_format == "dummy"
-    assert info.load_dummy_weights is True
+    try:
+        ag = InMemoryAgent()
+        pool = PoolIface(ag)
+        runner = ModelRunner(pool, model_backend="qwen3", model_config=UnitCustomConfig())
+        info = runner.load_model(model_path="unit/custom", revision="r1")
+        assert info.model_path == "unit/custom"
+        assert info.served_model_name == "model"
+        assert info.revision == "r1"
+        assert info.backend == "qwen3"
+        assert info.load_format == "dummy"
+        assert info.load_dummy_weights is True
+    finally:
+        if old is None:
+            ModelRegistry.models.pop("UnitCustomForCausalLM", None)
+        else:
+            ModelRegistry.models["UnitCustomForCausalLM"] = old
 
 
 def test_scheduler_qwen3_dummy_finishes() -> None:

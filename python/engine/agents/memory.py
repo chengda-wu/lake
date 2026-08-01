@@ -66,6 +66,7 @@ class InMemoryAgent:
         if req_id in self.l0_token_end:
             self.l0_token_end[req_id] = min(self.l0_token_end[req_id], end)
         self._prepares_since_commit[req_id] = 0
+
     def prepare_step(self, plan: PreparePlan) -> ReadyHandle:
         self.prepare_calls += 1
         if self._ready_step is not None:
@@ -138,6 +139,7 @@ class InMemoryAgent:
         # step 结束解冻（简化：清空本步冻结；生产按 block ref）
         self._frozen_reqs.clear()
         self._flush_deferred_finish()
+
     def on_request_finished(self, finish: FinishRequest) -> None:
         if finish.req_id in self._frozen_reqs or self._ready_step is not None:
             # overlap：本步还在用 / 下一 ready 未完成 → 延迟归还
