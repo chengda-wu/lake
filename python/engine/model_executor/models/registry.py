@@ -14,7 +14,6 @@ from typing import Any
 from engine.model_executor.models.qwen.qwen3_meta import (
     QWEN3_0_6B_CONFIG,
     QWEN3_0_6B_MODEL_ID,
-    QWEN3_DUMMY_WEIGHT_NAMES,
 )
 
 
@@ -47,7 +46,7 @@ class ModelSpec:
     backend: str
     config: Any
     runner_attr: str = ""
-    dummy_weight_names: tuple[str, ...] = ()
+    dummy_weight_names: tuple[str, ...] | None = None
     load_dummy_weights: bool = False
 
     @property
@@ -119,7 +118,6 @@ _MODEL_SPECS: dict[str, ModelSpec] = {
         backend="qwen3",
         config=QWEN3_0_6B_CONFIG,
         runner_attr="_qwen3",
-        dummy_weight_names=QWEN3_DUMMY_WEIGHT_NAMES,
         load_dummy_weights=True,
     ),
 }

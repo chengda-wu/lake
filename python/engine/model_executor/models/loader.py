@@ -20,11 +20,11 @@ class DummyModelLoader(Generic[TModel, TConfig]):
         self,
         model_cls: type[TModel],
         config: TConfig,
-        weight_names: Iterable[str],
+        weight_names: Iterable[str] | None = None,
     ) -> None:
         self._model_cls = model_cls
         self._config = config
-        self._weight_names = tuple(weight_names)
+        self._weight_names = tuple(weight_names) if weight_names is not None else None
 
     def load_model(self) -> TModel:
         model = self._model_cls(self._config)
@@ -35,8 +35,12 @@ class DummyModelLoader(Generic[TModel, TConfig]):
 
     def load_weights(self, model: TModel) -> set[str]:
         load_weights = getattr(model, "load_weights")
-        return load_weights(self.iter_dummy_weights())
+        return load_weights(self.iter_dummy_weights(model))
 
-    def iter_dummy_weights(self) -> Iterable[tuple[str, object]]:
-        for name in self._weight_names:
+    def iter_dummy_weights(self, model: TModel) -> Iterable[tuple[str, object]]:
+        names = self._weight_names
+        if names is None:
+            state_dict = getattr(model, "state_dict")
+            names = tuple(state_dict().keys())
+        for name in names:
             yield name, object()
