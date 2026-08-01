@@ -45,7 +45,12 @@ class FakePool:
 def _make_sched(overlap: bool = True, max_running: int = 8) -> Tuple[NodeScheduler, FakePool]:
     pool = FakePool()
     runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
-    role = RoleConfig(model_backend="mock", enable_overlap=overlap, max_running_reqs=max_running)
+    role = RoleConfig(
+        model_backend="mock",
+        model_id="mock-llm",
+        enable_overlap=overlap,
+        max_running_reqs=max_running,
+    )
     return NodeScheduler(pool, runner, role), pool  # type: ignore[arg-type]
 
 
@@ -64,6 +69,14 @@ def test_extend_then_decode_finishes() -> None:
     # 冷启动：EXTEND prefill>0 写入后，decode 步 reused=99 不得覆盖
     assert done.reused_blocks == 0
     assert done.prefill_blocks == 2
+
+
+def test_build_req_requires_model_id() -> None:
+    try:
+        build_req_from_generate("missing-model", "", [1, 2], 1, "n0")
+        raise AssertionError("expected missing model_id")
+    except ValueError as e:
+        assert "model_id is required" in str(e)
 
 
 def test_continuous_batching_two_reqs() -> None:
@@ -175,7 +188,7 @@ def test_respect_effective_sets_drops_req() -> None:
     ag.l0_token_end["keep"] = 4  # keep 本地已齐，无需补拉
     pool = PoolIface(ag, pull_budget_ms=10, allow_partial_hit=True)
     role = RoleConfig(model_backend="mock", enable_overlap=False)
-    runner = ModelRunner(pool)
+    runner = ModelRunner(pool, model_backend="mock")
     sched = NodeScheduler(pool, runner, role)
 
     out = SchedulerOutput(
@@ -213,7 +226,7 @@ def test_respect_effective_sets_drops_all() -> None:
     ag.pull_cost_ms = 50
     pool = PoolIface(ag, pull_budget_ms=10, allow_partial_hit=True)
     role = RoleConfig(model_backend="mock", enable_overlap=False)
-    runner = ModelRunner(pool)
+    runner = ModelRunner(pool, model_backend="mock")
     sched = NodeScheduler(pool, runner, role)
 
     out = SchedulerOutput(

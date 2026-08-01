@@ -6,7 +6,7 @@ import threading
 import time
 
 from engine.model_runner import ModelRunner
-from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
+from engine.model_executor.models.qwen.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from runtime.lifecycle import WorkerLifecycle, WorkerState
 from runtime.node_scheduler import build_req_from_generate
 from runtime.role import RoleConfig
@@ -43,7 +43,12 @@ def test_lifecycle_forward_and_drain() -> None:
 def test_engine_capacity_signal() -> None:
     pool = FakePool()
     runner = ModelRunner(pool)  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(), coalesce_s=0)  # type: ignore[arg-type]
+    eng = WorkerEngine(
+        pool,
+        runner,
+        RoleConfig(model_id=QWEN3_0_6B_MODEL_ID),
+        coalesce_s=0,
+    )  # type: ignore[arg-type]
     eng.start()
     try:
         sig = eng.capacity_signal()
@@ -75,8 +80,13 @@ def test_stop_never_started() -> None:
 def test_stop_fails_orphaned_inflight() -> None:
     """stop 后必须唤醒仍卡在 done.wait 的 inflight（审出：哨兵抢先会孤儿化）。"""
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    eng = WorkerEngine(
+        pool,
+        runner,
+        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        coalesce_s=0,
+    )  # type: ignore[arg-type]
     eng.start()
     req = build_req_from_generate("orphan", "m", list(range(4)), 2, "n0")
     item = _Inbound(req=req, hint=None, done=threading.Event(), error=[], result=[])
@@ -91,8 +101,13 @@ def test_stop_fails_orphaned_inflight() -> None:
 def test_stop_timeout_does_not_clear_inflight() -> None:
     """High：join 超时后调用方不得清 scheduler/inflight（避免与活 step 竞态）。"""
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    eng = WorkerEngine(
+        pool,
+        runner,
+        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        coalesce_s=0,
+    )  # type: ignore[arg-type]
     release = threading.Event()
     entered = threading.Event()
 
@@ -124,8 +139,13 @@ def test_stop_timeout_does_not_clear_inflight() -> None:
 def test_submit_after_stop_raises() -> None:
     """Medium：stop 后 submit 必须立刻失败，不得永久 wait。"""
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    eng = WorkerEngine(
+        pool,
+        runner,
+        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        coalesce_s=0,
+    )  # type: ignore[arg-type]
     eng.start()
     eng.stop()
     try:
@@ -138,7 +158,12 @@ def test_submit_after_stop_raises() -> None:
 def test_step_exception_stops_engine_loop() -> None:
     pool = FakePool()
     runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    eng = WorkerEngine(
+        pool,
+        runner,
+        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        coalesce_s=0,
+    )  # type: ignore[arg-type]
 
     def boom(before_schedule=None, should_stop=None):  # noqa: ANN001
         raise RuntimeError("fatal forward")
@@ -164,8 +189,13 @@ def test_step_exception_stops_engine_loop() -> None:
 def test_submit_stop_race_no_hang() -> None:
     """Medium：submit 与 stop 交错时，要么完成要么 raise，不得 hang。"""
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
-    eng = WorkerEngine(pool, runner, RoleConfig(model_backend="mock"), coalesce_s=0)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend="mock")  # type: ignore[arg-type]
+    eng = WorkerEngine(
+        pool,
+        runner,
+        RoleConfig(model_backend="mock", model_id="mock-llm"),
+        coalesce_s=0,
+    )  # type: ignore[arg-type]
     eng.start()
     barrier = threading.Barrier(2)
     errors: list = []

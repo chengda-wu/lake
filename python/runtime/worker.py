@@ -16,7 +16,6 @@ from typing import Optional
 import grpc
 
 from engine.model_runner import ModelRunner
-from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
 from engine.pool_iface import PoolIface, chain_block_hashes, mock_kv_bytes
 from engine.pool_types import PoolError, PoolErrorCode
 from lake_pb import lake_pb2, lake_pb2_grpc
@@ -93,15 +92,15 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
         return self._engine
 
     def Generate(self, request: lake_pb2.GenerateRequest, context: grpc.ServicerContext) -> lake_pb2.GenerateResponse:
-        node = request.requester_node_id or NODE_ID
-        req = build_req_from_generate(
-            request_id=request.request_id,
-            model_id=request.model_id or QWEN3_0_6B_MODEL_ID,
-            prompt_tokens=list(request.prompt_tokens),
-            max_new_tokens=request.max_new_tokens or 4,
-            node_id=node,
-        )
         try:
+            node = request.requester_node_id or NODE_ID
+            req = build_req_from_generate(
+                request_id=request.request_id,
+                model_id=request.model_id,
+                prompt_tokens=list(request.prompt_tokens),
+                max_new_tokens=request.max_new_tokens or 4,
+                node_id=node,
+            )
             hint = self._pool.probe_prefix(req)
             req.exec_mode = select_exec_mode(
                 hint, prompt_len=len(req.prompt_token_ids), role=self._role.role

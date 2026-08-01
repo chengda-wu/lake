@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
-from engine.attn.metadata import build_attn_metadata
+from engine.model_executor.layers.attention_metadata import build_attn_metadata
 from engine.input_batch import InputBatch, InputBuffers
 from engine.model_runner import ModelRunner
-from engine.models.tiny_lm import TinyLM
+from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.pool_types import PreparePlan, ReadyHandle
 from kernels.attn_ref import causal_attn_queries

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from engine.agents.memory import InMemoryAgent
 from engine.model_runner import ModelRunner
-from engine.models.tiny_lm import TinyLM
+from engine.model_executor.models.tiny_lm import TinyLM
 from engine.pool_iface import PoolIface
 from engine.sample.grammar import apply_token_bitmask
 from engine.sample.greedy import greedy_sample

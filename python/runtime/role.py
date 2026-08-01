@@ -6,8 +6,6 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
-from engine.models.qwen3_meta import QWEN3_0_6B_MODEL_ID
-
 
 class WorkerRole(str, Enum):
     PREFILL = "prefill"
@@ -48,7 +46,7 @@ class RoleConfig:
     # qwen3=Qwen3 load/forward 骨架；mock 仅测试用；tiny_lm 为旧小模型单测
     model_backend: str = "qwen3"  # qwen3 | mock | tiny_lm
     # C12：模型加载 / warmup 骨架
-    model_id: str = QWEN3_0_6B_MODEL_ID
+    model_id: str = ""
     model_revision: str = ""
     warmup_num_reqs: int = 1
     warmup_tokens_per_req: int = 1
@@ -91,8 +89,7 @@ class RoleConfig:
         return cls(
             role=role,
             model_backend=backend,
-            model_id=os.environ.get("LAKE_MODEL_ID", QWEN3_0_6B_MODEL_ID).strip()
-            or QWEN3_0_6B_MODEL_ID,
+            model_id=os.environ.get("LAKE_MODEL_ID", "").strip(),
             model_revision=os.environ.get("LAKE_MODEL_REVISION", "").strip(),
             enable_drafter=_env_bool("LAKE_ENABLE_DRAFTER", False),
             enable_overlap=_env_bool("LAKE_ENABLE_OVERLAP", True),

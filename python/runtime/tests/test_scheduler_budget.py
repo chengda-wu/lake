@@ -38,7 +38,7 @@ class FakePool:
 
 def _make(role: RoleConfig) -> Tuple[NodeScheduler, FakePool]:
     pool = FakePool()
-    runner = ModelRunner(pool)  # type: ignore[arg-type]
+    runner = ModelRunner(pool, model_backend=role.model_backend)  # type: ignore[arg-type]
     return NodeScheduler(pool, runner, role), pool  # type: ignore[arg-type]
 
 
