@@ -38,6 +38,8 @@ PyTorch blog：[Hybrid Models Meet SGLang: More Than Full Attention](https://pyt
 
 > 当前版本未实现 N>2 子池（L17-19 assert）。
 
+> **opt-in 状态**：unified memory pool 已合入主线（PR [#29678](https://github.com/sgl-project/sglang/pull/29678)，2026-07-01），由 `--enable-unified-memory` 开启，隐含 `--enable-page-major-kv-layout`。本地 submodule `37f94cb7a0` 已含此功能与 `UnifiedRadixCache`。注意：当前版本 **不兼容 PD 分离**（`server_args.py:6549-6552` 显式拒绝）。
+
 ### 3. Hybrid 双池的语义来源
 
 `memory_pool.py::MambaPool`（L311，request 级定长 SSM 状态）、`HybridReqToTokenPool`（L876）、`HybridLinearKVPool`（L2508，full attention 的 token 级 KV + 线性层状态分离）。`hi_mamba_radix_cache.py::HiMambaRadixCache` 要求 `HybridLinearKVPool`（L114-120）。elastic pool 的价值正在于：full-attention KV（随 token 增长）与 SSM 状态（随 request 定长）的最佳比例随负载漂移，静态切分会浪费——两端相向生长让两者动态争用同一 buffer。
@@ -54,6 +56,30 @@ PyTorch blog：[Hybrid Models Meet SGLang: More Than Full Attention](https://pyt
 | Hybrid 请求→token 映射 | `HybridReqToTokenPool` | `memory_pool.py:876` |
 | Hybrid KV（full + linear 分离） | `HybridLinearKVPool` | `memory_pool.py:2508` |
 | Hybrid radix（Mamba + KV 双 LRU） | `HiMambaRadixCache` | `hi_mamba_radix_cache.py` |
+
+## 上游演进（issue / PR 调研，2026-08-03）
+
+> 三个层面：功能引入、shrink/eviction 补全、重构。
+
+### 引入：unified memory pool（已合入）
+
+- **PR [#29678](https://github.com/sgl-project/sglang/pull/29678)** `feat(mem_cache): unified memory pool for hybrid Mamba / SWA models`（2026-07-01 合入，28 文件）。本 PR 引入 `UnifiedKVPool` + `MultiEndedAllocator`（两端相向生长 + lazy compaction，v2p 重映射不改引用）+ `--enable-unified-memory`。设计要点：pool 是纯存储，write-loc 走 attention metadata（`KVWriteLoc`）；cuda-graph 内零 translate 节点（v2p 在 `init_forward_metadata_out_graph` eager 预解到 capture-stable buffer）。**本文所述机制即此 PR 的产物**。
+- **前身 PR [#7911](https://github.com/sgl-project/sglang/pull/7911)** `Support elastic kv cache memory pool`（2025-07 开，2026-03 关闭）。早期「elastic」语义更宽：跨 LLM 共享、按需分配 GPU 物理内存（idle LLM 让出给忙 LLM）。评审问「带来 TTFT/TPOT 何种收益」后停滞，思路被 #29678 收窄为「hybrid 双池共享」接续。关闭非否决，是范围收敛。
+
+### shrink / eviction 补全（进行中，本地未含）
+
+本地 submodule `37f94cb7a0` 的 `commit_range` **monotonic 只增**（无主动物理页 unmap），shrink 只发生在字节区间层。上游正在补 eviction 语义：
+
+- **PR [#33091](https://github.com/sgl-project/sglang/pull/33091)** `[unified-memory] Stop eviction when shared allocation capacity is sufficient`（2026-07-31 开，OPEN）。`UnifiedRadixCache` 多组件共享物理池——evict 一个 FULL leaf 可能连带释放 Mamba state，其 compaction 又让 FULL 容量可调度。原 `evict()` 按组件局部 shortfall 满足，会过度驱逐。本 PR 拆分语义：显式 `evict()` 仍满足 per-component count；allocation 触发的 `evict_for_alloc()` 在共享 allocator 能满足（含 peer compaction 释放）时即停。**本地 submodule 未含此 PR**。
+- **PR [#13023](https://github.com/sgl-project/sglang/pull/13023)** `RFC: Page-Granular Free Path for PagedTokenToKVPoolAllocator`（2025-11，DRAFT，长期未合）。页粒度 free 路径 + debug 内存追踪，是更细粒度回收的底层铺垫。
+- **Issue [#29857](https://github.com/sgl-project/sglang/issues/29857)** `[Bug] v0.5.14: With EAGLE/MTP on, KV pool profiler leaves ~50 GB VRAM idle on hybrid GDN model`（OPEN）。EAGLE/MTP 开启时 profiler 留 ~50GB VRAM 闲置、KV token 容量被压低——印证 unified pool 的 sizing/profiling 在 spec decode 路径仍有 bug，静态预估偏保守。
+- **Issue [#29034](https://github.com/sgl-project/sglang/issues/29034)** `[Bug] --hicache-size over-allocates Mamba host cache for hybrid Mamba models`（OPEN）。`--hicache-size` 对 hybrid Mamba 的 host cache 过分配——分层侧也有 sizing 不准问题。
+
+> 小结：**「按需 commit 物理页」已落地**；**「主动归还物理页 / 跨池 eviction 协调」仍在补**（#33091 进行中，#29857/#29034 暴露 sizing bug）。blog 图的「shrink」在当前版本是字节区间层 compacting free，物理页层 unmap 尚未实现。
+
+### 重构（进行中）
+
+- **Issue [#25371](https://github.com/sgl-project/sglang/issues/25371)** `[RFC][Refactor] mem_cache pool / allocator restructure`（OPEN）。`memory_pool.py` 2000 行/11 类混杂，按 family 拆 `pool/`（10 文件）、`pool_host/`（9 文件）、`allocator/`（5 文件）。Roadmap 中 `mem_cache/pool/ → HybridLinearKVPool` 与 `hybrid_cache+unified_cache_components` **未完成**。纯机械搬移（mechanical move），非功能变化，但意味着本文引用的类名/文件在后续版本会迁移路径。
 
 ## 与 lake 的关系
 
