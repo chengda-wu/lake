@@ -31,9 +31,14 @@ pub struct PutEndSession {
     pub revision: String,
     pub prefix_hashes: Vec<Vec<u8>>,
     blocks: Vec<PendingBlock>,
-    /// Observability / future assert: true while WRITEBACK+1 is held
-    /// (between `report_refs(+1)` and successful `-1`). Not read by logic yet.
+    /// True while WRITEBACK+1 is held on CP (between `report_refs(+1)` and a
+    /// successful `-1`). Read by `commit_through` as a re-acquire guard so a
+    /// retry never stacks a second WRITEBACK ref atop an unclosed phantom.
     writeback_open: bool,
+    /// True while the H2 REQUEST register-hold is held on CP. Session-scoped,
+    /// idempotent across `commit_through` retries: a retry after barrier
+    /// failure reuses the retained hold instead of stacking a second one.
+    register_hold_open: bool,
 }
 
 impl PutEndSession {
@@ -59,6 +64,7 @@ impl PutEndSession {
             prefix_hashes: Vec::new(),
             blocks: Vec::new(),
             writeback_open: false,
+            register_hold_open: false,
         }
     }
 
@@ -141,6 +147,19 @@ impl PutEndSession {
                 node_id: self.node_id.clone(),
             })
             .collect()
+    }
+
+    /// Best-effort release of the H2 register hold. Returns true when no hold
+    /// remains open afterwards (released, or none held); false when the
+    /// release failed and the hold stays retained on CP (reconcile cleans it).
+    fn release_register_hold<P: ControlPlanePort>(&mut self, cp: &mut P) -> bool {
+        if !self.register_hold_open {
+            return true;
+        }
+        if cp.report_refs(&self.request_deltas(-1)).is_ok() {
+            self.register_hold_open = false;
+        }
+        !self.register_hold_open
     }
 
     /// Flush to L2 only. Returns hashes demoted L2→L3 under L2 cap (collateral).
@@ -267,33 +286,44 @@ impl PutEndSession {
         // succeeds, held across the register→barrier window. On barrier
         // failure we roll back WRITEBACK−1 but KEEP this hold so global_refs
         // stays >0: a concurrent eviction cannot reclaim a registered, durable
-        // block during the retry/discard window. The hold leaks on barrier
-        // failure (cleaned by `reconcile_dead_node`); on success it is released
-        // once WRITEBACK−1 closes.参考 SGLang `lock_ref` register→barrier 持有
-        // 语义 + Mooncake discard/release 双阶段（lake 用 ref 计数而非 TTL）。
-        if let Err(e) = cp.report_refs(&self.request_deltas(1)) {
-            unpin_all(store, &self.blocks);
-            return Err(e);
+        // block during the retry/discard window. The hold is session-scoped:
+        // `register_hold_open` makes it idempotent across retries — a retry
+        // after barrier failure reuses the retained hold instead of stacking
+        // a second one (which would leak +1 per failed attempt until
+        // reconcile). Released on the success path once WRITEBACK−1 closes;
+        // an abandoned session's hold is cleaned by `reconcile_dead_node`.
+        // 参考 SGLang `lock_ref` register→barrier 持有语义 + Mooncake
+        // discard/release 双阶段（lake 用 ref 计数而非 TTL）。
+        if !self.register_hold_open {
+            if let Err(e) = cp.report_refs(&self.request_deltas(1)) {
+                unpin_all(store, &self.blocks);
+                return Err(e);
+            }
+            self.register_hold_open = true;
         }
         // WRITEBACK +1 冻 radix 驱逐：register 后、barrier 前期间 block 不可被驱逐。
         // -1 延迟到 barrier 之后——barrier 完成才解冻，语义对齐 SGLang `lock_ref`
-        // （flush→ack 整段持有）。
-        if let Err(e) = cp.report_refs(&self.writeback_deltas(1)) {
-            // WRITEBACK+1 failed: no writeback established — release the hold.
-            let _ = cp.report_refs(&self.request_deltas(-1));
-            unpin_all(store, &self.blocks);
-            return Err(e);
+        // （flush→ack 整段持有）。重试时若 +1 仍未关闭（H3 phantom / 回滚失败），
+        // 跳过重复获取，由本次 −1 关账，避免 phantom 累积。
+        if !self.writeback_open {
+            if let Err(e) = cp.report_refs(&self.writeback_deltas(1)) {
+                // WRITEBACK+1 failed: no writeback established — release the hold.
+                self.release_register_hold(cp);
+                unpin_all(store, &self.blocks);
+                return Err(e);
+            }
+            self.writeback_open = true;
         }
-        self.writeback_open = true;
         if let Err(e) = cp.request_barrier(RequestBarrierRequest {
             request_id: self.request_id.clone(),
             node_id: self.node_id.clone(),
         }) {
             // Barrier failed: roll back WRITEBACK−1 (reset to pre-writeback
             // state for retry) but KEEP the REQUEST hold so global_refs stays
-            // >0 — the block remains non-evictable. The hold leaks until the
-            // caller retries / drains the session or `reconcile_dead_node`
-            // clears this node's ref holdings. Safe: block stays resident.
+            // >0 — the block remains non-evictable. The retained hold is
+            // reused by a retry of this same session (no re-acquire, no
+            // leak); an abandoned session's hold is cleared by
+            // `reconcile_dead_node`. Safe: block stays resident.
             let rollback = cp.report_refs(&self.writeback_deltas(-1));
             if rollback.is_ok() {
                 self.writeback_open = false;
@@ -308,27 +338,41 @@ impl PutEndSession {
                 "{e}; barrier failed — REQUEST register-hold retained, block frozen pending retry/discard"
             ));
         }
-        if let Err(e) = cp.report_refs(&self.writeback_deltas(-1)) {
-            // H3: barrier succeeded but WRITEBACK -1 failed: CP-side global_refs
-            // retains the +1 from the earlier `report_refs(+1)` — a phantom
-            // ref. Do NOT clear `writeback_open`: that would lie about state
-            // (the +1 is still open). Best-effort release the REQUEST hold —
-            // the phantom WRITEBACK ref alone freezes the block; ignoring a
-            // release error is safe (block stays frozen either way, reconcile
-            // cleans both). Unpin is correct: the local pin was for the
-            // register→barrier window, now over; eviction safety is held by
-            // the CP ref, not the local pin.
-            let _ = cp.report_refs(&self.request_deltas(-1));
-            unpin_all(store, &self.blocks);
-            return Err(format!(
-                "{e}; barrier succeeded but WRITEBACK -1 failed: CP global_refs retains +1, pending node-level reconcile"
-            ));
+        if self.writeback_open {
+            if let Err(e) = cp.report_refs(&self.writeback_deltas(-1)) {
+                // H3: barrier succeeded but WRITEBACK -1 failed: CP-side
+                // global_refs retains the +1 from the earlier
+                // `report_refs(+1)` — a phantom ref. Do NOT clear
+                // `writeback_open`: that would lie about state (the +1 is
+                // still open); a retry skips re-acquire and lets its own −1
+                // close the phantom. Best-effort release the REQUEST hold —
+                // the phantom WRITEBACK ref alone freezes the block; ignoring
+                // a release error is safe (block stays frozen either way,
+                // reconcile cleans both). Unpin is correct: the local pin was
+                // for the register→barrier window, now over; eviction safety
+                // is held by the CP ref, not the local pin.
+                let hold_retained = !self.release_register_hold(cp);
+                unpin_all(store, &self.blocks);
+                let hold_note = if hold_retained {
+                    "; REQUEST register-hold release also failed: global_refs retains an additional +1"
+                } else {
+                    ""
+                };
+                return Err(format!(
+                    "{e}; barrier succeeded but WRITEBACK -1 failed: CP global_refs retains +1, pending node-level reconcile{hold_note}"
+                ));
+            }
+            self.writeback_open = false;
         }
-        self.writeback_open = false;
         // Barrier + WRITEBACK−1 closed: release the register hold.
-        if let Err(e) = cp.report_refs(&self.request_deltas(-1)) {
-            unpin_all(store, &self.blocks);
-            return Err(e);
+        if self.register_hold_open {
+            if let Err(e) = cp.report_refs(&self.request_deltas(-1)) {
+                unpin_all(store, &self.blocks);
+                return Err(format!(
+                    "{e}; register-hold release failed after barrier: CP global_refs retains +1, pending node-level reconcile"
+                ));
+            }
+            self.register_hold_open = false;
         }
 
         for b in &self.blocks {
@@ -1117,6 +1161,240 @@ mod tests {
             port.auth.evict_n("m", "", PoolKind::Target as i32, 1),
             1,
             "after reconcile clears the hold, block is evictable"
+        );
+    }
+
+    /// Retry convergence (H2 follow-up): the barrier-failure error invites a
+    /// retry, and the retained REQUEST hold must be REUSED, not re-acquired.
+    /// Without `register_hold_open` the retry stacks a second hold and the
+    /// success path releases only its own → +1 leaked per failed attempt,
+    /// freezing the block until reconcile. With the guard the retry ends at
+    /// global_refs=0 and the block is evictable.
+    #[test]
+    fn barrier_failure_then_retry_success_reuses_hold_no_leak() {
+        use std::cell::Cell;
+
+        struct BarrierOnceFailPort {
+            auth: Authority,
+            /// One-shot: first `request_barrier` errors, then delegates.
+            fail_once: Cell<u32>,
+        }
+        impl ControlPlanePort for BarrierOnceFailPort {
+            fn admit_register_blocks(
+                &mut self,
+                _req: &RegisterBlocksRequest,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
+                self.auth
+                    .register(&req.node_id, &req.prefix_hashes, req.blocks)
+                    .map(|_| ())
+            }
+            fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
+                self.auth.report_refs(deltas)
+            }
+            fn request_barrier(&mut self, req: RequestBarrierRequest) -> Result<(), String> {
+                if self.fail_once.get() == 0 {
+                    self.fail_once.set(1);
+                    return Err("barrier unavailable".into());
+                }
+                self.auth.complete_barrier(&req.request_id, &req.node_id)
+            }
+            fn publish_location(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                tier: Tier,
+                node_id: &str,
+                present: bool,
+            ) -> Result<(), String> {
+                self.auth
+                    .publish_location(model_id, revision, pool_kind, flat, tier, node_id, present)
+            }
+            fn set_l3_present(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                present: bool,
+            ) -> Result<(), String> {
+                self.auth
+                    .set_l3_present(model_id, revision, pool_kind, flat, present)
+            }
+            fn relocate_in_view(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                tier: Tier,
+                node_id: &str,
+                segment_id: u64,
+                offset: u64,
+            ) -> Result<(), String> {
+                self.auth.relocate_in_view(
+                    model_id, revision, pool_kind, flat, tier, node_id, segment_id, offset,
+                )
+            }
+        }
+
+        let mut store = LocalTierEngine::new();
+        let mut port = BarrierOnceFailPort {
+            auth: Authority::default(),
+            fail_once: Cell::new(0),
+        };
+        ensure_model(&mut port.auth, "m");
+        let mut sess = PutEndSession::new("r-retry", "n0", "m");
+        sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
+
+        // Attempt 1: barrier fails; REQUEST hold retained (ref 1).
+        let err = sess.commit_through(&mut store, &mut port).unwrap_err();
+        assert!(err.contains("barrier unavailable"), "got {err}");
+        assert_eq!(
+            port.auth
+                .global_ref("m", "", PoolKind::Target as i32, b"h0"),
+            1
+        );
+        assert!(sess.register_hold_open);
+        assert!(!sess.writeback_open);
+
+        // Attempt 2 (retry, same session): barrier now succeeds. The retained
+        // hold is reused — no re-acquire — and released on the success path.
+        sess.commit_through(&mut store, &mut port).unwrap();
+        assert_eq!(
+            port.auth
+                .global_ref("m", "", PoolKind::Target as i32, b"h0"),
+            0,
+            "retry must converge to zero refs; a stacked hold would leak +1"
+        );
+        assert!(!sess.register_hold_open);
+        assert!(!sess.writeback_open);
+        assert_eq!(
+            port.auth.evict_n("m", "", PoolKind::Target as i32, 1),
+            1,
+            "no leaked hold: block is evictable after successful retry"
+        );
+    }
+
+    /// Retry convergence (H3 follow-up): barrier succeeded but WRITEBACK−1
+    /// failed, leaving a phantom +1 with `writeback_open=true`. A retry must
+    /// not stack a second WRITEBACK+1 atop the phantom; its own −1 closes
+    /// the original one, converging to global_refs=0.
+    #[test]
+    fn writeback_minus_one_failure_then_retry_converges() {
+        use std::cell::Cell;
+
+        struct MinusOneOnceFailPort {
+            auth: Authority,
+            /// One-shot: first WRITEBACK −1 errors, then delegates.
+            fail_once: Cell<u32>,
+        }
+        impl ControlPlanePort for MinusOneOnceFailPort {
+            fn admit_register_blocks(
+                &mut self,
+                _req: &RegisterBlocksRequest,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn register_blocks(&mut self, req: RegisterBlocksRequest) -> Result<(), String> {
+                self.auth
+                    .register(&req.node_id, &req.prefix_hashes, req.blocks)
+                    .map(|_| ())
+            }
+            fn report_refs(&mut self, deltas: &[RefDelta]) -> Result<(), String> {
+                if self.fail_once.get() == 0
+                    && deltas
+                        .iter()
+                        .any(|d| d.delta < 0 && d.kind == RefKind::Writeback as i32)
+                {
+                    self.fail_once.set(1);
+                    return Err("writeback -1 unavailable".into());
+                }
+                self.auth.report_refs(deltas)
+            }
+            fn request_barrier(&mut self, req: RequestBarrierRequest) -> Result<(), String> {
+                self.auth.complete_barrier(&req.request_id, &req.node_id)
+            }
+            fn publish_location(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                tier: Tier,
+                node_id: &str,
+                present: bool,
+            ) -> Result<(), String> {
+                self.auth
+                    .publish_location(model_id, revision, pool_kind, flat, tier, node_id, present)
+            }
+            fn set_l3_present(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                present: bool,
+            ) -> Result<(), String> {
+                self.auth
+                    .set_l3_present(model_id, revision, pool_kind, flat, present)
+            }
+            fn relocate_in_view(
+                &mut self,
+                model_id: &str,
+                revision: &str,
+                pool_kind: i32,
+                flat: &[u8],
+                tier: Tier,
+                node_id: &str,
+                segment_id: u64,
+                offset: u64,
+            ) -> Result<(), String> {
+                self.auth.relocate_in_view(
+                    model_id, revision, pool_kind, flat, tier, node_id, segment_id, offset,
+                )
+            }
+        }
+
+        let mut store = LocalTierEngine::new();
+        let mut port = MinusOneOnceFailPort {
+            auth: Authority::default(),
+            fail_once: Cell::new(0),
+        };
+        ensure_model(&mut port.auth, "m");
+        let mut sess = PutEndSession::new("r-m1retry", "n0", "m");
+        sess.put_start(b"h0".to_vec(), b"KV:h0".to_vec());
+
+        // Attempt 1: phantom WRITEBACK +1 remains; REQUEST hold released.
+        let err = sess.commit_through(&mut store, &mut port).unwrap_err();
+        assert!(err.contains("WRITEBACK -1 failed"), "got {err}");
+        assert_eq!(
+            port.auth
+                .global_ref("m", "", PoolKind::Target as i32, b"h0"),
+            1
+        );
+        assert!(sess.writeback_open);
+        assert!(!sess.register_hold_open);
+
+        // Attempt 2 (retry): no second WRITEBACK+1; the retry's −1 closes the
+        // phantom. Refs converge to zero and the block is evictable.
+        sess.commit_through(&mut store, &mut port).unwrap();
+        assert_eq!(
+            port.auth
+                .global_ref("m", "", PoolKind::Target as i32, b"h0"),
+            0,
+            "retry must close the phantom, not stack a second WRITEBACK ref"
+        );
+        assert!(!sess.writeback_open);
+        assert!(!sess.register_hold_open);
+        assert_eq!(
+            port.auth.evict_n("m", "", PoolKind::Target as i32, 1),
+            1,
+            "phantom closed by retry: block is evictable"
         );
     }
 
