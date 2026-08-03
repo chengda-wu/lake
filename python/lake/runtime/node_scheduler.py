@@ -252,10 +252,10 @@ class NodeScheduler:
 
     def _run_batch(self, output: SchedulerOutput) -> None:
         ready = self._pool.prepare_step(output, self._reqs)
-        # D2：allow_partial_hit 缩批后须按 effective_* 执行（默认与 plan 相同）
-        output = self._respect_effective_sets(output, ready)
-        self.timeline.append(("execute", output.step_id))
         try:
+            # D2：allow_partial_hit 缩批后须按 effective_* 执行（默认与 plan 相同）
+            output = self._respect_effective_sets(output, ready)
+            self.timeline.append(("execute", output.step_id))
             runner_out = self._executor.execute_model(
                 ExecutorInput(output=output, ready=ready, host_reqs=self._reqs)
             )
@@ -323,6 +323,8 @@ class NodeScheduler:
         computed_at = {
             rid: c for rid, c in output.req_num_computed_at_schedule.items() if rid in keep
         }
+        query_start = {rid: q for rid, q in output.req_query_start.items() if rid in keep}
+        query_end = {rid: q for rid, q in output.req_query_end.items() if rid in keep}
 
         return SchedulerOutput(
             step_id=output.step_id,
@@ -340,6 +342,8 @@ class NodeScheduler:
             has_structured_output=grammar_output is not None,
             grammar_output=grammar_output,
             req_num_computed_at_schedule=computed_at,
+            req_query_start=query_start,
+            req_query_end=query_end,
         )
 
     def _filter_grammar_output(
@@ -417,6 +421,8 @@ class NodeScheduler:
         write_set: List[ReqIoSet] = []
         req_modes: Dict[str, ForwardMode] = {}
         computed_at: Dict[str, int] = {}
+        query_start_by_req: Dict[str, int] = {}
+        query_end_by_req: Dict[str, int] = {}
         spec_tokens: Dict[str, List[int]] = {}
         budget = int(self._role.max_num_scheduled_tokens)
         if budget <= 0:
@@ -475,6 +481,8 @@ class NodeScheduler:
                 req_modes[rid] = ForwardMode.TARGET_VERIFY
                 spec_tokens[rid] = list(pending[: max_accept - 1])
                 self._inflight_decode[rid] = inflight + max_accept
+                query_start_by_req[rid] = query_start
+                query_end_by_req[rid] = query_start + max_accept
                 budget -= max_accept
             else:
                 n = min(1, left, budget, room)
@@ -486,6 +494,8 @@ class NodeScheduler:
                 )
                 req_modes[rid] = ForwardMode.DECODE
                 self._inflight_decode[rid] = inflight + n
+                query_start_by_req[rid] = query_start
+                query_end_by_req[rid] = query_start + n
                 budget -= n
 
             computed_at[rid] = computed
@@ -541,6 +551,8 @@ class NodeScheduler:
                 cached.num_computed_tokens.append(computed)
                 cached.num_output_tokens.append(req.num_output_tokens)
             req_modes[rid] = ForwardMode.EXTEND
+            query_start_by_req[rid] = computed
+            query_end_by_req[rid] = computed + n
             budget -= n
 
         if not num_tokens:
@@ -583,6 +595,8 @@ class NodeScheduler:
             has_structured_output=grammar_output is not None,
             grammar_output=grammar_output,
             req_num_computed_at_schedule={r: computed_at[r] for r in num_tokens},
+            req_query_start={r: query_start_by_req[r] for r in num_tokens},
+            req_query_end={r: query_end_by_req[r] for r in num_tokens},
         )
 
     def _has_unprocessed_prompt(self, rid: str, prompt_len: int) -> bool:
@@ -606,6 +620,7 @@ class NodeScheduler:
             if computed_before < prompt_len:
                 # C7 chunked extend：按本步 scheduled_n 推进，勿一次跳到 prompt_len
                 req.num_computed_tokens = min(prompt_len, computed_before + scheduled_n)
+                self._pool.commit_write_extent(rid, req.num_computed_tokens)
                 # 仅整段 prompt 算完后才挂 draft（投机种子）
                 if req.num_computed_tokens >= prompt_len:
                     drafts = runner_out.next_draft_tokens.get(rid) or []

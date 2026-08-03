@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from lake.engine.agents.memory import InMemoryAgent
 from lake.engine.model_runner import ModelRunner, ModelRunnerOutput
-from lake.engine.pool_iface import ReadyHandle, StepStats
+from lake.engine.pool_iface import PoolIface, ReadyHandle, StepStats
 from lake.runtime.executor import ExecutorInput, SingleProcessExecutor
 from lake.runtime.node_scheduler import NodeScheduler, build_req_from_generate
 from lake.runtime.role import RoleConfig
-from lake.runtime.scheduler_output import ForwardMode, SchedulerOutput
+from lake.runtime.scheduler_output import ForwardMode, ReqIoSet, SchedulerOutput
 from lake.runtime.worker_engine import WorkerEngine
 
 
@@ -102,6 +103,40 @@ def test_node_scheduler_done_on_executor_exception() -> None:
     except RuntimeError as e:
         assert "boom" in str(e)
     assert pool.done_steps == [output.step_id]
+    assert not sched._result_queue  # noqa: SLF001
+
+
+def test_node_scheduler_done_when_effective_set_filter_fails() -> None:
+    class BadFilterScheduler(NodeScheduler):
+        def _respect_effective_sets(self, output, ready):  # type: ignore[no-untyped-def]
+            raise RuntimeError("bad effective sets")
+
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    runner = ModelRunner(pool, model_backend="mock")
+    role = RoleConfig(model_backend="mock", enable_overlap=False)
+    sched = BadFilterScheduler(pool, runner, role)
+    req = build_req_from_generate("r-filter", "m", list(range(4)), 1, "n0")
+    sched.add_request(req)
+    output = SchedulerOutput(
+        step_id=11,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={req.req_id: 1},
+        total_num_scheduled_tokens=1,
+        write_set=[ReqIoSet(req_id=req.req_id, token_start=3, token_end=4)],
+        req_forward_modes={req.req_id: ForwardMode.DECODE},
+        req_num_computed_at_schedule={req.req_id: 4},
+        req_query_start={req.req_id: 3},
+        req_query_end={req.req_id: 4},
+    )
+
+    try:
+        sched._run_batch(output)  # noqa: SLF001
+        raise AssertionError("expected effective set failure")
+    except RuntimeError as e:
+        assert "bad effective sets" in str(e)
+    assert ag.done_calls == 1
+    assert ag._ready_step is None  # noqa: SLF001
     assert not sched._result_queue  # noqa: SLF001
 
 

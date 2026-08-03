@@ -70,7 +70,30 @@ def test_dummy_run_skips_pool_done() -> None:
     assert ag.prepare_calls == 0
     assert runner._input_batch.req_ids == ["dummy-0", "dummy-1"]  # noqa: SLF001
     assert runner._attn_meta is not None  # noqa: SLF001
-    assert runner._attn_meta.num_actual_tokens == 6  # noqa: SLF001
+    assert runner._attn_meta.num_actual_tokens == 2  # noqa: SLF001
+    assert out.next_token_ids == {"dummy-0": [0], "dummy-1": [0]}
+
+
+def test_extend_process_consumes_prepare_commit_guard() -> None:
+    ag = InMemoryAgent()
+    pool = PoolIface(ag)
+    runner = ModelRunner(pool, model_backend="mock")
+    from lake.runtime.node_scheduler import NodeScheduler, build_req_from_generate
+    from lake.runtime.role import RoleConfig
+
+    sched = NodeScheduler(
+        pool,
+        runner,
+        RoleConfig(model_backend="mock", enable_overlap=False, max_num_scheduled_tokens=8),
+    )
+    sched.add_request(build_req_from_generate("r", "m", list(range(8)), 2, "n0"))
+
+    out = sched.schedule()
+    assert out.req_forward_modes["r"] == ForwardMode.EXTEND
+    sched._run_batch(out)  # noqa: SLF001
+    assert ag._prepares_since_commit["r"] == 1  # noqa: SLF001
+    sched._pop_and_process()  # noqa: SLF001
+    assert ag._prepares_since_commit["r"] == 0  # noqa: SLF001
 
 
 def test_dummy_run_requires_loaded_model() -> None:

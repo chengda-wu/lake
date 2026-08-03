@@ -98,3 +98,6 @@ class SchedulerOutput:
     req_forward_modes: Dict[str, ForwardMode] = field(default_factory=dict)
     # 调度瞬间的 num_computed（供 process 区分 prompt 残差 vs 生成；overlap 下 Host 可能滞后）
     req_num_computed_at_schedule: Dict[str, int] = field(default_factory=dict)
+    # 调度权威的本步 query 几何；runner 只读，避免 overlap 下从滞后的 Host Req 重算。
+    req_query_start: Dict[str, int] = field(default_factory=dict)
+    req_query_end: Dict[str, int] = field(default_factory=dict)

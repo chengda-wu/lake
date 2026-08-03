@@ -195,29 +195,36 @@ class ModelRunner:
                 continue
             prompt_len = len(req.prompt_token_ids)
             computed = output.req_num_computed_at_schedule.get(req_id, req.num_computed_tokens)
+            query_start = output.req_query_start.get(req_id)
+            query_end = output.req_query_end.get(req_id)
             batch.req_ids.append(req_id)
             batch.num_scheduled_tokens[req_id] = n
             batch.num_computed_tokens[req_id] = computed
             if computed < prompt_len:
-                end = min(prompt_len, computed + n)
+                start = computed if query_start is None else query_start
+                end = min(prompt_len, query_end if query_end is not None else computed + n)
                 batch.token_ids[req_id] = list(req.prompt_token_ids[:end])
-                batch.query_start[req_id] = computed
+                batch.query_start[req_id] = start
                 batch.query_end[req_id] = end
                 batch.is_prompt_phase[req_id] = True
             else:
                 ctx = list(req.all_token_ids)
                 draft = list(spec_map.get(req_id) or [])[: max(0, n - 1)]
+                qs = query_start if query_start is not None else max(0, len(ctx) - 1)
+                qe = query_end if query_end is not None else max(qs, qs + n)
                 if draft:
                     # TARGET_VERIFY：输入 last_ctx + draft，产生 draft 校验 + bonus。
-                    batch.token_ids[req_id] = ctx + draft
-                    batch.query_start[req_id] = max(0, len(ctx) - 1)
-                    batch.query_end[req_id] = len(ctx) + len(draft)
+                    tokens = ctx + draft
                 else:
-                    batch.token_ids[req_id] = ctx
-                    # decode：以最后已有 token 为 query，预测下一 token
-                    qs = max(0, len(ctx) - 1)
-                    batch.query_start[req_id] = qs
-                    batch.query_end[req_id] = len(ctx)
+                    tokens = ctx
+                # overlap 下 scheduler 的 query 几何可能已包含 device-side inflight token；
+                # Python 骨架尚无真实 device token 接力，用最后已知 token 占位以保持位置/slot 几何。
+                if len(tokens) < qe:
+                    pad = tokens[-1] if tokens else 0
+                    tokens.extend([pad] * (qe - len(tokens)))
+                batch.token_ids[req_id] = tokens[:qe]
+                batch.query_start[req_id] = qs
+                batch.query_end[req_id] = qe
                 batch.is_prompt_phase[req_id] = False
         self._input_batch = batch
         return batch
@@ -362,7 +369,9 @@ class ModelRunner:
         """
         if not self._model_loaded:
             raise ValueError("model must be loaded before dummy_run")
-        num_tokens = {f"dummy-{i}": tokens_per_req for i in range(num_reqs)}
+        num_reqs = max(1, int(num_reqs))
+        tokens_per_req = max(1, int(tokens_per_req))
+        num_tokens = {f"dummy-{i}": 1 for i in range(num_reqs)}
         host_reqs = {
             rid: Req(
                 req_id=rid,
@@ -374,11 +383,13 @@ class ModelRunner:
         }
         output = SchedulerOutput(
             step_id=step_id,
-            forward_mode=ForwardMode.EXTEND,
+            forward_mode=ForwardMode.DECODE,
             num_scheduled_tokens=num_tokens,
             total_num_scheduled_tokens=sum(num_tokens.values()),
-            req_forward_modes={rid: ForwardMode.EXTEND for rid in num_tokens},
-            req_num_computed_at_schedule={rid: 0 for rid in num_tokens},
+            req_forward_modes={rid: ForwardMode.DECODE for rid in num_tokens},
+            req_num_computed_at_schedule={rid: tokens_per_req for rid in num_tokens},
+            req_query_start={rid: max(0, tokens_per_req - 1) for rid in num_tokens},
+            req_query_end={rid: tokens_per_req for rid in num_tokens},
             can_run_graph=True,
         )
         ready = ReadyHandle(
@@ -387,7 +398,7 @@ class ModelRunner:
                 rid: list(range((tokens_per_req + 7) // 8)) for rid in num_tokens
             },
             slot_mapping_by_req={
-                rid: list(range(tokens_per_req)) for rid in num_tokens
+                rid: [max(0, tokens_per_req - 1)] for rid in num_tokens
             },
         )
         return self._execute_prepared(output, ready, host_reqs)

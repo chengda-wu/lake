@@ -77,6 +77,37 @@ def test_decode_slot_mapping_matches_query_position() -> None:
     assert meta.slot_mapping == [3]
 
 
+def test_prepare_inputs_uses_scheduler_query_geometry_under_overlap() -> None:
+    pool = PoolIface(InMemoryAgent())
+    runner = ModelRunner(pool, model_backend="mock")
+    req = build_req_from_generate("r", "m", list(range(4)), 2, "n0")
+    req.num_computed_tokens = len(req.prompt_token_ids)
+    out = SchedulerOutput(
+        step_id=3,
+        forward_mode=ForwardMode.DECODE,
+        num_scheduled_tokens={"r": 1},
+        total_num_scheduled_tokens=1,
+        req_num_computed_at_schedule={"r": len(req.prompt_token_ids)},
+        req_query_start={"r": 4},
+        req_query_end={"r": 5},
+        req_forward_modes={"r": ForwardMode.DECODE},
+    )
+
+    batch = runner.prepare_inputs(out, {"r": req})
+    assert batch.query_start["r"] == 4
+    assert batch.query_end["r"] == 5
+    assert len(batch.token_ids["r"]) == 5
+
+    ready = ReadyHandle(
+        step_id=3,
+        block_table_by_req={"r": [0]},
+        slot_mapping_by_req={"r": [4]},
+    )
+    meta = runner.prepare_attn(batch, ready)
+    assert meta.positions == [4]
+    assert meta.slot_mapping == [4]
+
+
 def test_two_reqs_same_batch_mock() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)

@@ -127,6 +127,28 @@ def test_decode_read_write_sets_target_query_token() -> None:
     assert out.num_scheduled_tokens["d"] == 1
     assert [(io.token_start, io.token_end) for io in out.read_set] == [(0, 3)]
     assert [(io.token_start, io.token_end) for io in out.write_set] == [(3, 4)]
+    assert out.req_query_start["d"] == 3
+    assert out.req_query_end["d"] == 4
+
+
+def test_decode_query_geometry_includes_inflight_overlap() -> None:
+    role = RoleConfig(
+        model_backend="mock",
+        enable_overlap=True,
+        max_num_scheduled_tokens=4,
+    )
+    sched, _ = _make(role)
+    req = build_req_from_generate("o", "m", list(range(4)), 3, "n0")
+    req.num_computed_tokens = 4
+    sched.add_request(req)
+    sched._running.append(sched._waiting.pop(0))  # noqa: SLF001
+    sched._inflight_decode["o"] = 1  # noqa: SLF001
+
+    out = sched.schedule()
+    assert out.req_forward_modes["o"] == ForwardMode.DECODE
+    assert [(io.token_start, io.token_end) for io in out.write_set] == [(4, 5)]
+    assert out.req_query_start["o"] == 4
+    assert out.req_query_end["o"] == 5
 
 
 def test_admission_rejects_over_max_model_length() -> None:
