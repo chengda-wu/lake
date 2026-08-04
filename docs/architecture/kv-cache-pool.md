@@ -325,7 +325,7 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 
 两条写回路分开(满块结构性,尾块容错性):
 
-- **满块路**:block 填满 → 池算哈希 → 写回 L2 durable(NVMe)→ 注册 radix。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希)。decode 跨 block 边界即产生满块,请求进行中就可能触发。**durable-first**:L2 写回完成后才注册 radix 发布视图(radix 发布时后盾已落实,对齐 Mooncake COMPLETE 前字节已落稳、Dynamo settled 后才 register presence;SGLang 反向 register-先靠 `host_value`+`BlockRemoved` 补偿)。register 后到请求结束屏障之间 block 持 **writeback ref 不可驱逐**(请求进行中冻结,非防悬空——durable-first 已消除"radix 有、durable 无"窗口;参考 SGLang `write_back` 驱逐即回写,见 [`consistency.md`](consistency.md) §3)。请求结束是**写回屏障**(flush+ack + writeback ref 归零,解冻晚于 barrier)。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N",留 P7 校准。
+- **满块路**:block 填满 → 池算哈希 → 写回 L2 durable(NVMe)→ 注册 radix。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希)。decode 跨 block 边界即产生满块,请求进行中就可能触发。**durable-first**:L2 写回完成后才注册 radix 发布视图(radix 发布时后盾已落实,对齐 Mooncake COMPLETE 前字节已落稳、Dynamo settled 后才 register presence;SGLang 反向 register-先靠 `host_value`+`BlockRemoved` 补偿)。register 后到请求结束屏障之间 block 持 **writeback ref 不可驱逐**(请求进行中冻结,非防悬空——durable-first 已消除"radix 有、durable 无"窗口;参考 SGLang `write_back` 驱逐即回写,见 [`consistency.md`](consistency.md) §3)。请求结束是**写回屏障**(flush+ack + writeback ref 归零,解冻晚于 barrier)。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N"。**P7.3 已校准**:写回字节量与 N 无关(块数 × 块字节恒定),N 只影响 ops 频率(ops ∝ 1/N)——按 ops/RPC 预算选 N,原型建议 N=2–4 块一批(ops 降 2–4×,容错窗口多 1–3 个块,可接受);见「P7.3 校准结论」。
 - **尾块路**:请求结束时仍未填满的 block(尾块)→ 请求结束点写回一次,写"当前尾 block 的全部已填 token",重放时整块覆盖。纯容错,不进 radix(哈希未定,或带 partial 标记)。因尾块只在请求结束写一次,无增量式。
 
 引擎不感知 block 满不满(Q2.1:block 对引擎纯寻址单位)——满块判断、哈希、radix 注册、写回全归池。容错点 = "KV 落 L2(NVMe)"的时刻;满块越频繁写回(N 小)→ 崩溃丢的越少、写放大越大,反之亦然。decode 增量写回同时服务容错 + 前缀生长(见 [`execution-modes.md`](execution-modes.md) 时序二反向)。
@@ -378,7 +378,7 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 
 - **逻辑碎片**:同一序列 block 散落多 KV Node → Decode 读扇出大、传输慢。整理:把热点序列 block 迁到少数节点共置,降读扇出(热度由 radix + 访问频次判定)。
 - **物理碎片**:NVMe/RAM 空闲页零散 → 写入放大、分配失败。整理:后台压实合并空闲页。
-- 节流:消耗带宽与 CPU,须节流并与低峰重叠,可暂停可恢复;目标开销 < 总带宽 X%(P7 校准)。
+- 节流:消耗带宽与 CPU,须节流并与低峰重叠,可暂停可恢复;**后台开销 <10% 由 `BandwidthPool::default_throttle` 构造保证**(10% × 1GiB/s 名义链路 / 1s 窗,令牌桶+可暂停,P7.3 核实;注意该预算只含后台 GC/整理,**不含**数据路径的同步迁移——写驱逐/读回填的迁移放大另见「P7.3 校准结论」)。
 
 **P4.8 原型**(单进程 mock;真 NVMe/跨机 → P5):
 
@@ -403,6 +403,18 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 - Decode 节点崩溃:存储池检测 → 把该 sequence 路由到新节点 → 由存储池把已有 KV(从 L2 NVMe,本机或远端按池放置)放置到新节点 HBM → 续推(ref 从原请求转移到新请求,见"引用计数与驱逐")。原节点 HBM/DRAM 副本随销毁失效(本就是易失副本,非私有状态);原节点 NVMe 若未被整机级故障波及则仍存活、可作回填源。
 - **Drain/缩容(主动下线)**:节点进入 Drain 时,agent 先把"还被远端引用的 block"(在途传输 ref>0 或被其他节点 read set 引用)落一份到 L2(NVMe),再下线——避免销毁后远端拉取落空。这是"默认直传 + Drain 推 L2"在故障/弹性侧的落点。
 - 增量写回频率(每 N 步):N 小 → 恢复快、写放大大;N 大 → 恢复慢、写放大小。另有前缀生长诉求,见 [`execution-modes.md`](execution-modes.md)。
+
+## P7.3 校准结论（prototype）
+
+合成 workload(zipf α=1.2、70% 共享前缀、3000 请求 × 16 块)驱动 `LocalTierEngine`;
+复现:`LAKE_BENCH_OUT=... cargo run -p lake-tiered-store --bin p73_curves`。
+**比例类结论与介质无关;时延类为内存层原型相对值**(真介质只会放大层间差,方向稳健)。
+
+1. **命中率-容量曲线**:L0 cap 32→512 块时总命中率 37.5%→64.3%(L0 命中份额 11.3%→42.6%,L1/L2 兜底份额稳定 ~24%);miss 率随容量对数下降。**SLO「KV 命中率 >60%(公共前缀场景)」在 L0≈512 块(×128 token ≈ 64K token/节点)达成**——容量规划依据。
+2. **promote cost 校准**:`estimate_promote_cost` 的 nbytes×hops 线性骨架方向正确(单调),但实测 hops 1→2→3 = 5.2µs→8.0µs→25.2µs(×1.6→×4.9),**L3 源严重超线性**(settle/耐久检查等固定开销)。建议:hops≥3 加固定惩罚或权重 ×5;策略上**避免 L3 直促热块,L3→L0 走批量/异步**。
+3. **block 粒度**:整段前缀复用下有效复用率 64/128/256 = 97.3%/94.6%/89.2%。128 与 64 差 2.7pt(管理开销减半),256 损失明显——**维持 128 默认**。
+4. **写回频率 N**:字节量与 N 无关,ops ∝ 1/N → 按 ops 预算选 N,建议 N=2–4 块/批。
+5. **同步迁移放大(数据路径,非后台带宽池)**:容量不足 regime 下 moved/(read+write) 实测达 191%,moved/write 2.0–5.2×(随 L0 容量改善)。后台 GC/整理 <10% 由 `BandwidthPool` 构造保证;但**同步迁移放大是否需要 churn 抑制(如限 L0 写分配率)是开放问题**。
 
 ## 开放问题
 
