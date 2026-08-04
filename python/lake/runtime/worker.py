@@ -101,14 +101,18 @@ class WorkerServicer(lake_pb2_grpc.WorkerServiceServicer):
             )
             # P6.3:选路权威在 Router——消费下发的 exec_mode + 前缀 hint,
             # 不再自调 LookupPrefix 自查前缀。空 exec_mode = 调用方未经 Router
-            # → COLOCATED 无复用;未知值 → INVALID_ARGUMENT(ValueError 出口)。
+            # → COLOCATED 无复用(零 hint,不消费 wire 上的 hint 字段——
+            # 契约:hint 只在 Router 决策后随 exec_mode 一起有意义);
+            # 未知值 → INVALID_ARGUMENT(ValueError 出口)。
             if request.exec_mode:
                 req.exec_mode = ExecMode(request.exec_mode)
-            hint = PrefixHint(
-                computed_tokens=int(request.computed_tokens),
-                reused_blocks=int(request.reused_blocks),
-                local_hit=bool(request.local_hit),
-            )
+                hint = PrefixHint(
+                    computed_tokens=int(request.computed_tokens),
+                    reused_blocks=int(request.reused_blocks),
+                    local_hit=bool(request.local_hit),
+                )
+            else:
+                hint = PrefixHint()
             done = self._engine.submit(req, hint=hint)
         except PoolError as e:
             _abort_pool_error(context, e)
