@@ -132,6 +132,7 @@ type nodeRegistry struct {
 	ready    []string
 	draining map[string]bool
 	seq      int // 已分配的最大节点序号(worker-N)
+	rr       int // pick 轮询游标
 }
 
 func newNodeRegistry(initial ...string) *nodeRegistry {
@@ -146,14 +147,17 @@ func newNodeRegistry(initial ...string) *nodeRegistry {
 	return r
 }
 
-// pick 取首个 ready 节点(单节点原型 = worker-0;空表兜底 worker-0)。
+// pick 轮询取 ready 节点(空表兜底 worker-0)——P6.5 review:扩缩后请求
+// 应在节点间分流(单节点时退化为恒等,单进程 deploy 行为不变)。
 func (r *nodeRegistry) pick() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(r.ready) == 0 {
 		return "worker-0"
 	}
-	return r.ready[0]
+	id := r.ready[r.rr%len(r.ready)]
+	r.rr++
+	return id
 }
 
 func (r *nodeRegistry) count() int {
@@ -197,6 +201,17 @@ func (r *nodeRegistry) remove(id string) {
 	delete(r.draining, id)
 }
 
+// unmarkDraining Drain 失败回滚(review #57):victim 回 ready 末位
+// (LIFO 语义不变)——Drain RPC 未生效时容量不得永久丢一档。
+func (r *nodeRegistry) unmarkDraining(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.draining[id] {
+		delete(r.draining, id)
+		r.ready = append(r.ready, id)
+	}
+}
+
 // lastReady 最后加入的 ready 节点(LIFO 缩容 victim——缩最近扩出来的)。
 func (r *nodeRegistry) lastReady() (string, bool) {
 	r.mu.RLock()
@@ -233,6 +248,7 @@ func (s *Server) applyScale(ctx context.Context, d ScaleDecision) error {
 			return fmt.Errorf("JoinShardNode rejected: %s", resp.GetErr())
 		}
 		s.nodes.add(id)
+		s.syncCapacity() // 并发随 ready 节点数升(review #57)
 		// 原型:join 完成即 Ready(真实 provision 时延 <10s 目标待 P7 校准)
 		s.lastReadyLatencyMu.Lock()
 		s.lastReadyLatency = time.Since(start)
@@ -249,16 +265,34 @@ func (s *Server) applyScale(ctx context.Context, d ScaleDecision) error {
 		}
 		resp, err := s.cp.DrainShardNode(ctx, &lakepb.DrainShardNodeRequest{NodeId: victim})
 		if err != nil {
+			s.nodes.unmarkDraining(victim) // Drain 未执行:回滚,容量不丢
+			s.syncCapacity()
 			return fmt.Errorf("DrainShardNode: %w", err)
 		}
 		if !resp.GetOk() {
+			s.nodes.unmarkDraining(victim)
+			s.syncCapacity()
 			return fmt.Errorf("DrainShardNode rejected: %s", resp.GetErr())
 		}
+		s.syncCapacity() // victim 摘出路由 → 并发随节点数降
 		log.Printf("scale-in: drain %s (migrations=%d, push_l2=%d)",
 			victim, resp.GetMigrationCount(), len(resp.GetPushL2()))
 		s.reapDraining(ctx)
 	}
 	return nil
+}
+
+// syncCapacity 并发随 ready 节点数伸缩(review #57):总并发 = 单节点上限 ×
+// ready 数——扩容才真加执行容量,否则只动 shard 环不分流。单节点时恒等。
+func (s *Server) syncCapacity() {
+	if s.sched == nil {
+		return
+	}
+	base := s.cfg.MaxInFlight
+	if base <= 0 {
+		base = 1
+	}
+	s.sched.SetMaxInFlight(base * s.nodes.count())
 }
 
 // reapDraining 对 draining 节点重试 RemoveShardNode(CP 以 locations 清空为

@@ -29,7 +29,7 @@ type Config struct {
 	AgentAddr   string // AgentService(边10 Dispatch),默认 127.0.0.1:50054
 	CPAddr      string // ControlPlaneService(权威回退查询),默认 127.0.0.1:50051
 	NodeRole    string // 候选执行节点角色(hybrid/prefill/decode,LAKE_NODE_ROLE),P6.3 选路输入;单节点原型默认 hybrid
-	MaxInFlight int    // P6.4:Router 并发执行上限(非准入控制——队列无界不拒请求);单 worker mock 默认 1
+	MaxInFlight int    // P6.4:单节点并发执行上限(P6.5 起总并发=×ready 节点数;非准入控制——队列无界不拒请求);单 worker mock 默认 1
 	Autoscale   bool   // P6.5:基于指标的弹性扩缩(LAKE_AUTOSCALE=1);默认关——单进程原型不起真实 worker
 }
 

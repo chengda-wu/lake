@@ -7,6 +7,8 @@ import (
 	"time"
 
 	lakepb "github.com/chengda-wu/lake/go/pb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // P6.5 判据(issue #52):扩缩单测 + drain/迁移最小化验证。
@@ -146,6 +148,72 @@ func TestApplyScaleInDrainsAndRemoves(t *testing.T) {
 	}
 	if srv.nodes.count() != 1 || srv.nodes.pick() != "worker-0" {
 		t.Fatalf("nodes = %d pick = %q, want 1/worker-0", srv.nodes.count(), srv.nodes.pick())
+	}
+}
+
+// review #57 回归:Drain RPC 失败/被拒 → victim 回滚回 ready(容量不丢一档)。
+func TestApplyScaleInDrainFailureRollsBack(t *testing.T) {
+	for name, drainFn := range map[string]func(context.Context, *lakepb.DrainShardNodeRequest) (*lakepb.DrainShardNodeResponse, error){
+		"rpc_error": func(context.Context, *lakepb.DrainShardNodeRequest) (*lakepb.DrainShardNodeResponse, error) {
+			return nil, status.Error(codes.Unavailable, "cp down")
+		},
+		"rejected": func(context.Context, *lakepb.DrainShardNodeRequest) (*lakepb.DrainShardNodeResponse, error) {
+			return &lakepb.DrainShardNodeResponse{Ok: false, Err: "unknown node"}, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := dialFakeCP(t, fakeCP{drainShardNode: drainFn})
+			defer srv.Close()
+			srv.nodes = newNodeRegistry("worker-0", "worker-1")
+
+			if err := srv.applyScale(context.Background(), DecideScaleIn); err == nil {
+				t.Fatal("want error from failed drain")
+			}
+			if srv.nodes.count() != 2 {
+				t.Fatalf("ready = %d, want 2(Drain 失败回滚,容量不丢)", srv.nodes.count())
+			}
+			if got := srv.nodes.drainingList(); len(got) != 0 {
+				t.Fatalf("draining = %v, want [](回滚清 draining)", got)
+			}
+		})
+	}
+}
+
+// review #57:pick 轮询分流(扩缩后请求分布到多节点);单节点退化为恒等。
+func TestNodeRegistryPickRoundRobin(t *testing.T) {
+	r := newNodeRegistry("worker-0", "worker-1")
+	got := map[string]int{}
+	for i := 0; i < 4; i++ {
+		got[r.pick()]++
+	}
+	if got["worker-0"] != 2 || got["worker-1"] != 2 {
+		t.Fatalf("pick 分布 = %v, want 各 2 次(轮询)", got)
+	}
+	single := newNodeRegistry("worker-0")
+	for i := 0; i < 3; i++ {
+		if single.pick() != "worker-0" {
+			t.Fatal("单节点应恒等 worker-0")
+		}
+	}
+}
+
+// review #57:并发随 ready 节点数伸缩(扩容才真加执行容量)。
+func TestSyncCapacityScalesWithNodes(t *testing.T) {
+	srv := dialFakeCP(t, fakeCP{
+		joinShardNode: func(context.Context, *lakepb.JoinShardNodeRequest) (*lakepb.JoinShardNodeResponse, error) {
+			return &lakepb.JoinShardNodeResponse{Ok: true, Map: &lakepb.ShardMap{Generation: 2}}, nil
+		},
+	})
+	defer srv.Close()
+	srv.nodes = newNodeRegistry("worker-0")
+	srv.cfg.MaxInFlight = 2
+	srv.sched = NewPQScheduler(2, time.Second)
+
+	if err := srv.applyScale(context.Background(), DecideScaleOut); err != nil {
+		t.Fatal(err)
+	}
+	if srv.sched.maxInFlight != 4 {
+		t.Fatalf("maxInFlight = %d, want 4(2/节点 × 2 节点)", srv.sched.maxInFlight)
 	}
 }
 
