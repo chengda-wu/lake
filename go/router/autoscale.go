@@ -307,6 +307,9 @@ func (s *Server) applyScale(ctx context.Context, d ScaleDecision) error {
 		// P7 收口(方案 Z):新节点 warmup 由池侧自主决策发起——CP 在
 		// JoinShardNode 后按 hit_count(ReportHits 喂入)选热块并下发
 		// PlaceBlocks;Router 不指挥放置,只持续上报命中(autoscaleTick 尾部)。
+		// P7.4 注:原 Router 侧 prefetch 时延探针随归属迁移移除——warmup
+		// 时延观测归池侧(CP warmup 计划 + P5 真字节路径),冷启动瀑布的
+		// KV 段改由池侧埋点(见 bench/coldstart_waterfall.py 口径注记)。
 	case DecideScaleIn:
 		victim, ok := s.nodes.lastReady()
 		if !ok {

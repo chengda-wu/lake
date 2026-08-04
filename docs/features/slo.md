@@ -30,6 +30,8 @@
 | 指标 | 定义 | 目标（draft） | 约束的设计点 |
 |------|------|---------------|--------------|
 | 扩容生效 | 扩容决策 → Ready 接受请求 | < 10s | 权重预加载、layer-async serve、KV prefetch |
+
+> **P7.4 校准**（mock 环境，[`../../python/lake/runtime/coldstart.py`](../../python/lake/runtime/coldstart.py) `waterfall_layer_async` + `bench.py coldstart_sweep`）：Ready = serve gate，关键路径 = `provision + gate_layers × per_layer`；KV prefetch 与 gate 后权重全在后台（实测 82ms  prefetch 完全藏于权重加载）。扫描（28/80 层 × 50/200ms/层 × gate 2/4/8 层）全部满足 <10s，最差 1.65s。**预算分配建议：provision ≤ 5s + gate ≤ 2.5s（gate=4 层 × ≤500ms/层）+ 余量 ≥2.5s**；全量权重超 10s（80 层 × 200ms = 16s）不阻塞 Ready。真机单层加载成本待校准（TODO-P7-hw）。
 | 缩容恢复 | 节点 Drain → KV 完全写回 Pool | < 5s | 增量写回频率 |
 | 故障续推 | Decode 节点崩溃 → 新节点续推首 token | < 2s | KV Pool 命中、拉取带宽 |
 | 缩容无丢失 | 缩容后请求成功率 | 100% | KV 已持久化到 Pool |
@@ -43,7 +45,7 @@
 | HBM 利用率 | 有效 KV / HBM 容量 | > 70% |
 | 前缀复用率 | 复用 token / prompt token | 场景相关，需建模 |
 | 池空间利用率 | 已用 / 总容量（分模型可见） | 60%–85%（兼顾碎片与扩容余量） |
-| GC/碎片整理开销 | 整理占用带宽 / 总带宽 | < 10%（draft，P7 校准） |
+| GC/碎片整理开销 | 整理占用带宽 / 总带宽 | < 10%（P7.3 校准：后台由 `BandwidthPool::default_throttle` 构造保证；数据路径同步迁移放大另计，见 [`../architecture/kv-cache-pool.md`](../architecture/kv-cache-pool.md)「P7.3 校准结论」） |
 
 ## 可用性
 

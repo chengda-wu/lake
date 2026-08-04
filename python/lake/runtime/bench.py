@@ -19,7 +19,7 @@ from typing import Dict, List, Sequence
 
 from lake.engine.model_runner import ModelRunner
 from lake.engine.pool_iface import ReadyHandle, StepStats
-from lake.runtime.coldstart import run_layer_async, run_sequential
+from lake.runtime.coldstart import run_layer_async, run_sequential, waterfall_layer_async
 from lake.runtime.node_scheduler import build_req_from_generate
 from lake.runtime.role import RoleConfig
 from lake.runtime.scheduler_output import ForwardMode, SchedulerOutput
@@ -151,8 +151,41 @@ def _bench_engine_e2e() -> None:
     )
 
 
+def _bench_coldstart_sweep() -> None:
+    """P7.4:冷启动参数扫描——层数 × 单层成本 × gate 层数 → serve-gate / fully-ready。
+
+    校准 SLO「扩容决策→Ready <10s」的预算分配:Ready=serve gate,
+    关键路径 = provision + serve_after_layers × per_layer;KV prefetch 与
+    gate 后权重在后台,不进 Ready 预算。
+    """
+    provision_s = 0.05  # mock provision(真实调度/拉起待真机)
+    for layers, per_layer_ms in [(28, 50.0), (28, 200.0), (80, 50.0), (80, 200.0)]:
+        for gate_layers in [2, 4, 8]:
+            src = _MockLayerSource(layers, per_layer_ms)
+            m, _segs = waterfall_layer_async(
+                src, gate_layers, _MockPrefetcher(0.5),
+                [bytes([i]) for i in range(64)], provision_s=provision_s,
+            )
+            _emit(
+                "coldstart_sweep",
+                {
+                    "serve_gate": m.time_to_serve_gate * 1000,
+                    "fully_ready": m.time_to_fully_ready * 1000,
+                    "kv_warm": m.time_to_kv_warm * 1000,
+                },
+                {
+                    "layers": layers,
+                    "per_layer_ms_x10": int(per_layer_ms * 10),
+                    "gate_layers": gate_layers,
+                    "hot_blocks": 64,
+                    "meets_10s_slo": int(m.time_to_serve_gate < 10.0),
+                },
+            )
+
+
 def main() -> None:
     _bench_coldstart()
+    _bench_coldstart_sweep()
     _bench_engine_e2e()
     print("python probes done")
 
