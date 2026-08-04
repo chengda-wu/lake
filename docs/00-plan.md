@@ -283,12 +283,13 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 
 ## P7 — 性能建模与验证
 
-- [ ] 成本模型：KV 传输带宽 vs prefill/decode 计算时间
-- [ ] 分层缓存的命中率/成本曲线（P4.3 仅有 `HitStats` 计数骨架 + criterion micro-bench；`estimate_promote_cost` = `nbytes × hops`，hops∈{0..3} 对齐 L0/L1/L2/L3→L0 跳数，见 `LocalTierEngine::estimate_promote_cost`；真 workload 曲线与带宽校准本项）
-- [ ] 弹性冷启动时延分解
-- [ ] 回填到 `docs/` 与 SLO，修正非目标与设计假设
+- [ ] P7.1 测量基座：三语言指标采集点 + bench 运行器（结构化 JSON 结果，后续阶段共用）
+- [ ] P7.2 成本模型 v1：KV 传输带宽 vs prefill/decode 计算时间（模式选择阈值的量化输入）
+- [ ] P7.3 分层缓存命中率/成本曲线（合成 workload 驱动 `HitStats`；校准 `LocalTierEngine::estimate_promote_cost` 跳数模型；block 粒度/写回频率/GC 带宽占比）
+- [ ] P7.4 弹性冷启动时延分解（扩 P6.6 coldstart harness；「扩容决策→Ready <10s」校准）
+- [ ] P7.5 回填 `docs/` 与 SLO：draft → 校准值，每个 P0 假设给量化结论
 
-**完成判据**：每个 P0 假设有量化结论（成立/不成立/在何条件下成立）。
+**完成判据**：每个 P0 假设有量化结论（成立/不成立/在何条件下成立）。阶段实施计划见 issue。
 
 ---
 
