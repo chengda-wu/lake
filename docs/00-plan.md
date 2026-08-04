@@ -283,13 +283,13 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 
 ## P7 — 性能建模与验证
 
-- [ ] P7.1 测量基座：三语言指标采集点 + bench 运行器（结构化 JSON 结果，后续阶段共用）
-- [ ] P7.2 成本模型 v1：KV 传输带宽 vs prefill/decode 计算时间（模式选择阈值的量化输入）
-- [ ] P7.3 分层缓存命中率/成本曲线（合成 workload 驱动 `HitStats`；校准 `LocalTierEngine::estimate_promote_cost` 跳数模型；block 粒度/写回频率/GC 带宽占比）
-- [ ] P7.4 弹性冷启动时延分解（扩 P6.6 coldstart harness；「扩容决策→Ready <10s」校准）
+- [x] P7.1 测量基座：三语言指标采集点 + bench 运行器（结构化 JSON 结果，后续阶段共用）✅ PR #63
+- [x] P7.2 成本模型 v1：KV 传输带宽 vs prefill/decode 计算时间（模式选择阈值的量化输入）✅ PR #64（[`architecture/cost-model.md`](architecture/cost-model.md)）
+- [x] P7.3 分层缓存命中率/成本曲线（合成 workload 驱动 `HitStats`；校准 `LocalTierEngine::estimate_promote_cost` 跳数模型；block 粒度/写回频率/GC 带宽占比）✅ PR #65（[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md)「P7.3 校准结论」）
+- [x] P7.4 弹性冷启动时延分解（扩 P6.6 coldstart harness；「扩容决策→Ready <10s」校准）✅ PR #66（[`features/slo.md`](features/slo.md) 弹性节）
 - [ ] P7.5 回填 `docs/` 与 SLO：draft → 校准值，每个 P0 假设给量化结论
 
-**完成判据**：每个 P0 假设有量化结论（成立/不成立/在何条件下成立）。阶段实施计划见 issue。
+**完成判据**：每个 P0 假设有量化结论（成立/不成立/在何条件下成立）。阶段实施计划见 issue #61；结论表见 [`features/slo.md`](features/slo.md)「P7 校准结论」。
 
 ---
 
