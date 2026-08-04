@@ -66,6 +66,9 @@ type Server struct {
 	lastReadyLatency       time.Duration // 最近扩容决策→Ready 时延(原型=join RPC 完成)
 	hitBlocks, totalBlocks atomic.Uint64 // 命中率分子/分母(累计 block 数)
 	hot                    *hotSet       // P6.6:近期命中块,扩容时 prefetch 到新节点
+
+	modeCountsMu sync.Mutex
+	modeCounts   map[string]uint64 // P7.1 探针:选路模式分布
 }
 
 const maxChatRequestBytes = 1 << 20
@@ -263,6 +266,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	hashes := ChainBlockHashes(tokens, BlockSize)
 	hint := s.prefixHint(ctx, model, hashes, len(tokens), nodeID)
 	mode := SelectExecMode(hint, len(tokens), WorkerRole(s.cfg.NodeRole))
+	s.modeCountsMu.Lock()
+	if s.modeCounts == nil {
+		s.modeCounts = map[string]uint64{}
+	}
+	s.modeCounts[string(mode)]++
+	s.modeCountsMu.Unlock()
 
 	// P6.4:已准入请求进优先级调度器(排序/抢占/背压暂停;不丢请求)。
 	// 抢占重排会重跑本闭包——attempt 后缀避免 worker 侧 duplicate req_id;
@@ -364,6 +373,17 @@ func (s *Server) pickNode() string {
 		return "worker-0"
 	}
 	return s.nodes.pick()
+}
+
+// ModeCounts 返回选路模式分布副本(P7.1 探针)。
+func (s *Server) ModeCounts() map[string]uint64 {
+	s.modeCountsMu.Lock()
+	defer s.modeCountsMu.Unlock()
+	out := make(map[string]uint64, len(s.modeCounts))
+	for k, v := range s.modeCounts {
+		out[k] = v
+	}
+	return out
 }
 
 // hitRate 累计前缀命中率(P6.5 扩缩决策输入;P7 换滑动窗口)。
