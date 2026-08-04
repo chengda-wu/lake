@@ -25,13 +25,15 @@ P0 阶段产出。定义 lake 系统"要交付哪些能力"，作为架构设计
 
 > 彻底存算分离下不存在计算层私有本地缓存：L0–L2 全部归存储池统一管理，"本地命中"是存储池放置决策的结果，所有 KV 位置均为存储池权威元数据。原 APC（D 节点私有缓存）概念已删除，由存储池统一的 HBM 放置管理取代。详见 [`../architecture/storage-layer.md`](../architecture/storage-layer.md)。
 
-### 模式选择（Router 决策，阈值待 P7 校准）
+### 模式选择（Router 决策，命中维度阈值 v1 已由 P7.2 成本模型校准）
 | 条件 | 选择 |
 |------|------|
-| 本地全命中（前缀完全已在某执行节点 HBM） | D-direct |
-| 本地高部分命中 + 残差 prefill 小 | D-direct（该节点做残差 prefill） |
-| prefill 大、P/D 池有空闲、传输带宽充裕 | PD 分离 |
-| prompt 短 或 传输成本 > 分离收益 或 利用率驱动 | 混部 |
+| 本地命中 ≥ 1 block（128 token；前缀已在某执行节点 HBM） | D-direct |
+| 池命中 ≥ 1 block 且路径有效带宽 ≥ 1 GB/s | PD 分离（传 KV 划算） |
+| 命中 < 1 block 或带宽 < 1 GB/s | 混部（重算划算） |
+| prefill 大、P/D 池有空闲（利用率/专池维度） | PD 分离 |
+
+> 命中维度阈值来源：[`../architecture/cost-model.md`](../architecture/cost-model.md)——分界带宽 ≈0.57 GB/s，block=128 量化后「≥1 块即传」在 ≥1 GB/s 下恒成立；sub-GB/s 细分待真机校准。利用率/专池维度由集群拓扑与负载信号决定，不在成本模型内。
 
 > **注**：混部与 D-direct 不违背"存算分离"——KV 仍归存储池权威、写回 Pool（保故障恢复与跨请求复用），只是计算放置在单节点。分离的是**存储与计算**，不是 P 与 D 必须分机。
 
