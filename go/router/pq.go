@@ -29,6 +29,10 @@ import (
 // 前者重排,后者不重排。
 var errPreempted = errors.New("preempted by higher priority request")
 
+// errAbandoned 是客户端取消(在途时)的 cause:不重排、不投递——无人等待,
+// 若被当抢占重排会产生无人等待的僵尸 Generate(review #56)。
+var errAbandoned = errors.New("client cancelled in-flight request")
+
 type pqRequest struct {
 	priority int
 	seq      uint64
@@ -36,9 +40,10 @@ type pqRequest struct {
 	exec     func(ctx context.Context) error
 	done     chan error // buffered 1;Submit 返回后调度器写入不阻塞
 
-	execCtx context.Context // 执行 ctx(finishOne 读 cause 判抢占)
-	cancel  context.CancelCauseFunc
-	err     error // exec 返回值;执行 goroutine 写,经 finished chan 同步后读
+	execCtx   context.Context // 执行 ctx(finishOne 读 cause 判抢占)
+	cancel    context.CancelCauseFunc
+	err       error // exec 返回值;执行 goroutine 写,经 finished chan 同步后读
+	abandoned bool  // 客户端已在途取消(mu 保护):finishOne 不重排不投递
 }
 
 // PQScheduler 优先级调度器。Run 驱动执行;Submit 提交并等待结果。
@@ -71,7 +76,7 @@ func NewPQScheduler(maxInFlight int, bpTTL time.Duration) *PQScheduler {
 }
 
 // Submit 提交一个已准入请求并等待执行完成。ctx 取消(客户端断开/超时):
-// 排队中则摘除,在途则 exec ctx(其父)随之取消;两种情况都不重排。
+// 排队中则摘除;在途则以 errAbandoned 取消 exec(不重排、不投递——无人等待)。
 func (s *PQScheduler) Submit(
 	ctx context.Context,
 	priority int,
@@ -89,7 +94,7 @@ func (s *PQScheduler) Submit(
 	req.seq = s.seq
 	s.insertLocked(req)
 	s.mu.Unlock()
-	s.maybePreempt(priority)
+	s.maybePreempt(priority, model)
 	s.signal()
 
 	select {
@@ -97,7 +102,13 @@ func (s *PQScheduler) Submit(
 		return err
 	case <-ctx.Done():
 		s.mu.Lock()
-		s.removeWaitingLocked(req)
+		waiting := s.removeWaitingLocked(req)
+		if !waiting && req.cancel != nil {
+			// 在途(或刚完成):标记 abandoned 并取消执行;
+			// 已完成的 cancel 是 no-op(cause 已定),abandoned 只是不再投递
+			req.abandoned = true
+			req.cancel(errAbandoned)
+		}
 		s.mu.Unlock()
 		return ctx.Err()
 	}
@@ -217,16 +228,21 @@ func (s *PQScheduler) startEligible(ctx context.Context) {
 	}
 }
 
-// finishOne 收割一个在途请求:被抢占且确实未执行完 → 重排回队列(原 seq,
-// 同优先级最前);否则把 exec 结果写给 Submit 方。
+// finishOne 收割一个在途请求:abandoned(客户端取消)→ 不重排不投递;
+// 被抢占且确实未执行完 → 重排回队列(原 seq,同优先级最前);
+// 否则把 exec 结果写给 Submit 方。
 //
 // 竞态:抢占 cancel 与 exec 自然结束同时发生时,以 req.err 为准——err==nil 说明
 // exec 已完整执行(取消没赶上),直接交付成功,绝不重排(避免同 request_id 二次执行)。
 func (s *PQScheduler) finishOne(req *pqRequest) {
 	s.mu.Lock()
 	delete(s.inFlight, req)
+	abandoned := req.abandoned
 	s.mu.Unlock()
 
+	if abandoned {
+		return // 无人等待:不重排(防僵尸 Generate)、不投递
+	}
 	if req.err != nil && errors.Is(context.Cause(req.execCtx), errPreempted) {
 		s.mu.Lock()
 		s.insertLocked(req)
@@ -239,10 +255,14 @@ func (s *PQScheduler) finishOne(req *pqRequest) {
 
 // maybePreempt 在途已满且新请求 priority 严格高于在途最低者 → 抢占最低者
 // (同优先级不抢占;最低并列时抢占 seq 最大=最晚开始者)。
-func (s *PQScheduler) maybePreempt(newPriority int) {
+// 新请求 model 处于背压时不抢占——它自己也启不来,踢掉在途只会空槽+无谓重算。
+func (s *PQScheduler) maybePreempt(newPriority int, model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.inFlight) < s.maxInFlight {
+		return
+	}
+	if dl, ok := s.bp[model]; ok && time.Now().Before(dl) {
 		return
 	}
 	var victim *pqRequest
@@ -257,11 +277,13 @@ func (s *PQScheduler) maybePreempt(newPriority int) {
 	}
 }
 
-func (s *PQScheduler) removeWaitingLocked(req *pqRequest) {
+// removeWaitingLocked 从等待队列摘除;返回 false = 不在队列(在途或已完成)。
+func (s *PQScheduler) removeWaitingLocked(req *pqRequest) bool {
 	for i, r := range s.queue {
 		if r == req {
 			s.queue = append(s.queue[:i], s.queue[i+1:]...)
-			return
+			return true
 		}
 	}
+	return false
 }

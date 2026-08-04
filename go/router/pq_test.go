@@ -286,3 +286,82 @@ func TestPQClientCancelDequeues(t *testing.T) {
 		t.Fatalf("queue_len = %d, want 0(取消者已摘除)", snap.GetQueueLen())
 	}
 }
+
+// review #56 回归:客户端在途取消 → errAbandoned 取消 exec,不重排不投递——
+// 防无人等待的僵尸 Generate(若被当抢占重排,会为一个已断开的客户端再算一遍)。
+func TestPQClientCancelInFlightCancelsExec(t *testing.T) {
+	s := NewPQScheduler(1, time.Second)
+	runSched(t, s)
+	var calls atomic.Int32
+	causeCh := make(chan error, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Submit(ctx, 5, "m", func(execCtx context.Context) error {
+			calls.Add(1)
+			<-execCtx.Done()
+			causeCh <- context.Cause(execCtx)
+			return execCtx.Err()
+		})
+	}()
+	waitFor(t, 2*time.Second, "exec started", func() bool { return calls.Load() == 1 })
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("submit err = %v, want context.Canceled", err)
+	}
+	if cause := <-causeCh; !errors.Is(cause, errAbandoned) {
+		t.Fatalf("exec cause = %v, want errAbandoned", cause)
+	}
+	// 不重排:exec 只能被调一次;调度器队列应为空(无人等待的残骸不得复活)
+	waitFor(t, 2*time.Second, "drained", func() bool {
+		snap := s.LoadSnapshot("r")
+		return snap.GetQueueLen() == 0 && snap.GetInFlight() == 0
+	})
+	time.Sleep(20 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("exec calls = %d, want 1(abandoned 不重排)", got)
+	}
+}
+
+// review #56 回归:背压中的高优请求不抢占在途低优——它自己也启不来,
+// 踢掉在途只会空槽 + 无谓重算。
+func TestPQNoPreemptWhileBackpressured(t *testing.T) {
+	const bpTTL = 150 * time.Millisecond
+	s := NewPQScheduler(1, bpTTL)
+	runSched(t, s)
+	probe := &pqProbe{}
+	release := make(chan struct{})
+	var lowCancelled atomic.Bool
+
+	lowDone := submitInBackground(s, 1, "x", func(ctx context.Context) error {
+		probe.record("low")
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			lowCancelled.Store(true)
+			return ctx.Err()
+		}
+	})
+	waitStarted(t, probe, 1)
+
+	// 背压中的 model "m" 高优入队:不得踢掉在途的 low
+	s.SetBackpressure("m", time.Now())
+	highDone := submitInBackground(s, 10, "m", func(context.Context) error {
+		probe.record("high")
+		return nil
+	})
+	time.Sleep(30 * time.Millisecond)
+	if lowCancelled.Load() {
+		t.Fatal("背压中的新请求不应抢占在途低优")
+	}
+	close(release) // low 正常完成
+	if err := <-lowDone; err != nil {
+		t.Fatalf("low err = %v", err)
+	}
+	// bp 过期后 high 正常执行(排队等待,不丢)
+	if err := <-highDone; err != nil {
+		t.Fatalf("high err = %v", err)
+	}
+}
