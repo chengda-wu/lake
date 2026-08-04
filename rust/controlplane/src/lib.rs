@@ -1552,6 +1552,32 @@ mod tests {
             .any(|e| e.kind == view_event::Kind::Invalidated as i32));
     }
 
+    /// relocate_in_view(defrag Moved)同样发 MOVED 事件(P6.2 覆盖补齐,review #54)。
+    #[test]
+    fn view_events_cover_relocate_in_view() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        auth.register("n0", &prefix(&[b"h0"]), vec![meta("m", b"h0")])
+            .unwrap();
+        auth.commit_view_events();
+        auth.relocate_in_view(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"h0",
+            Tier::L2,
+            "n0",
+            7,
+            42,
+        )
+        .unwrap();
+        let u = auth.commit_view_events().unwrap();
+        assert_eq!(u.events.len(), 1);
+        assert_eq!(u.events[0].kind, view_event::Kind::Moved as i32);
+        assert_eq!(u.events[0].locations[0].segment_id, 7);
+        assert_eq!(u.events[0].locations[0].offset, 42);
+    }
+
     #[test]
     fn register_rejects_invented_l2() {
         let mut auth = Authority::default();
