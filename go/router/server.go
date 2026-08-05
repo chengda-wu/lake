@@ -34,6 +34,11 @@ type Config struct {
 	// P7.6(B1):亲和路径单节点 in-flight 护栏(命中得分最高者在途 ≥ 护栏
 	// 则降级次优,全部过载落冷路径加权 HRW);≤0 走默认 8。
 	AffinityInFlightGuard int
+	// P7.6(issue #68 条目 4):per-路径类有效带宽静态配置(GB/s,
+	// 键 same_node/same_az/cross_az),模式选择「传 vs 算」的带宽输入;
+	// nil/缺档 → 该路径不过带宽闸。真机 P5 换池侧带宽视图被动 EWMA
+	// (cost-model.md §6 三层结构)。
+	PathClassBandwidthGBps map[string]float64
 }
 
 // Server OpenAI 兼容 HTTP → Dispatch(agent) → Generate(worker)。
@@ -286,7 +291,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	nodeID := pick(model, hashes, routingKey)
 	hint := s.prefixHint(ctx, model, hashes, len(tokens), nodeID)
-	mode := SelectExecMode(hint, len(tokens), WorkerRole(s.cfg.NodeRole))
+	mode := SelectExecMode(hint, len(tokens), WorkerRole(s.cfg.NodeRole), s.pathBandwidthGBps(nodeID))
 	s.modeCountsMu.Lock()
 	if s.modeCounts == nil {
 		s.modeCounts = map[string]uint64{}
@@ -406,6 +411,22 @@ func (s *Server) pickNode() string {
 		return "worker-0"
 	}
 	return s.nodes.pick()
+}
+
+// pathClassOf 节点对的路径类(P7.6/issue #68 条目 4 带宽输入的分类键)。
+// 原型所有 ready 节点同 AZ——拓扑标签(跨 AZ/双网络)随 P5 部署元数据落地。
+func (s *Server) pathClassOf(nodeID string) string {
+	return "same_az"
+}
+
+// pathBandwidthGBps 候选路径的有效带宽(GB/s):per-路径类静态配置
+// (Config.PathClassBandwidthGBps),未配置返回 0(模式选择跳过带宽闸,
+// 回退 P6.3 行为)。P5 换池侧带宽视图被动 EWMA(cost-model.md §6)。
+func (s *Server) pathBandwidthGBps(nodeID string) float64 {
+	if s.cfg.PathClassBandwidthGBps == nil {
+		return 0
+	}
+	return s.cfg.PathClassBandwidthGBps[s.pathClassOf(nodeID)]
 }
 
 // ModeCounts 返回选路模式分布副本(P7.1 探针)。

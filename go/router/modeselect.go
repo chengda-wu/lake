@@ -48,17 +48,29 @@ type PrefixHint struct {
 
 // SelectExecMode 移植 select_exec_mode:
 //   - 本地命中(前缀已在本机 L0,含部分)→ D-direct,零/极小传输;
+//   - 池命中但路径有效带宽 < 阈值 → 混部(重算比传输便宜,features.md 决策树);
 //   - 无本地命中 + 专用 Prefill/Decode 角色 → PD 分离;
 //   - 否则混部。失败不设 mode-to-mode fallback(F4 重决策)。
-func SelectExecMode(hint PrefixHint, promptLen int, role WorkerRole) ExecMode {
+//
+// bwGBps 是候选路径的有效带宽(P7.6/issue #68 条目 4,三层结构见
+// cost-model.md §6):≤0 = 未配置/未知,跳过带宽闸(回退 P6.3 行为);
+// 当前为 per-路径类静态配置,真机 P5 换池侧带宽视图(EWMA 被动测量)。
+func SelectExecMode(hint PrefixHint, promptLen int, role WorkerRole, bwGBps float64) ExecMode {
 	if promptLen > 0 && hint.LocalHit && hint.ComputedTokens > 0 {
 		return ExecModeDDirect
+	}
+	if hint.ReusedBlocks > 0 && bwGBps > 0 && bwGBps < TransferBWThresholdGBps {
+		return ExecModeColocated
 	}
 	if role == RolePrefill || role == RoleDecode {
 		return ExecModePDDisagg
 	}
 	return ExecModeColocated
 }
+
+// TransferBWThresholdGBps 传 vs 算的分界带宽(v1 = 1 GB/s,features.md 执行模式节;
+// 成本模型交叉点 ≈0.57 GB/s,留 ~2x 保守余量,见 cost-model.md §1/§6)。
+const TransferBWThresholdGBps = 1.0
 
 // prefixHint 构造请求的前缀命中提示:先查本地镜像(零-RPC),
 // 整段 miss 时回退 CP 权威查询(P6.1 LookupPrefixOnAuthority)。
