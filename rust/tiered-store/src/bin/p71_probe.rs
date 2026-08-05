@@ -57,15 +57,14 @@ fn main() {
         e.put_durable(&i.to_le_bytes(), &block).unwrap();
     }
 
-    // 探针 1:promote(L1/L2 → L0)时延
+    // 探针 1:promote(L1/L2 → L0)时延(含驱逐路径:promote_to_l0 内部
+    // ensure_l0_room 先驱逐再 insert,故无需容量守卫——review #63)
     let mut promote_ms = Vec::new();
     for i in 0..N {
         let h = i.to_le_bytes();
-        if e.l0_len() as u32 <= 64 && e.pin_count(&h) == 0 {
-            let t = Instant::now();
-            if e.promote_to_l0(&h).is_ok() {
-                promote_ms.push(t.elapsed().as_secs_f64() * 1000.0);
-            }
+        let t = Instant::now();
+        if e.promote_to_l0(&h).is_ok() {
+            promote_ms.push(t.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
