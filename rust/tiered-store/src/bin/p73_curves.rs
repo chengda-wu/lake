@@ -106,6 +106,46 @@ fn drive(caps: TierCaps, n_requests: usize, share_pct: u64, seed: u64) -> (u64, 
     (s.l0, s.l1, s.l2, s.l3, s.miss, write_bytes, moved_bytes, promotes)
 }
 
+/// 带 promote 频率准入的对照驱动(决策 B 真实机制):非 L0 命中走引擎一等 API
+/// `promote_to_l0_admitted`——hit_count ≥ admit_after 给热块待遇,否则 one-shot
+/// (照样进 L0,GPU 约束下不存在"不搬直读";但驱逐最优先、不挤热块,砍级联)。
+/// 返回同 drive()。
+fn drive_admitted(
+    caps: TierCaps,
+    n_requests: usize,
+    share_pct: u64,
+    seed: u64,
+    admit_after: u32,
+) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    let mut e = LocalTierEngine::with_caps(caps).with_promote_admit_after(admit_after);
+    let mut rng = Rng(seed | 1);
+    let zipf = Zipf::new(HOT_PREFIXES, 1.2);
+    let block = vec![0u8; BLOCK_BYTES];
+    let (mut write_bytes, mut moved_bytes, mut promotes) = (0u64, 0u64, 0u64);
+    for _ in 0..n_requests {
+        for h in gen_request(&mut rng, &zipf, share_pct) {
+            let hb = h.to_le_bytes();
+            match e.probe(&hb) {
+                AccessKind::L0Hit => {}
+                AccessKind::Miss => {
+                    let (_, fx) = e.put_durable(&hb, &block).unwrap();
+                    write_bytes += BLOCK_BYTES as u64;
+                    moved_bytes += (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64 * BLOCK_BYTES as u64;
+                }
+                _ => {
+                    if let Ok((_, fx)) = e.promote_to_l0_admitted(&hb) {
+                        promotes += 1;
+                        moved_bytes += BLOCK_BYTES as u64
+                            + (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64 * BLOCK_BYTES as u64;
+                    }
+                }
+            }
+        }
+    }
+    let s = &e.stats;
+    (s.l0, s.l1, s.l2, s.l3, s.miss, write_bytes, moved_bytes, promotes)
+}
+
 fn emit(name: &str, counters: &[(&str, u64)]) {
     let Some(out) = std::env::var_os("LAKE_BENCH_OUT") else {
         return;
@@ -238,6 +278,34 @@ fn main() {
         let bytes = DECODE_BLOCKS * BLOCK_BYTES as u64 * REQUESTS as u64;
         eprintln!("  batch N={n}: ops={ops} bytes={bytes} (bytes 与 N 无关)");
         emit("writeback_scan", &[("batch_n", n), ("ops", ops), ("bytes", bytes)]);
+    }
+
+    // 5b. promote 频率准入(hit_count≥2)vs 无准入对照:churn 降幅 / 命中率与 L0 份额代价。
+    eprintln!("== admission_experiment ==");
+    for l0 in [64u64, 128, 512] {
+        let caps = TierCaps { l0: l0 as usize, l1: 4 * l0 as usize, l2: 16 * l0 as usize };
+        let base = drive(caps.clone(), REQUESTS, SHARE_PCT, 42);
+        let adm = drive_admitted(caps, REQUESTS, SHARE_PCT, 42, 2);
+        for (tag, r) in [("baseline", base), ("admit>=2", adm)] {
+            let (h0, h1, h2, h3, miss, wb, mb, pr) = r;
+            let total = (h0 + h1 + h2 + h3 + miss) as f64;
+            eprintln!(
+                "  L0={l0:>4} {tag:<9}: hit={:.1}%(l0 {:.1}%) miss={:.1}%(含L3 {:.1}%) moved/write={:.2} moved/(r+w)={:.0}% promotes={}",
+                100.0 * (h0 + h1 + h2) as f64 / total,
+                100.0 * h0 as f64 / total,
+                100.0 * (h3 + miss) as f64 / total,
+                100.0 * h3 as f64 / total,
+                mb as f64 / wb.max(1) as f64,
+                100.0 * mb as f64 / ((h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64 + wb) as f64,
+                pr,
+            );
+            emit("admission_experiment", &[
+                ("l0_cap", l0), ("admitted", u64::from(tag != "baseline")),
+                ("l0_hit", h0), ("l1_hit", h1), ("l2_hit", h2),
+                ("l3_hit", h3), ("cold_miss", miss),
+                ("write_bytes", wb), ("moved_bytes", mb), ("promotes", pr),
+            ]);
+        }
     }
 
     // 5. 同步迁移放大(写驱逐+读回填,数据路径,≠后台 GC/defrag):
