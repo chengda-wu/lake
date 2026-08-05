@@ -84,6 +84,11 @@ def mode_for(hit_tokens: float, prompt_tokens: int, p: ModelParams,
     - 本地命中(前缀 KV 已在执行节点 HBM)→ D-direct:零传输,残差 prefill 就地
     - 池命中且传 KV 划算(H ≥ H*)→ PD 分离
     - 否则重算 → 混部
+
+    注意(口径,review #64):本函数的 PD 判定是**带宽连续函数**(H ≥ H*(BW),
+    BW > ~0.6 GB/s 时 1 块命中即 PD);features.md / cost-model.md 阈值表里的
+    「≥ 1 GB/s → PD」是**有意的保守简化**(H*≈12 ≪ 128,留足余量),
+    真实分界由 breakeven_hit_tokens 连续给出。读 code/doc 对照时以本注释为准。
     """
     if local_hit and quantize_to_blocks(hit_tokens, p.block_tokens) > 0:
         return "D_DIRECT"
