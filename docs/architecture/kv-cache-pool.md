@@ -325,7 +325,7 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 
 两条写回路分开(满块结构性,尾块容错性):
 
-- **满块路**:block 填满 → 池算哈希 → 写回 L2 durable(NVMe)→ 注册 radix。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希)。decode 跨 block 边界即产生满块,请求进行中就可能触发。**durable-first**:L2 写回完成后才注册 radix 发布视图(radix 发布时后盾已落实,对齐 Mooncake COMPLETE 前字节已落稳、Dynamo settled 后才 register presence;SGLang 反向 register-先靠 `host_value`+`BlockRemoved` 补偿)。register 后到请求结束屏障之间 block 持 **writeback ref 不可驱逐**(请求进行中冻结,非防悬空——durable-first 已消除"radix 有、durable 无"窗口;参考 SGLang `write_back` 驱逐即回写,见 [`consistency.md`](consistency.md) §3)。请求结束是**写回屏障**(flush+ack + writeback ref 归零,解冻晚于 barrier)。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N"。**P7.3 已校准**:写回字节量与 N 无关(块数 × 块字节恒定),N 只影响 ops 频率(ops ∝ 1/N)——按 ops/RPC 预算选 N,原型建议 N=2–4 块一批(ops 降 2–4×,容错窗口多 1–3 个块,可接受);见「P7.3 校准结论」。
+- **满块路**:block 填满 → 池算哈希 → 写回 L2 durable(NVMe)→ 注册 radix。这是自然边界,radix 注册本就要等满块(vLLM `ExternalBlockHash` 也只对完整 block 算哈希)。decode 跨 block 边界即产生满块,请求进行中就可能触发。**durable-first**:L2 写回完成后才注册 radix 发布视图(radix 发布时后盾已落实,对齐 Mooncake COMPLETE 前字节已落稳、Dynamo settled 后才 register presence;SGLang 反向 register-先靠 `host_value`+`BlockRemoved` 补偿)。register 后到请求结束屏障之间 block 持 **writeback ref 不可驱逐**(请求进行中冻结,非防悬空——durable-first 已消除"radix 有、durable 无"窗口;参考 SGLang `write_back` 驱逐即回写,见 [`consistency.md`](consistency.md) §3)。请求结束是**写回屏障**(flush+ack + writeback ref 归零,解冻晚于 barrier)。满块写回的频率(满一个就写 vs 攒几个一起写)即"写回频率 N"。**P7.3 已校准**:写回字节量与 N 无关(块数 × 块字节恒定),N 只影响 ops 频率(ops ∝ 1/N)——按 ops/RPC 预算选 N,原型建议 N=2–4 块一批(ops 降 2–4×,容错窗口多 1–3 个块,可接受);见「P7.3 校准结论」。**P7 收口:N 落地为 per-agent 配置**(`WritebackBatcher`,攒 N 块 flush + 请求屏障兜底 drain + 闲时提前)——per-agent 无需跨节点一致(durable-first 按块成立),不同节点不同 N 只影响各自产出块的 F4 窗口,SLO 记账按集群最大 N;N=1 即 eager 现状。N 激进调大时 radix 生长滞后(N 个块)的备选=双轨注册(易失位置即满即注册 + durable 位置 flush 后补注册),暂不做(见 `engine.rs::put_durable` 注释)。
 - **尾块路**:请求结束时仍未填满的 block(尾块)→ 请求结束点写回一次,写"当前尾 block 的全部已填 token",重放时整块覆盖。纯容错,不进 radix(哈希未定,或带 partial 标记)。因尾块只在请求结束写一次,无增量式。
 
 引擎不感知 block 满不满(Q2.1:block 对引擎纯寻址单位)——满块判断、哈希、radix 注册、写回全归池。容错点 = "KV 落 L2(NVMe)"的时刻;满块越频繁写回(N 小)→ 崩溃丢的越少、写放大越大,反之亦然。decode 增量写回同时服务容错 + 前缀生长(见 [`execution-modes.md`](execution-modes.md) 时序二反向)。
@@ -414,7 +414,12 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 2. **promote cost 校准**:`estimate_promote_cost` 的 nbytes×hops 线性骨架方向正确(单调);实测 hops=3(L3 源)较 hops=1 **超 4–10×**(跨运行漂移:25–73µs vs 5–8µs;绝对 µs 不可复现,mock 内存层 hops1/hops2 同为 HashMap 操作不可区分——稳健口径只取比值)。超线性来自 L3 路径 settle/耐久检查固定开销。建议:hops≥3 加固定惩罚或权重;策略上**避免 L3 直促热块,L3→L0 走批量/异步**(决策见 issue #68)。
 3. **block 粒度**:整段前缀复用下有效复用率 64/128/256 = 97.3%/94.6%/89.2%。128 与 64 差 2.7pt(管理开销减半),256 损失明显——**维持 128 默认**。
 4. **写回频率 N**:字节量与 N 无关,ops ∝ 1/N → 按 ops 预算选 N,建议 N=2–4 块/批。
-5. **同步迁移放大(数据路径,非后台带宽池)**:容量不足 regime 下 moved/(read+write) 实测 ≈150%(L3 命中计入读),moved/write 2.0–5.2×(随 L0 容量改善)。后台 GC/整理 <10% 由 `BandwidthPool` 构造保证;但**同步迁移放大是否需要 churn 抑制(如限 L0 写分配率)是开放问题**(issue #68)。
+5. **同步迁移放大(数据路径,非后台带宽池)→ 已收口(churn 抑制三件套)**:容量不足 regime 下 moved/(read+write) 实测 ≈150%,moved/write 2.0–5.2×(随 L0 容量改善)。后台 GC/整理 <10% 由 `BandwidthPool` 构造保证。数据路径放大经三件套抑制(对照组常驻 `p73_curves` `admission_experiment`):
+   - **promote 频率准入 + one-shot**(决策 B):hit_count≥2 给热块待遇;<2 照样 promote 进 L0(GPU 约束:attention 只读 HBM,不存在 Mooncake 式"不搬直读")但标 one-shot——**驱逐最优先、不挤热块**,准入砍的是一次性块引发的级联循环,不是 promote 本身。实测:churn −3~9%(容量越紧越明显)、L0 热块份额 +2~3pp、命中率无损;理想化"不 promote"上界(−17~30%)不可达。参考 SGLang `write_through_selective`(hit_count≥2)/ Mooncake `FileStorage` CountMinSketch 准入。
+   - **in-flight 去重 + 异步 promote 原语**(决策 6+5 存储半边):同块在途不重复发起(Dynamo offload 去重同款);`begin_promote`/`finish_promote` 两段式——dispatch 收到预取清单即 begin(与排队/batching 重叠,SGLang prefetch-at-schedule 形态),prepare 只 finish 等残余。时延收益待 P5 真字节路径校准。
+   - **L3 截断阈值**(决策 A,成本模型派生):L3 命中段 <2 块(256 token)不预取直接重算,≥2 块批量异步预取、不进同步 promote;L1/L2 加载恒胜。派生值与 SGLang 硬编码 `prefetch_threshold=256` 互证,见 [`cost-model.md`](cost-model.md) §5。
+   残留:并发去重收益与异步时延收益未测(原型单线程),归 P5。
+6. **扩容 warmup 归属(方案 Z 灰区修复)**:P6.4 的扩容 prefetch 由 Router 选块并指挥 `PlaceBlocks`,越方案 Z 边界。已挪池侧:Router 只经 `ReportHits` 上报命中(best-effort 批量),CP `join_shard_node` 后按 hit_count 自主选块(top-k,排除已在目标 L0)经 `WarmupSink` 下发。一套热度信号三用:promote 准入 / 扩容 warmup / 未来方案 Z 预放置。
 
 ## 开放问题
 
