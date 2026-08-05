@@ -37,6 +37,17 @@ PREFILL_BASE_S = 1e-3  # kernel launch / 调度固定开销(待真机校准)
 
 GB = 1e9
 
+# ---- 分层加载剖面(决策 A:加载 vs 重算;来源 cost-model.md §参数) ----
+# 形态对齐 SGLang `prefetch_threshold`(默认 256 token,L3 命中段短于阈值则放弃预取
+# 直接重算,`hiradix_cache.py::prefetch_from_storage`);差异:SGLang 拍硬阈值,
+# 我们按层介质成本从模型推出阈值。
+TIER_LOAD_PROFILES = {
+    # 层: (有效带宽 B/s, 单次取数固定开销 s)。均为待真机占位 TODO-P7-hw。
+    "L1": (50 * GB, 0.5e-3),   # 池化 DRAM,RDMA 读
+    "L2": (5 * GB, 2e-3),      # 池化 NVMe
+    "L3": (1 * GB, 20e-3),     # 对象存储,RTT 主导固定开销
+}
+
 
 @dataclass
 class ModelParams:
@@ -75,6 +86,38 @@ def breakeven_hit_tokens(p: ModelParams) -> float | None:
 def quantize_to_blocks(tokens: float, block_tokens: int) -> int:
     """命中按 block 粒度向下取整(128 token 块 = 复用最小单位)。"""
     return int(tokens // block_tokens) * block_tokens
+
+
+def t_load_s(tier: str, hit_tokens: float, p: ModelParams) -> float:
+    """从 tier 加载 hit_tokens 的 KV:tier_base + 字节数/tier_bw。"""
+    bw, base = TIER_LOAD_PROFILES[tier]
+    return base + hit_tokens * p.kv_bytes_per_token / bw
+
+
+def load_breakeven_tokens(tier: str, p: ModelParams) -> float | None:
+    """该层「加载 vs 重算」分界 T*(token):命中段 ≥ T* 才值得加载,否则截断重算。
+
+    tier_base + T·b/BW_t = base_p + T·t_c  →  T* = (tier_base − base_p)/(t_c − b/BW_t)
+    t_c ≤ b/BW_t 时该层加载永不划算(返回 None);T* ≤ 0 时任意命中都该加载。
+    """
+    bw, base = TIER_LOAD_PROFILES[tier]
+    denom = p.prefill_per_token_s - p.kv_bytes_per_token / bw
+    if denom <= 0:
+        return None
+    return (base - p.prefill_base_s) / denom
+
+
+def load_or_recompute(tier: str, hit_tokens: float, p: ModelParams) -> str:
+    """决策 A(本次请求):命中段从 tier 加载,还是截断重算。
+
+    语义 = SGLang prefetch_threshold 的派生版:命中段短于该层分界 → 放弃加载,
+    截短复用前缀、尾部重算(前缀链式,只能截尾不能跳块)。
+    """
+    t_star = load_breakeven_tokens(tier, p)
+    if t_star is None:
+        return "recompute"
+    threshold = max(t_star, 0)
+    return "load" if hit_tokens >= threshold else "recompute"
 
 
 def mode_for(hit_tokens: float, prompt_tokens: int, p: ModelParams,
@@ -147,6 +190,32 @@ def sweep_block_granularity() -> list[dict]:
     return rows
 
 
+def sweep_tier_load() -> list[dict]:
+    """分层加载 vs 重算:各层分界 T* 与块数阈值 + 典型命中段的决策。"""
+    p = ModelParams()
+    rows = []
+    for tier in ["L1", "L2", "L3"]:
+        bw, base = TIER_LOAD_PROFILES[tier]
+        t_star = load_breakeven_tokens(tier, p)
+        threshold_tokens = None if t_star is None else max(t_star, 0)
+        threshold_blocks = (
+            None if threshold_tokens is None
+            else -(-int(threshold_tokens) // p.block_tokens)  # 向上取整到块
+        )
+        rows.append({
+            "tier": tier,
+            "bw_gb_s": bw / GB,
+            "base_ms": base * 1000,
+            "per_token_load_us": p.kv_bytes_per_token / bw * 1e6,
+            "breakeven_tokens": None if t_star is None else round(t_star, 1),
+            "load_threshold_blocks": threshold_blocks,
+            "decision_128t": load_or_recompute(tier, 128, p),
+            "decision_256t": load_or_recompute(tier, 256, p),
+            "decision_1024t": load_or_recompute(tier, 1024, p),
+        })
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", help="结果 JSON 输出路径(可选)")
@@ -165,6 +234,7 @@ def main() -> None:
         "bandwidth_sweep": sweep_bandwidth(),
         "prompt_matrix": sweep_prompt_matrix(),
         "block_granularity": sweep_block_granularity(),
+        "tier_load": sweep_tier_load(),
     }
 
     print("== 带宽扫描(H* = 传 KV 划算的最小命中 token)==")
@@ -182,6 +252,14 @@ def main() -> None:
     for r in result["block_granularity"]:
         print(f"  {r['block_tokens']:>3} tok: 300→{r['hit300_quantized']:>3} "
               f"(损 {r['quantization_loss_tokens']:>2}) 最小传输 {r['min_transfer_ms']}ms")
+    print("== 分层加载 vs 重算(决策 A;SGLang prefetch_threshold 的派生版)==")
+    for r in result["tier_load"]:
+        ts = r["breakeven_tokens"]
+        ts_str = f"{ts} tok → ≥{r['load_threshold_blocks']} 块才加载" if ts is not None else "N/A(重算恒胜)"
+        print(f"  {r['tier']}: base {r['base_ms']:>5.1f}ms per-token {r['per_token_load_us']:>7.1f}µs  "
+              f"T*={ts_str}  [128t→{r['decision_128t']}, 256t→{r['decision_256t']}, 1024t→{r['decision_1024t']}]")
+    print("  注:L1 T*<0 = 任意命中即加载;L3 派生阈值 ≈2 块(256 token),与 SGLang 硬编码 "
+          "prefetch_threshold=256 互相印证。")
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

@@ -61,6 +61,22 @@ D-direct 的残差 prefill 与 P 侧同算力成本，省掉整段传输——**
 - TTFT（PD 分离）中 KV 传输占比：2048 token 全命中传 7.9ms，相对 P50<400ms 预算 ≈2%——**传输不是 TTFT 瓶颈，prefill 计算才是**（103ms）。
 - D-direct 模式选择开销 <5ms 预算与传输节省（≥3.5ms/块）同量级——**选路必须 µs 级**（P6.3 已落地：纯内存读镜像），否则吃掉首块收益。
 
+### 5. 分层加载 vs 重算（决策 A：L3 截断阈值）
+
+命中下层后「加载进 L0 还是放弃直接重算」按**层介质成本**逐段判定（前缀链式，只能截短复用前缀、尾部重算，不能跳块）：
+
+| 层 | 剖面（base + per-token） | T*（加载划算的最小命中段） | 实践规则 |
+|----|--------------------------|----------------------------|----------|
+| L1（池化 DRAM，RDMA） | 0.5ms + 2.3µs/tok | <0（恒加载） | **任意命中即加载** |
+| L2（池化 NVMe） | 2ms + 23µs/tok | 5.6 tok ≪ 1 块 | **任意命中即加载** |
+| L3（对象存储） | 20ms + 115µs/tok | **222.7 tok → ≥2 块（256 token）** | 命中段 <2 块 → 截断重算；≥2 块 → 批量异步预取 |
+
+层剖面为待真机占位（TODO-P7-hw），但结论形态稳健：L1/L2 per-token 成本较 prefill（200µs）低 1–2 个数量级，固定开销也小，**加载恒胜**；只有 L3（RTT 主导）存在真实分界。
+
+**与 SGLang 互证**：派生阈值 ≈256 token 恰与 SGLang 硬编码 `prefetch_threshold=256`（`hiradix_cache.py::prefetch_from_storage`，L3 命中段短于阈值则放弃预取直接重算，见 [`../research/sglang/hicache.md`](../research/sglang/hicache.md)）同值——reference 的拍脑袋魔数被本模型从介质成本推出，互为印证。关键差异：SGLang 阈值全局硬编码；我们按层派生、随真机剖面校准。
+
+**与决策 B 的正交性**（churn 抑制，见 [`kv-cache-pool.md`](kv-cache-pool.md)「P7.3 校准结论」）：本节回答「本次用不用」（成本判定）；「用完留不留」（promote 后待遇）由 hit_count 准入判定。L3 命中段 ≥2 块才加载，加载后是否给热块待遇仍看 hit_count。
+
 ## 阈值回填（features.md 执行模式节，v1）
 
 | 条件 | 阈值（v1，mock 环境） |
@@ -68,6 +84,9 @@ D-direct 的残差 prefill 与 P 侧同算力成本，省掉整段传输——**
 | 本地命中 ≥ 1 block（128 token） | D-direct |
 | 池命中 ≥ 1 block 且路径有效带宽 ≥ 1 GB/s | PD 分离 |
 | 命中 < 1 block 或带宽 < 1 GB/s | 混部（重算） |
+| L1/L2 命中段 | 任意长度即加载（加载恒胜） |
+| L3 命中段 < 2 block（256 token） | 截断重算（不预取） |
+| L3 命中段 ≥ 2 block | 批量异步预取（不进同步 promote） |
 
 带宽 < 1 GB/s 的细分（H* 随带宽漂移）留真机校准；v1 用 1 GB/s 作保守分界（H*≈12 ≪ 128；真实分界连续——BW > ~0.6 GB/s 时 1 块命中即可传，见 `cost_model.py::mode_for` 口径注释）。
 
