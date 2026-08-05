@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lakepb "github.com/chengda-wu/lake/go/pb"
@@ -133,18 +135,56 @@ type nodeRegistry struct {
 	draining map[string]bool
 	seq      int // 已分配的最大节点序号(worker-N)
 	rr       int // pick 轮询游标
+	// P7.6(B1):per-node 在途请求数(atomic,免锁读)——亲和护栏与加权 HRW
+	// 的负载信号。注意区别于 loadsync.go 的出站上报:那是 Router→agent 的
+	// 集群级遥测,这里的计数是选路热路径的即时本地信号。
+	inflight map[string]*atomic.Int64
 }
 
 func newNodeRegistry(initial ...string) *nodeRegistry {
-	r := &nodeRegistry{draining: make(map[string]bool)}
+	r := &nodeRegistry{draining: make(map[string]bool), inflight: make(map[string]*atomic.Int64)}
 	for _, id := range initial {
 		r.ready = append(r.ready, id)
+		r.inflight[id] = &atomic.Int64{}
 		var n int
 		if _, err := fmt.Sscanf(id, "worker-%d", &n); err == nil && n > r.seq {
 			r.seq = n
 		}
 	}
 	return r
+}
+
+// readyIDs ready 节点有序快照(排序保证亲和扫描/HRW tie-break 与池侧
+// rust/controlplane ready_nodes 同序,跨语言确定性一致)。
+func (r *nodeRegistry) readyIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := append([]string(nil), r.ready...)
+	sort.Strings(out)
+	return out
+}
+
+// incInFlight/decInFlight 在途记账:dispatch 前 +1、generate 完成 -1
+// (调用方 defer);draining 节点在途照计(跑完才摘除)。
+func (r *nodeRegistry) incInFlight(id string) { r.slot(id).Add(1) }
+func (r *nodeRegistry) decInFlight(id string) { r.slot(id).Add(-1) }
+
+func (r *nodeRegistry) inFlight(id string) int64 { return r.slot(id).Load() }
+
+func (r *nodeRegistry) slot(id string) *atomic.Int64 {
+	r.mu.RLock()
+	s, ok := r.inflight[id]
+	r.mu.RUnlock()
+	if ok {
+		return s
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok = r.inflight[id]; !ok {
+		s = &atomic.Int64{}
+		r.inflight[id] = s
+	}
+	return s
 }
 
 // pick 轮询取 ready 节点(空表兜底 worker-0)——P6.5 review:扩缩后请求

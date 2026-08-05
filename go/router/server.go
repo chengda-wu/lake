@@ -31,6 +31,9 @@ type Config struct {
 	NodeRole    string // 候选执行节点角色(hybrid/prefill/decode,LAKE_NODE_ROLE),P6.3 选路输入;单节点原型默认 hybrid
 	MaxInFlight int    // P6.4:单节点并发执行上限(P6.5 起总并发=×ready 节点数;非准入控制——队列无界不拒请求);单 worker mock 默认 1
 	Autoscale   bool   // P6.5:基于指标的弹性扩缩(LAKE_AUTOSCALE=1);默认关——单进程原型不起真实 worker
+	// P7.6(B1):亲和路径单节点 in-flight 护栏(命中得分最高者在途 ≥ 护栏
+	// 则降级次优,全部过载落冷路径加权 HRW);≤0 走默认 8。
+	AffinityInFlightGuard int
 }
 
 // Server OpenAI 兼容 HTTP → Dispatch(agent) → Generate(worker)。
@@ -71,6 +74,10 @@ type Server struct {
 
 	modeCountsMu sync.Mutex
 	modeCounts   map[string]uint64 // P7.1 探针:选路模式分布
+
+	// P7.6(B1)选路策略钩子;nil = 生产默认 pickNodeForRequest(亲和两段式)。
+	// 仅测试可替换(B3 harness 的 RR 基线对照组),生产路径勿动。
+	pickFn func(model string, hashes [][]byte, routingKey []byte) string
 }
 
 const maxChatRequestBytes = 1 << 20
@@ -261,11 +268,23 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rid := uuid.NewString()
-	nodeID := s.pickNode()
 
 	// P6.3:选路权威在 Router——哈希链 → 镜像查命中(miss 回退权威)→ 选模式。
 	// 纯内存读,模式选择开销 µs 级,满足 D-direct < 5ms 的 SLO 预算。
 	hashes := ChainBlockHashes(tokens, BlockSize)
+	// P7.6(B1):路由键 = X-Lake-Session-Id 头优先(客户端驱动会话亲和),
+	// 否则有界深度前缀锚点(深度 1 会被全局系统前缀打成热点,见
+	// affinity.go::anchorDepth);亲和两段式 = 热路径镜像 L0 得分 + 冷路径
+	// 加权 HRW(负载均衡时与池侧 B2-a 预放置家节点一致)。
+	routingKey := []byte(r.Header.Get("X-Lake-Session-Id"))
+	if len(routingKey) == 0 {
+		routingKey = prefixAnchorHash(hashes)
+	}
+	pick := s.pickFn
+	if pick == nil {
+		pick = s.pickNodeForRequest
+	}
+	nodeID := pick(model, hashes, routingKey)
 	hint := s.prefixHint(ctx, model, hashes, len(tokens), nodeID)
 	mode := SelectExecMode(hint, len(tokens), WorkerRole(s.cfg.NodeRole))
 	s.modeCountsMu.Lock()
@@ -278,6 +297,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// P6.4:已准入请求进优先级调度器(排序/抢占/背压暂停;不丢请求)。
 	// 抢占重排会重跑本闭包——attempt 后缀避免 worker 侧 duplicate req_id;
 	// 被抢占者 KV 已留池,重跑命中前缀(抢占重算式,对齐 vLLM v1)。
+	// P7.6(B1):节点沿用「Submit 前选一次」(上面 nodeID 已固定),抢占重跑
+	// 不重选节点——retry 重选是未来工作(需与 F4 重路由统一设计)。
 	var gen *lakepb.GenerateResponse
 	attempt := 0
 	exec := func(execCtx context.Context) error {
@@ -285,6 +306,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		reqID := rid
 		if attempt > 1 {
 			reqID = fmt.Sprintf("%s-r%d", rid, attempt)
+		}
+		// B1 in-flight 记账:dispatch 前 +1、generate 完成(或出错返回)-1;
+		// 亲和护栏与加权 HRW 的即时负载信号(nodeRegistry,非 loadsync 出站上报)。
+		if s.nodes != nil && nodeID != "" {
+			s.nodes.incInFlight(nodeID)
+			defer s.nodes.decInFlight(nodeID)
 		}
 		// 边10:先 Dispatch 到 agent(P3 仅 ack;执行仍在 Worker.Generate)。
 		ack, err := s.agent.Dispatch(execCtx, &lakepb.DispatchRequest{

@@ -15,9 +15,9 @@ package router
 // 镜像简化版放置 → SubscribeView 广播 MOVED → Router 镜像看到新 L0 →
 // 后续同前缀请求 LocalHitBlocks 增加。
 //
-// 本层(#67,尚无亲和选路)只跑 RR 基线 + 节点数/漂移敏感性;断言从宽
-// (测量 harness 不是门禁),结果用 t.Log 出表。B1 分支复用本 harness 跑
-// RR vs 亲和 vs 亲和+放置 对照组。
+// 对照组:policy 维度经 Server.pickFn 钩子切换——"rr" = RR 基线(替换钩子),
+// "affinity" = 生产默认(nil 钩子 → pickNodeForRequest 亲和两段式,B1)。
+// 断言从宽(测量 harness 不是门禁),结果用 t.Log 出表。
 
 import (
 	"context"
@@ -338,8 +338,10 @@ func postChatP76(t *testing.T, srv *Server, body, sessionKey string) *httptest.R
 
 // runP76Workload 跑一组配置,返回本地命中率与计数。逐轮同步驱动(确定性):
 // 每轮结束 flushHotHits(触发 fake CP 放置)并等镜像收敛,再进下一轮。
+// policy = "rr" 走 RR 基线(pickFn 钩子替换);其它值 = 生产默认亲和两段式。
 func runP76Workload(
 	t *testing.T,
+	policy string,
 	nNodes int,
 	drift float64,
 	placementOn bool,
@@ -348,12 +350,15 @@ func runP76Workload(
 ) (rate float64, reusable, localHit uint64) {
 	t.Helper()
 	h := newP76Harness(t, nNodes, placementOn)
+	if policy == "rr" {
+		h.srv.pickFn = func(string, [][]byte, []byte) string { return h.srv.pickNode() }
+	}
 	rnd := rand.New(rand.NewSource(seed))
 
 	for r := 0; r < rounds; r++ {
 		for si := 0; si < sessions; si++ {
-			// 漂移:以概率 drift 换新会话键(模拟客户端漂移/重连换键);
-			// 本层 RR 不读该头,漂移率只影响 B1 对照组——保留参数化出表。
+			// 漂移:以概率 drift 换新会话键(模拟客户端漂移/重连换键)——
+			// 亲和策略的 HRW 路由键随之改变,会话亲和被打断;RR 不读该头。
 			key := fmt.Sprintf("session-%d", si)
 			if rnd.Float64() < drift {
 				key = fmt.Sprintf("drift-%d-%d", si, r)
@@ -377,7 +382,7 @@ func runP76Workload(
 	return h.srv.LocalHitRate(), h.srv.ReusableBlockCount(), h.srv.LocalHitBlockCount()
 }
 
-// TestBenchP76LocalHitRate RR 基线敏感性表:节点数 × 漂移率 × 放置开关。
+// TestBenchP76LocalHitRate 敏感性表:策略(RR/亲和)× 节点数 × 漂移率 × 放置开关。
 // 测量 harness 非门禁:断言只守不变量(计数一致、1 节点全本地),结论出表。
 func TestBenchP76LocalHitRate(t *testing.T) {
 	const (
@@ -387,24 +392,30 @@ func TestBenchP76LocalHitRate(t *testing.T) {
 		rounds   = 6
 		seed     = 76
 	)
-	t.Log("P7.6 本地命中率(RR 基线;原型/mock,元数据口径):")
-	t.Log("| nodes | drift | placement | reusable | local_hit | rate |")
-	t.Log("|-------|-------|-----------|----------|-----------|------|")
+	t.Log("P7.6 本地命中率(原型/mock,元数据口径):")
+	t.Log("| policy | nodes | drift | placement | reusable | local_hit | rate |")
+	t.Log("|--------|-------|-------|-----------|----------|-----------|------|")
 	type row struct {
+		policy  string
 		nodes   int
 		drift   float64
 		placeOn bool
 	}
 	for _, cfg := range []row{
-		{1, 0.0, false}, {1, 0.0, true},
-		{2, 0.0, false}, {2, 0.0, true},
-		{4, 0.0, false}, {4, 0.0, true},
-		{2, 0.3, false}, {2, 0.3, true},
-		{4, 0.3, false}, {4, 0.3, true},
+		{"rr", 1, 0.0, false}, {"rr", 1, 0.0, true},
+		{"rr", 2, 0.0, false}, {"rr", 2, 0.0, true},
+		{"rr", 4, 0.0, false}, {"rr", 4, 0.0, true},
+		{"rr", 2, 0.3, false}, {"rr", 2, 0.3, true},
+		{"rr", 4, 0.3, false}, {"rr", 4, 0.3, true},
+		{"affinity", 1, 0.0, false}, {"affinity", 1, 0.0, true},
+		{"affinity", 2, 0.0, false}, {"affinity", 2, 0.0, true},
+		{"affinity", 4, 0.0, false}, {"affinity", 4, 0.0, true},
+		{"affinity", 2, 0.3, false}, {"affinity", 2, 0.3, true},
+		{"affinity", 4, 0.3, false}, {"affinity", 4, 0.3, true},
 	} {
-		rate, reusable, localHit := runP76Workload(t, cfg.nodes, cfg.drift, cfg.placeOn, sessions, rounds, seed)
-		t.Logf("| %d | %.1f | %v | %d | %d | %.3f |",
-			cfg.nodes, cfg.drift, cfg.placeOn, reusable, localHit, rate)
+		rate, reusable, localHit := runP76Workload(t, cfg.policy, cfg.nodes, cfg.drift, cfg.placeOn, sessions, rounds, seed)
+		t.Logf("| %s | %d | %.1f | %v | %d | %d | %.3f |",
+			cfg.policy, cfg.nodes, cfg.drift, cfg.placeOn, reusable, localHit, rate)
 		// 不变量(宽断言):计数一致 + 率有界。
 		if localHit > reusable {
 			t.Fatalf("localHit %d > reusable %d(计数不一致)", localHit, reusable)
