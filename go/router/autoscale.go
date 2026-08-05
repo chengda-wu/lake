@@ -222,13 +222,14 @@ func (r *nodeRegistry) lastReady() (string, bool) {
 	return r.ready[len(r.ready)-1], true
 }
 
-// hotSet 近期前缀命中块(有界 FIFO 去重)——P6.6:扩容新节点时 prefetch 热 KV
-// 到其 HBM(权重预加载/layer-async 在 Python coldstart;本结构管"预热什么")。
+// hotSet 命中观测窗(有界 FIFO,窗内去重)——P7 收口(方案 Z):Router 只作
+// 热度传感器,命中批量上报 CP(ReportHits → radix hit_count);扩容 warmup /
+// 预放置的选块与发起归池侧,Router 不指挥放置。
 type hotSet struct {
-	mu    sync.Mutex
-	cap   int
-	seen  map[string]struct{} // model\x00hex(hash)
-	order []*lakepb.KVBlockID // FIFO,超 cap 摘最旧
+	mu      sync.Mutex
+	cap     int
+	seen    map[string]struct{} // model\x00hex(hash),窗内去重
+	pending []*lakepb.KVBlockID // 自上次 drain 以来的新命中
 }
 
 func newHotSet(cap int) *hotSet {
@@ -251,18 +252,23 @@ func (h *hotSet) add(ids ...*lakepb.KVBlockID) {
 			continue
 		}
 		h.seen[k] = struct{}{}
-		h.order = append(h.order, id)
+		h.pending = append(h.pending, id)
 	}
-	for len(h.order) > h.cap {
-		delete(h.seen, hotKey(h.order[0]))
-		h.order = h.order[1:]
+	// 窗有界:超 cap 摘最旧(未上报也丢——best-effort,CP 计数偏弱可容忍)。
+	for len(h.pending) > h.cap {
+		delete(h.seen, hotKey(h.pending[0]))
+		h.pending = h.pending[1:]
 	}
 }
 
-func (h *hotSet) snapshot() []*lakepb.KVBlockID {
+// drain 取出本窗命中并开窗新窗。上报丢失不重发(best-effort)。
+func (h *hotSet) drain() []*lakepb.KVBlockID {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([]*lakepb.KVBlockID(nil), h.order...)
+	out := h.pending
+	h.pending = nil
+	h.seen = make(map[string]struct{})
+	return out
 }
 
 func (r *nodeRegistry) drainingList() []string {
@@ -298,26 +304,9 @@ func (s *Server) applyScale(ctx context.Context, d ScaleDecision) error {
 		s.lastReadyLatencyMu.Unlock()
 		log.Printf("scale-out: %s ready (migrations=%d, ring_gen=%d)",
 			id, resp.GetMigrationCount(), resp.GetMap().GetGeneration())
-		// P6.6:KV prefetch——热块异步铺到新节点 HBM(不阻塞 Ready;
-		// 真实字节搬运归 P5,此处走 agent PlaceBlocks 控制信令)。
-		if s.hot != nil {
-			if ids := s.hot.snapshot(); len(ids) > 0 {
-				go func() {
-					pctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					ack, err := s.agent.PlaceBlocks(pctx, &lakepb.PlaceBlocksRequest{
-						Ids: ids, TargetNodeId: id,
-					})
-					if err != nil {
-						log.Printf("scale-out prefetch %s: %v", id, err)
-					} else if !ack.GetOk() {
-						log.Printf("scale-out prefetch %s rejected: %s", id, ack.GetErr())
-					} else {
-						log.Printf("scale-out prefetch: %d hot blocks → %s", len(ids), id)
-					}
-				}()
-			}
-		}
+		// P7 收口(方案 Z):新节点 warmup 由池侧自主决策发起——CP 在
+		// JoinShardNode 后按 hit_count(ReportHits 喂入)选热块并下发
+		// PlaceBlocks;Router 不指挥放置,只持续上报命中(autoscaleTick 尾部)。
 	case DecideScaleIn:
 		victim, ok := s.nodes.lastReady()
 		if !ok {
@@ -386,6 +375,23 @@ func (s *Server) autoscaleTick(ctx context.Context) {
 		if err := s.applyScale(ctx, d); err != nil {
 			log.Printf("autoscale apply %s: %v", d, err)
 		}
+	}
+	// P7 收口(方案 Z):命中观测批量上报 CP(radix hit_count),供池侧
+	// 扩容 warmup / 未来预放置选块;Router 只报告、不指挥放置。
+	s.flushHotHits(ctx)
+}
+
+// flushHotHits 本窗命中批量上报 CP(best-effort:失败不重发,CP 计数偏弱可容忍)。
+func (s *Server) flushHotHits(ctx context.Context) {
+	if s.hot == nil {
+		return
+	}
+	ids := s.hot.drain()
+	if len(ids) == 0 {
+		return
+	}
+	if _, err := s.cp.ReportHits(ctx, &lakepb.ReportHitsRequest{NodeId: "router", Ids: ids}); err != nil {
+		log.Printf("report hits: %v", err)
 	}
 }
 

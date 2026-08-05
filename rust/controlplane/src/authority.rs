@@ -119,6 +119,10 @@ pub(crate) struct PoolView {
     pub(crate) inactive: Box<dyn InactiveIndex>,
     pub(crate) inactive_cap: usize,
     pub(crate) global_refs: HashMap<SequenceHash, i64>,
+    /// P7 收口:命中计数(ReportHits 喂入)。生产挂 radix 节点
+    /// (SGLang `TreeNode.hit_count` 同款),原型平铺按 flat hash;
+    /// 供扩容 warmup 选块 / 未来方案 Z 预放置复用。
+    pub(crate) hit_counts: HashMap<Vec<u8>, u32>,
     next_block_id: BlockId,
 }
 
@@ -141,6 +145,7 @@ impl PoolView {
             inactive,
             inactive_cap: cap,
             global_refs: HashMap::new(),
+            hit_counts: HashMap::new(),
             next_block_id: 1,
         }
     }

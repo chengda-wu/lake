@@ -124,7 +124,7 @@ func anyLocalHit(blocks []*lakepb.ReusableBlock) bool {
 	return false
 }
 
-// recordHot P6.6:权威回退路径的命中块记入热集。
+// recordHot:权威回退路径的命中块记入观测窗(批量 ReportHits 上报 CP)。
 func (s *Server) recordHot(blocks []*lakepb.ReusableBlock) {
 	if s.hot == nil {
 		return
@@ -138,7 +138,7 @@ func (s *Server) recordHot(blocks []*lakepb.ReusableBlock) {
 	s.hot.add(ids...)
 }
 
-// recordHotIDs P6.6:镜像命中路径(ID 由 model+前缀哈希重建,MirrorBlock 不存 ID)。
+// recordHotIDs:镜像命中路径(ID 由 model+前缀哈希重建,MirrorBlock 不存 ID)。
 func (s *Server) recordHotIDs(modelID string, hashes [][]byte) {
 	if s.hot == nil {
 		return

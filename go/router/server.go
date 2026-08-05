@@ -65,7 +65,7 @@ type Server struct {
 	lastReadyLatencyMu     sync.Mutex
 	lastReadyLatency       time.Duration // 最近扩容决策→Ready 时延(原型=join RPC 完成)
 	hitBlocks, totalBlocks atomic.Uint64 // 命中率分子/分母(累计 block 数)
-	hot                    *hotSet       // P6.6:近期命中块,扩容时 prefetch 到新节点
+	hot                    *hotSet       // P7 收口:命中观测窗,批量 ReportHits 上报 CP(放置归池侧)
 
 	modeCountsMu sync.Mutex
 	modeCounts   map[string]uint64 // P7.1 探针:选路模式分布

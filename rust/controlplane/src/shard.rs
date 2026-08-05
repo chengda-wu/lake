@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use lake_proto::lake::*;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::authority::{Authority, NamespaceKey};
+use crate::authority::{resolve_pool_kind, Authority, NamespaceKey};
 
 /// Default virtual nodes per physical KV Node.
 pub const DEFAULT_VNODE_COUNT: u32 = 64;
@@ -230,6 +230,68 @@ impl Authority {
                 .cmp(&b.id.as_ref().map(|i| i.block_hash.clone()))
         });
         Ok((self.shard.to_proto(), migrations))
+    }
+
+    /// P7 收口:命中上报(best-effort 批量,Router 在镜像上观测后回传)。
+    /// 只计已注册块;未知 id 跳过(计数偏弱,丢失可容忍)。
+    pub fn report_hits(&mut self, ids: &[KvBlockId]) {
+        for id in ids {
+            let Ok(pk) = resolve_pool_kind(id.pool_kind) else {
+                continue;
+            };
+            let Some(ns) = self.namespaces.get_mut(&NamespaceKey::from_id(id)) else {
+                continue;
+            };
+            let Some(pool) = ns.pools.get_mut(&pk) else {
+                continue;
+            };
+            if pool.by_flat.contains_key(&id.block_hash) {
+                *pool.hit_counts.entry(id.block_hash.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    pub fn hit_count(&self, key: &NamespaceKey, pool_kind: i32, flat: &[u8]) -> u32 {
+        self.namespaces
+            .get(key)
+            .and_then(|ns| ns.pools.get(&pool_kind))
+            .and_then(|p| p.hit_counts.get(flat))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 扩容 warmup 选块(方案 Z:池侧自主决策,Router 不指挥放置):
+    /// 按 hit_count 降序取 top-k,排除已在目标节点 L0 的块。
+    /// 参考:SGLang HiCache 扩容时按 radix 热度预取;差异是我们由存储池
+    /// 统一发起(块可能在任意节点/层),不经调度器。
+    pub fn warmup_plan(&self, node_id: &str, k: usize) -> Vec<KvBlockId> {
+        let mut cand: Vec<(u32, KvBlockId)> = Vec::new();
+        for ns in self.namespaces.values() {
+            for pool in ns.pools.values() {
+                for (flat, cnt) in &pool.hit_counts {
+                    if *cnt == 0 {
+                        continue;
+                    }
+                    let Some(entry) = pool.by_flat.get(flat) else {
+                        continue;
+                    };
+                    let already_l0 = entry
+                        .meta
+                        .locations
+                        .iter()
+                        .any(|l| l.tier == Tier::L0 as i32 && l.node_id == node_id);
+                    if already_l0 {
+                        continue;
+                    }
+                    if let Some(id) = entry.meta.id.clone() {
+                        cand.push((*cnt, id));
+                    }
+                }
+            }
+        }
+        cand.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.block_hash.cmp(&b.1.block_hash)));
+        cand.truncate(k);
+        cand.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Drain node: remap ownership away; list migrations + L2 push candidates.
