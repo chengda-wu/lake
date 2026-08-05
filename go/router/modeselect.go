@@ -42,6 +42,7 @@ const (
 type PrefixHint struct {
 	ComputedTokens int  // 已可复用 token 数(半开上界语义)
 	ReusedBlocks   int  // 命中 block 数
+	LocalHitBlocks int  // P7.6(B3):命中前缀中在 requester 本机 L0 的块数(本地命中率分子)
 	LocalHit       bool // 命中含 requester 本机 L0(含部分;D-direct 条件)
 }
 
@@ -92,24 +93,27 @@ func (s *Server) prefixHint(
 		if err != nil || resp == nil {
 			return PrefixHint{} // 权威不可达按冷请求处理,不阻塞执行
 		}
-		s.recordHot(resp.GetBlocks())
+		s.recordHot(requesterNodeID, resp.GetBlocks())
 		return PrefixHint{
 			ComputedTokens: minInt(int(resp.GetHitLength())*BlockSize, promptLen),
 			ReusedBlocks:   int(resp.GetHitLength()),
+			LocalHitBlocks: countLocalHitBlocks(resp.GetBlocks()),
 			LocalHit:       anyLocalHit(resp.GetBlocks()),
 		}
 	}
-	s.recordHotIDs(modelID, prefixHashes[:hitLen])
+	s.recordHotIDs(requesterNodeID, modelID, prefixHashes[:hitLen])
 	localHit := false
+	localHitBlocks := 0
 	for _, b := range blocks {
 		if b.LocalHit {
 			localHit = true
-			break
+			localHitBlocks++
 		}
 	}
 	return PrefixHint{
 		ComputedTokens: minInt(int(hitLen)*BlockSize, promptLen),
 		ReusedBlocks:   int(hitLen),
+		LocalHitBlocks: localHitBlocks,
 		LocalHit:       localHit,
 	}
 }
@@ -124,8 +128,20 @@ func anyLocalHit(blocks []*lakepb.ReusableBlock) bool {
 	return false
 }
 
+// countLocalHitBlocks:命中块中在 requester 本机 L0 的块数(本地命中率分子)。
+func countLocalHitBlocks(blocks []*lakepb.ReusableBlock) int {
+	n := 0
+	for _, b := range blocks {
+		if b.GetLocalHit() {
+			n++
+		}
+	}
+	return n
+}
+
 // recordHot:权威回退路径的命中块记入观测窗(批量 ReportHits 上报 CP)。
-func (s *Server) recordHot(blocks []*lakepb.ReusableBlock) {
+// nodeID = 命中流量的服务节点(B2 跟随流量的放置目标;Router 观测后代报)。
+func (s *Server) recordHot(nodeID string, blocks []*lakepb.ReusableBlock) {
 	if s.hot == nil {
 		return
 	}
@@ -135,11 +151,11 @@ func (s *Server) recordHot(blocks []*lakepb.ReusableBlock) {
 			ids = append(ids, b.GetId())
 		}
 	}
-	s.hot.add(ids...)
+	s.hot.add(nodeID, ids...)
 }
 
 // recordHotIDs:镜像命中路径(ID 由 model+前缀哈希重建,MirrorBlock 不存 ID)。
-func (s *Server) recordHotIDs(modelID string, hashes [][]byte) {
+func (s *Server) recordHotIDs(nodeID, modelID string, hashes [][]byte) {
 	if s.hot == nil {
 		return
 	}
@@ -147,7 +163,7 @@ func (s *Server) recordHotIDs(modelID string, hashes [][]byte) {
 	for _, h := range hashes {
 		ids = append(ids, &lakepb.KVBlockID{ModelId: modelID, BlockHash: h})
 	}
-	s.hot.add(ids...)
+	s.hot.add(nodeID, ids...)
 }
 
 func minInt(a, b int) int {

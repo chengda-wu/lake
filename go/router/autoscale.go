@@ -222,14 +222,22 @@ func (r *nodeRegistry) lastReady() (string, bool) {
 	return r.ready[len(r.ready)-1], true
 }
 
-// hotSet 命中观测窗(有界 FIFO,窗内去重)——P7 收口(方案 Z):Router 只作
-// 热度传感器,命中批量上报 CP(ReportHits → radix hit_count);扩容 warmup /
-// 预放置的选块与发起归池侧,Router 不指挥放置。
+// hotSet 命中观测窗(按服务节点分桶,有界 FIFO,窗内去重)——P7 收口(方案 Z):
+// Router 只作热度传感器,命中批量上报 CP(ReportHits → radix hit_count);
+// 扩容 warmup / 预放置的选块与发起归池侧,Router 不指挥放置。
+// P7.6(B2):命中按服务节点分桶——ReportHits.node_id = 命中流量的服务节点
+// (跟随流量放置的目标节点),不再笼统上报 "router"。
 type hotSet struct {
 	mu      sync.Mutex
 	cap     int
-	seen    map[string]struct{} // model\x00hex(hash),窗内去重
-	pending []*lakepb.KVBlockID // 自上次 drain 以来的新命中
+	seen    map[string]struct{} // node\x00model\x00hash,窗内去重
+	pending []hotHit            // 自上次 drain 以来的新命中
+}
+
+// hotHit 一条待上报命中:服务节点 + 命中块。
+type hotHit struct {
+	node string
+	id   *lakepb.KVBlockID
 }
 
 func newHotSet(cap int) *hotSet {
@@ -239,33 +247,36 @@ func newHotSet(cap int) *hotSet {
 	return &hotSet{cap: cap, seen: make(map[string]struct{})}
 }
 
-func hotKey(id *lakepb.KVBlockID) string {
-	return id.GetModelId() + "\x00" + string(id.GetBlockHash())
+func hotKey(node string, id *lakepb.KVBlockID) string {
+	return node + "\x00" + id.GetModelId() + "\x00" + string(id.GetBlockHash())
 }
 
-func (h *hotSet) add(ids ...*lakepb.KVBlockID) {
+func (h *hotSet) add(node string, ids ...*lakepb.KVBlockID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, id := range ids {
-		k := hotKey(id)
+		k := hotKey(node, id)
 		if _, ok := h.seen[k]; ok {
 			continue
 		}
 		h.seen[k] = struct{}{}
-		h.pending = append(h.pending, id)
+		h.pending = append(h.pending, hotHit{node: node, id: id})
 	}
 	// 窗有界:超 cap 摘最旧(未上报也丢——best-effort,CP 计数偏弱可容忍)。
 	for len(h.pending) > h.cap {
-		delete(h.seen, hotKey(h.pending[0]))
+		delete(h.seen, hotKey(h.pending[0].node, h.pending[0].id))
 		h.pending = h.pending[1:]
 	}
 }
 
-// drain 取出本窗命中并开窗新窗。上报丢失不重发(best-effort)。
-func (h *hotSet) drain() []*lakepb.KVBlockID {
+// drain 取出本窗命中并按服务节点分桶,开窗新窗。上报丢失不重发(best-effort)。
+func (h *hotSet) drain() map[string][]*lakepb.KVBlockID {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := h.pending
+	out := make(map[string][]*lakepb.KVBlockID)
+	for _, hit := range h.pending {
+		out[hit.node] = append(out[hit.node], hit.id)
+	}
 	h.pending = nil
 	h.seen = make(map[string]struct{})
 	return out
@@ -385,17 +396,20 @@ func (s *Server) autoscaleTick(ctx context.Context) {
 	}
 }
 
-// flushHotHits 本窗命中批量上报 CP(best-effort:失败不重发,CP 计数偏弱可容忍)。
+// flushHotHits 本窗命中按服务节点分桶批量上报 CP(best-effort:失败不重发,
+// CP 计数偏弱可容忍)。NodeId = 命中流量的服务节点(P7.6 B2 跟随流量放置目标)。
 func (s *Server) flushHotHits(ctx context.Context) {
 	if s.hot == nil {
 		return
 	}
-	ids := s.hot.drain()
-	if len(ids) == 0 {
-		return
-	}
-	if _, err := s.cp.ReportHits(ctx, &lakepb.ReportHitsRequest{NodeId: "router", Ids: ids}); err != nil {
-		log.Printf("report hits: %v", err)
+	byNode := s.hot.drain()
+	for node, ids := range byNode {
+		if node == "" || len(ids) == 0 {
+			continue
+		}
+		if _, err := s.cp.ReportHits(ctx, &lakepb.ReportHitsRequest{NodeId: node, Ids: ids}); err != nil {
+			log.Printf("report hits: %v", err)
+		}
 	}
 }
 

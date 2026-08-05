@@ -65,7 +65,9 @@ type Server struct {
 	lastReadyLatencyMu     sync.Mutex
 	lastReadyLatency       time.Duration // 最近扩容决策→Ready 时延(原型=join RPC 完成)
 	hitBlocks, totalBlocks atomic.Uint64 // 命中率分子/分母(累计 block 数)
-	hot                    *hotSet       // P7 收口:命中观测窗,批量 ReportHits 上报 CP(放置归池侧)
+	// P7.6(B3):本地命中率分子/分母(本地命中块/可复用块,slo.md「本地命中率」口径)。
+	localHitBlocks, reusableBlocks atomic.Uint64
+	hot                            *hotSet // P7 收口:命中观测窗,批量 ReportHits 上报 CP(放置归池侧)
 
 	modeCountsMu sync.Mutex
 	modeCounts   map[string]uint64 // P7.1 探针:选路模式分布
@@ -339,6 +341,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// P6.5:命中率统计(扩缩决策输入之一;累计口径,原型足够)
 	s.totalBlocks.Add(uint64(len(hashes)))
 	s.hitBlocks.Add(uint64(gen.GetReusedBlocks()))
+	// P7.6(B3):本地命中率 = Σ本地命中块 / Σ可复用块(执行节点 HBM 命中前缀/
+	// 可复用前缀,slo.md 口径);分母为 0 的冷请求不进统计。
+	s.reusableBlocks.Add(uint64(hint.ReusedBlocks))
+	s.localHitBlocks.Add(uint64(hint.LocalHitBlocks))
 
 	content := detokenizeMock(gen.OutputTokens)
 	resp := chatResponse{
@@ -393,6 +399,26 @@ func (s *Server) hitRate() float64 {
 		return 0
 	}
 	return float64(s.hitBlocks.Load()) / float64(total)
+}
+
+// LocalHitRate 本地命中率(P7.6;SLO「本地命中率 >40%(重复请求场景)」口径:
+// 执行节点 HBM 命中前缀块 / 可复用前缀块,累计)。无可复用块时返回 0。
+func (s *Server) LocalHitRate() float64 {
+	total := s.reusableBlocks.Load()
+	if total == 0 {
+		return 0
+	}
+	return float64(s.localHitBlocks.Load()) / float64(total)
+}
+
+// LocalHitBlockCount / ReusableBlockCount:本地命中率分子/分母计数出口
+// (P7.6 bench/测试断言用)。
+func (s *Server) LocalHitBlockCount() uint64 {
+	return s.localHitBlocks.Load()
+}
+
+func (s *Server) ReusableBlockCount() uint64 {
+	return s.reusableBlocks.Load()
 }
 
 // lastReadyLatency 最近扩容决策→Ready 时延(原型:JoinShardNode 完成即 Ready)。
