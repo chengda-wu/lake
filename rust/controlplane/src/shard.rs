@@ -111,6 +111,18 @@ impl ShardRing {
         out
     }
 
+    /// P7.6(B2):非 draining 的 ready 节点(确定性排序)——HRW 预放置的节点集。
+    pub fn ready_nodes(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .nodes
+            .iter()
+            .filter(|(_, st)| !st.draining)
+            .map(|(id, _)| id.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Owner for a content hash. None if ring empty (or only draining).
     pub fn owner_of(&self, key: &[u8]) -> Option<String> {
         if self.ring.is_empty() {
@@ -234,7 +246,16 @@ impl Authority {
 
     /// P7 收口:命中上报(best-effort 批量,Router 在镜像上观测后回传)。
     /// 只计已注册块;未知 id 跳过(计数偏弱,丢失可容忍)。
-    pub fn report_hits(&mut self, ids: &[KvBlockId]) {
+    ///
+    /// P7.6(B2):`node_id` 语义 = 命中流量的**服务节点**(Router 选点后代报;
+    /// proto 字段注释仍写「上报方」,语义随 B1/B3 落地收紧为服务节点)。
+    /// 计数扩成 per-(block,node);随后做跟随流量评估,返回需触发的放置计划
+    /// (通常为空),由 handler 经 `WarmupSink` 下发。
+    pub fn report_hits(
+        &mut self,
+        node_id: &str,
+        ids: &[KvBlockId],
+    ) -> Vec<(String, Vec<KvBlockId>)> {
         for id in ids {
             let Ok(pk) = resolve_pool_kind(id.pool_kind) else {
                 continue;
@@ -246,30 +267,50 @@ impl Authority {
                 continue;
             };
             if pool.by_flat.contains_key(&id.block_hash) {
-                *pool.hit_counts.entry(id.block_hash.clone()).or_insert(0) += 1;
+                *pool
+                    .hit_counts
+                    .entry(id.block_hash.clone())
+                    .or_default()
+                    .entry(node_id.to_string())
+                    .or_insert(0) += 1;
             }
         }
+        self.follow_traffic_plans(node_id, ids)
     }
 
+    /// 块的命中总计(跨节点求和;扩容 warmup 选块用)。
     pub fn hit_count(&self, key: &NamespaceKey, pool_kind: i32, flat: &[u8]) -> u32 {
         self.namespaces
             .get(key)
             .and_then(|ns| ns.pools.get(&pool_kind))
             .and_then(|p| p.hit_counts.get(flat))
+            .map(|m| m.values().sum())
+            .unwrap_or(0)
+    }
+
+    /// P7.6(B2):块在指定节点的命中计数(跟随流量判据)。
+    pub fn hit_count_on(&self, key: &NamespaceKey, pool_kind: i32, flat: &[u8], node: &str) -> u32 {
+        self.namespaces
+            .get(key)
+            .and_then(|ns| ns.pools.get(&pool_kind))
+            .and_then(|p| p.hit_counts.get(flat))
+            .and_then(|m| m.get(node))
             .copied()
             .unwrap_or(0)
     }
 
     /// 扩容 warmup 选块(方案 Z:池侧自主决策,Router 不指挥放置):
-    /// 按 hit_count 降序取 top-k,排除已在目标节点 L0 的块。
+    /// 按 hit_count(跨节点总计)降序取 top-k,排除已在目标节点 L0 的块。
+    /// 选中的 (block,node) 记滞回标记(P7.6),后续跟随流量不重复下发。
     /// 参考:SGLang HiCache 扩容时按 radix 热度预取;差异是我们由存储池
     /// 统一发起(块可能在任意节点/层),不经调度器。
-    pub fn warmup_plan(&self, node_id: &str, k: usize) -> Vec<KvBlockId> {
+    pub fn warmup_plan(&mut self, node_id: &str, k: usize) -> Vec<KvBlockId> {
         let mut cand: Vec<(u32, KvBlockId)> = Vec::new();
         for ns in self.namespaces.values() {
             for pool in ns.pools.values() {
-                for (flat, cnt) in &pool.hit_counts {
-                    if *cnt == 0 {
+                for (flat, counts) in &pool.hit_counts {
+                    let cnt: u32 = counts.values().sum();
+                    if cnt == 0 {
                         continue;
                     }
                     let Some(entry) = pool.by_flat.get(flat) else {
@@ -284,14 +325,25 @@ impl Authority {
                         continue;
                     }
                     if let Some(id) = entry.meta.id.clone() {
-                        cand.push((*cnt, id));
+                        cand.push((cnt, id));
                     }
                 }
             }
         }
         cand.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.block_hash.cmp(&b.1.block_hash)));
         cand.truncate(k);
-        cand.into_iter().map(|(_, id)| id).collect()
+        let plan: Vec<KvBlockId> = cand.into_iter().map(|(_, id)| id).collect();
+        for ns in self.namespaces.values_mut() {
+            for pool in ns.pools.values_mut() {
+                for id in &plan {
+                    if pool.by_flat.contains_key(&id.block_hash) {
+                        pool.placement_marks
+                            .insert((id.block_hash.clone(), node_id.to_string()));
+                    }
+                }
+            }
+        }
+        plan
     }
 
     /// Drain node: remap ownership away; list migrations + L2 push candidates.
