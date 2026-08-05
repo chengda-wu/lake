@@ -72,8 +72,10 @@ fn gen_request(rng: &mut Rng, zipf: &Zipf, share_pct: u64) -> Vec<u64> {
     (0..BLOCKS_PER_REQ as u64).map(|i| (prefix << 32) | i).collect()
 }
 
-/// 驱动一轮 workload;返回 (stats 快照, 写字节, 迁移字节, promote 次数)。
-fn drive(caps: TierCaps, n_requests: usize, share_pct: u64, seed: u64) -> (u64, u64, u64, u64, u64, u64, u64) {
+/// 驱动一轮 workload;返回 (l0/l1/l2 命中, l3 命中, 冷 miss, 写字节, 迁移字节, promote 次数)。
+/// L3 命中与冷 miss 分开记(review #65):doc 的「miss 率」= l3+冷 miss(保守口径,
+/// L3 fetch 慢视同 miss),但数据上两者可分。
+fn drive(caps: TierCaps, n_requests: usize, share_pct: u64, seed: u64) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     let mut e = LocalTierEngine::with_caps(caps);
     let mut rng = Rng(seed | 1);
     let zipf = Zipf::new(HOT_PREFIXES, 1.2);
@@ -101,7 +103,7 @@ fn drive(caps: TierCaps, n_requests: usize, share_pct: u64, seed: u64) -> (u64, 
         }
     }
     let s = &e.stats;
-    (s.l0, s.l1, s.l2, s.l3 + s.miss, write_bytes, moved_bytes, promotes)
+    (s.l0, s.l1, s.l2, s.l3, s.miss, write_bytes, moved_bytes, promotes)
 }
 
 fn emit(name: &str, counters: &[(&str, u64)]) {
@@ -126,24 +128,26 @@ fn main() {
     const REQUESTS: usize = 3000;
     const SHARE_PCT: u64 = 70; // 70% 请求走共享热前缀(公共前缀场景)
 
-    // 1. 命中率-容量曲线
-    eprintln!("== hit_curve (requests={REQUESTS}, share={SHARE_PCT}%) ==");
+    // 1. 命中率-容量曲线(miss 列 = L3 命中 + 冷 miss,保守口径;emit 里两者分开)
+    eprintln!("== hit_curve (requests={REQUESTS}, share={SHARE_PCT}%, miss含L3) ==");
     for l0 in [32u64, 64, 128, 256, 512] {
         let caps = TierCaps { l0: l0 as usize, l1: 4 * l0 as usize, l2: 16 * l0 as usize };
-        let (h0, h1, h2, miss, wb, mb, pr) = drive(caps, REQUESTS, SHARE_PCT, 42);
-        let total = (h0 + h1 + h2 + miss) as f64;
+        let (h0, h1, h2, h3, miss, wb, mb, pr) = drive(caps, REQUESTS, SHARE_PCT, 42);
+        let total = (h0 + h1 + h2 + h3 + miss) as f64;
         eprintln!(
-            "  L0 cap {l0:>4}: hit={:.1}% (l0 {:.1}/l1 {:.1}/l2 {:.1}) miss={:.1}% moved/write={:.2}",
+            "  L0 cap {l0:>4}: hit={:.1}% (l0 {:.1}/l1 {:.1}/l2 {:.1}) miss={:.1}%(含L3 {:.1}%) moved/write={:.2}",
             100.0 * (h0 + h1 + h2) as f64 / total,
             100.0 * h0 as f64 / total,
             100.0 * h1 as f64 / total,
             100.0 * h2 as f64 / total,
-            100.0 * miss as f64 / total,
+            100.0 * (h3 + miss) as f64 / total,
+            100.0 * h3 as f64 / total,
             mb as f64 / wb.max(1) as f64,
         );
         emit("hit_curve", &[
             ("l0_cap", l0), ("l0_hit", h0), ("l1_hit", h1), ("l2_hit", h2),
-            ("miss", miss), ("write_bytes", wb), ("moved_bytes", mb), ("promotes", pr),
+            ("l3_hit", h3), ("cold_miss", miss),
+            ("write_bytes", wb), ("moved_bytes", mb), ("promotes", pr),
         ]);
     }
 
@@ -192,11 +196,22 @@ fn main() {
     for i in 0..16 {
         measure!(4, i); // D2 在 L3 → hops=3
     }
+    // hops=1/2 在 mock 内存层同为 HashMap 操作,差异低于噪声底(不可区分);
+    // 稳健口径 = hops3/hops1 比值(L3 源的固定开销真实可测)。review #65。
+    let mut ratio = 0.0;
+    let mut h1_avg = 0.0;
     for (hops, v) in &per_tier {
         let avg = v.iter().sum::<f64>() / v.len() as f64;
         eprintln!("  hops={hops}: avg {avg:.2}µs (n={})", v.len());
         emit("promote_calibration", &[("hops", *hops), ("avg_us_x1000", (avg * 1000.0) as u64), ("samples", v.len() as u64)]);
+        if *hops == 1 {
+            h1_avg = avg;
+        } else if *hops == 3 {
+            ratio = avg / h1_avg.max(1e-9);
+        }
     }
+    eprintln!("  hops3/hops1 = {ratio:.1}×(稳健口径;hops1≈hops2 为噪声)");
+    emit("promote_calibration_ratio", &[("hops3_over_hops1_x100", (ratio * 100.0) as u64)]);
 
     // 3. block 粒度:共享前缀在非对齐长度下的有效复用率
     eprintln!("== block_granularity ==");
@@ -227,8 +242,8 @@ fn main() {
 
     // 5. 同步迁移放大(写驱逐+读回填,数据路径,≠后台 GC/defrag):
     //    后台 <10% 由 BandwidthPool::default_throttle 构造保证(10% link/1s 窗,可暂停)。
-    let (h0, h1, h2, _miss, wb, mb, _) = drive(TierCaps::default(), REQUESTS, SHARE_PCT, 99);
-    let read_bytes = (h0 + h1 + h2) as u64 * BLOCK_BYTES as u64;
+    let (h0, h1, h2, h3, miss, wb, mb, _) = drive(TierCaps::default(), REQUESTS, SHARE_PCT, 99);
+    let read_bytes = (h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64;
     let share = mb as f64 / (read_bytes + wb) as f64;
     eprintln!("== sync_migration_proxy(数据路径,非后台带宽池)==\n  moved/(read+write) = {:.2}% (moved={mb}, read={read_bytes}, write={wb})", share * 100.0);
     emit("gc_proxy", &[
