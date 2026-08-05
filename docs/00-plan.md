@@ -90,7 +90,7 @@ P7  性能建模与验证   → 量化各假设，回填设计
 
 ### P1 待讨论 / 开放点
 
-- decode 写回频率 N：多轮 agent（重前缀增强时效，N 小）vs 单轮（重带宽/容错，N 大）。P7.3 已校准 ops/字节维度（字节与 N 无关、ops∝1/N，建议 N=2–4 块/批）；多轮时效维度随真实 agent workload 复核。
+- decode 写回频率 N：多轮 agent（重前缀增强时效，N 小）vs 单轮（重带宽/容错，N 大）。P7.3 已校准 ops/字节维度（字节与 N 无关、ops∝1/N，建议 N=2–4 块/批）；**issue #68 决策 1 已落地为 per-agent 配置**（`WritebackBatcher`，不同 agent 可不同 N；三维权衡 ops∝1/N / F4 窗口∝N / radix 滞后∝N 见 [`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md)）；多轮时效维度随真实 agent workload 复核。
 - ~~满块写回频率（满一个就写 vs 攒几个满块一起写）~~ P7.3 已校准（同上 N=2–4）。
 - 反向回传的 radix 增长时效：写回到 radix 可见的滞后上限。
 - 分块流水线深度（`page_first_direct` 子块传输 k 与 prefill 层数对齐）——依赖传输引擎字节布局落地（P5 遗留），blocked。
@@ -287,7 +287,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [x] P7.2 成本模型 v1：KV 传输带宽 vs prefill/decode 计算时间（模式选择阈值的量化输入）✅ PR #64（[`architecture/cost-model.md`](architecture/cost-model.md)）
 - [x] P7.3 分层缓存命中率/成本曲线（合成 workload 驱动 `HitStats`；校准 `LocalTierEngine::estimate_promote_cost` 跳数模型；block 粒度/写回频率/GC 带宽占比）✅ PR #65（[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md)「P7.3 校准结论」）
 - [x] P7.4 弹性冷启动时延分解（扩 P6.6 coldstart harness；「扩容决策→Ready <10s」校准）✅ PR #66（[`features/slo.md`](features/slo.md) 弹性节）
-- [ ] P7.5 回填 `docs/` 与 SLO：draft → 校准值，每个 P0 假设给量化结论
+- [x] P7.5 回填 `docs/` 与 SLO：draft → 校准值，每个 P0 假设给量化结论 ✅ PR #67（含 issue #68  churn 抑制八决策落地同步：写回 N per-agent 配置 / promote 准入 one-shot / 异步 promote D5 修订 / warmup 挪池侧）
 
 **完成判据**：每个 P0 假设有量化结论（成立/不成立/在何条件下成立）。阶段实施计划见 issue #61；结论表见 [`features/slo.md`](features/slo.md)「P7 校准结论」。
 
