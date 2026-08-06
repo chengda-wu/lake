@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
-
-import pytest
+from conftest import QWEN3_0_6B_MODEL_ID, requires_qwen3
 
 from lake.engine.agents.memory import InMemoryAgent
 from lake.engine.model_runner import ModelLoadInfo, ModelRunner
@@ -12,28 +10,6 @@ from lake.engine.pool_iface import PoolIface
 from lake.engine.pool_types import PreparePlan
 from lake.runtime.req import Req
 from lake.runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams, SchedulerOutput
-
-
-QWEN3_0_6B_MODEL_ID = os.path.expanduser(
-    os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH", "Qwen/Qwen3-0.6B")
-)
-
-
-def _qwen3_available() -> bool:
-    if os.path.exists(QWEN3_0_6B_MODEL_ID):
-        return True
-    try:
-        from huggingface_hub import try_to_load_from_cache
-
-        return try_to_load_from_cache("Qwen/Qwen3-0.6B", "config.json") is not None
-    except Exception:
-        return False
-
-
-requires_qwen3 = pytest.mark.skipif(
-    not _qwen3_available(),
-    reason="Qwen3-0.6B 不在本地缓存且未设 LAKE_TEST_QWEN3_MODEL_PATH(离线环境跳过)",
-)
 
 
 def test_commit_does_not_undercut_newer_prepare() -> None:
