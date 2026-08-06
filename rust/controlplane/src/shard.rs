@@ -330,7 +330,10 @@ impl Authority {
                 }
             }
         }
-        cand.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.block_hash.cmp(&b.1.block_hash)));
+        cand.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.block_hash.cmp(&b.1.block_hash))
+        });
         cand.truncate(k);
         let plan: Vec<KvBlockId> = cand.into_iter().map(|(_, id)| id).collect();
         for ns in self.namespaces.values_mut() {

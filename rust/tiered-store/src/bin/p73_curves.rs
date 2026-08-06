@@ -69,13 +69,20 @@ fn gen_request(rng: &mut Rng, zipf: &Zipf, share_pct: u64) -> Vec<u64> {
     } else {
         HOT_PREFIXES as u64 + rng.below(UNIQUE_PREFIXES as u64)
     };
-    (0..BLOCKS_PER_REQ as u64).map(|i| (prefix << 32) | i).collect()
+    (0..BLOCKS_PER_REQ as u64)
+        .map(|i| (prefix << 32) | i)
+        .collect()
 }
 
 /// 驱动一轮 workload;返回 (l0/l1/l2 命中, l3 命中, 冷 miss, 写字节, 迁移字节, promote 次数)。
 /// L3 命中与冷 miss 分开记(review #65):doc 的「miss 率」= l3+冷 miss(保守口径,
 /// L3 fetch 慢视同 miss),但数据上两者可分。
-fn drive(caps: TierCaps, n_requests: usize, share_pct: u64, seed: u64) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+fn drive(
+    caps: TierCaps,
+    n_requests: usize,
+    share_pct: u64,
+    seed: u64,
+) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     let mut e = LocalTierEngine::with_caps(caps);
     let mut rng = Rng(seed | 1);
     let zipf = Zipf::new(HOT_PREFIXES, 1.2);
@@ -89,21 +96,32 @@ fn drive(caps: TierCaps, n_requests: usize, share_pct: u64, seed: u64) -> (u64, 
                 AccessKind::Miss => {
                     let (_, fx) = e.put_durable(&hb, &block).unwrap();
                     write_bytes += BLOCK_BYTES as u64;
-                    moved_bytes += (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64 * BLOCK_BYTES as u64;
+                    moved_bytes += (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64
+                        * BLOCK_BYTES as u64;
                 }
                 _ => {
                     // L1/L2/L3 命中:promote 回 L0(读 miss 回填,被动兜底)
                     if let Ok((_, fx)) = e.promote_to_l0(&hb) {
                         promotes += 1;
                         moved_bytes += BLOCK_BYTES as u64
-                            + (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64 * BLOCK_BYTES as u64;
+                            + (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64
+                                * BLOCK_BYTES as u64;
                     }
                 }
             }
         }
     }
     let s = &e.stats;
-    (s.l0, s.l1, s.l2, s.l3, s.miss, write_bytes, moved_bytes, promotes)
+    (
+        s.l0,
+        s.l1,
+        s.l2,
+        s.l3,
+        s.miss,
+        write_bytes,
+        moved_bytes,
+        promotes,
+    )
 }
 
 /// 带 promote 频率准入的对照驱动(决策 B 真实机制):非 L0 命中走引擎一等 API
@@ -130,20 +148,31 @@ fn drive_admitted(
                 AccessKind::Miss => {
                     let (_, fx) = e.put_durable(&hb, &block).unwrap();
                     write_bytes += BLOCK_BYTES as u64;
-                    moved_bytes += (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64 * BLOCK_BYTES as u64;
+                    moved_bytes += (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64
+                        * BLOCK_BYTES as u64;
                 }
                 _ => {
                     if let Ok((_, fx)) = e.promote_to_l0_admitted(&hb) {
                         promotes += 1;
                         moved_bytes += BLOCK_BYTES as u64
-                            + (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64 * BLOCK_BYTES as u64;
+                            + (fx.l0_demoted.len() + fx.l2_demoted_to_l3.len()) as u64
+                                * BLOCK_BYTES as u64;
                     }
                 }
             }
         }
     }
     let s = &e.stats;
-    (s.l0, s.l1, s.l2, s.l3, s.miss, write_bytes, moved_bytes, promotes)
+    (
+        s.l0,
+        s.l1,
+        s.l2,
+        s.l3,
+        s.miss,
+        write_bytes,
+        moved_bytes,
+        promotes,
+    )
 }
 
 fn emit(name: &str, counters: &[(&str, u64)]) {
@@ -160,7 +189,11 @@ fn emit(name: &str, counters: &[(&str, u64)]) {
          \"env\":{{\"workload\":\"zipf1.2 share-driven\",\"tiers\":\"in-mem sim\",\"note\":\"比例类结论介质无关;时延为原型相对值\"}},\
          \"counters\":{{{cnt}}}}}\n"
     );
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(out).expect("open");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out)
+        .expect("open");
     f.write_all(line.as_bytes()).expect("write");
 }
 
@@ -171,7 +204,11 @@ fn main() {
     // 1. 命中率-容量曲线(miss 列 = L3 命中 + 冷 miss,保守口径;emit 里两者分开)
     eprintln!("== hit_curve (requests={REQUESTS}, share={SHARE_PCT}%, miss含L3) ==");
     for l0 in [32u64, 64, 128, 256, 512] {
-        let caps = TierCaps { l0: l0 as usize, l1: 4 * l0 as usize, l2: 16 * l0 as usize };
+        let caps = TierCaps {
+            l0: l0 as usize,
+            l1: 4 * l0 as usize,
+            l2: 16 * l0 as usize,
+        };
         let (h0, h1, h2, h3, miss, wb, mb, pr) = drive(caps, REQUESTS, SHARE_PCT, 42);
         let total = (h0 + h1 + h2 + h3 + miss) as f64;
         eprintln!(
@@ -184,11 +221,20 @@ fn main() {
             100.0 * h3 as f64 / total,
             mb as f64 / wb.max(1) as f64,
         );
-        emit("hit_curve", &[
-            ("l0_cap", l0), ("l0_hit", h0), ("l1_hit", h1), ("l2_hit", h2),
-            ("l3_hit", h3), ("cold_miss", miss),
-            ("write_bytes", wb), ("moved_bytes", mb), ("promotes", pr),
-        ]);
+        emit(
+            "hit_curve",
+            &[
+                ("l0_cap", l0),
+                ("l0_hit", h0),
+                ("l1_hit", h1),
+                ("l2_hit", h2),
+                ("l3_hit", h3),
+                ("cold_miss", miss),
+                ("write_bytes", wb),
+                ("moved_bytes", mb),
+                ("promotes", pr),
+            ],
+        );
     }
 
     // 2. promote cost 校准:hops 模型(estimate=nbytes×hops) vs 实测。
@@ -197,7 +243,11 @@ fn main() {
     // E 灌满 L2 把 D2 逐到 L3(hops=3)。
     eprintln!("== promote_calibration ==");
     let block = vec![0u8; BLOCK_BYTES];
-    let mut e = LocalTierEngine::with_caps(TierCaps { l0: 8, l1: 64, l2: 512 });
+    let mut e = LocalTierEngine::with_caps(TierCaps {
+        l0: 8,
+        l1: 64,
+        l2: 512,
+    });
     let id = |tag: u64, i: u64| ((tag << 32) | i).to_le_bytes();
     let mut per_tier: std::collections::BTreeMap<u64, Vec<f64>> = Default::default();
     macro_rules! measure {
@@ -206,7 +256,10 @@ fn main() {
             let hops = e.estimate_promote_cost(&h) / BLOCK_BYTES as u64;
             let t = Instant::now();
             if e.promote_to_l0(&h).is_ok() {
-                per_tier.entry(hops).or_default().push(t.elapsed().as_secs_f64() * 1e6);
+                per_tier
+                    .entry(hops)
+                    .or_default()
+                    .push(t.elapsed().as_secs_f64() * 1e6);
             }
         }};
     }
@@ -243,7 +296,14 @@ fn main() {
     for (hops, v) in &per_tier {
         let avg = v.iter().sum::<f64>() / v.len() as f64;
         eprintln!("  hops={hops}: avg {avg:.2}µs (n={})", v.len());
-        emit("promote_calibration", &[("hops", *hops), ("avg_us_x1000", (avg * 1000.0) as u64), ("samples", v.len() as u64)]);
+        emit(
+            "promote_calibration",
+            &[
+                ("hops", *hops),
+                ("avg_us_x1000", (avg * 1000.0) as u64),
+                ("samples", v.len() as u64),
+            ],
+        );
         if *hops == 1 {
             h1_avg = avg;
         } else if *hops == 3 {
@@ -251,7 +311,10 @@ fn main() {
         }
     }
     eprintln!("  hops3/hops1 = {ratio:.1}×(稳健口径;hops1≈hops2 为噪声)");
-    emit("promote_calibration_ratio", &[("hops3_over_hops1_x100", (ratio * 100.0) as u64)]);
+    emit(
+        "promote_calibration_ratio",
+        &[("hops3_over_hops1_x100", (ratio * 100.0) as u64)],
+    );
 
     // 3. block 粒度:共享前缀在非对齐长度下的有效复用率
     eprintln!("== block_granularity ==");
@@ -267,7 +330,13 @@ fn main() {
         }
         let ratio = reused as f64 / total as f64;
         eprintln!("  block={blk:>3}: 有效复用率 {:.2}%", ratio * 100.0);
-        emit("block_granularity", &[("block_tokens", blk), ("reuse_ratio_x10000", (ratio * 10000.0) as u64)]);
+        emit(
+            "block_granularity",
+            &[
+                ("block_tokens", blk),
+                ("reuse_ratio_x10000", (ratio * 10000.0) as u64),
+            ],
+        );
     }
 
     // 4. decode 写回批量 N:字节不变,ops ∝ 1/N
@@ -277,13 +346,20 @@ fn main() {
         let ops = DECODE_BLOCKS.div_ceil(n) * REQUESTS as u64;
         let bytes = DECODE_BLOCKS * BLOCK_BYTES as u64 * REQUESTS as u64;
         eprintln!("  batch N={n}: ops={ops} bytes={bytes} (bytes 与 N 无关)");
-        emit("writeback_scan", &[("batch_n", n), ("ops", ops), ("bytes", bytes)]);
+        emit(
+            "writeback_scan",
+            &[("batch_n", n), ("ops", ops), ("bytes", bytes)],
+        );
     }
 
     // 5b. promote 频率准入(hit_count≥2)vs 无准入对照:churn 降幅 / 命中率与 L0 份额代价。
     eprintln!("== admission_experiment ==");
     for l0 in [64u64, 128, 512] {
-        let caps = TierCaps { l0: l0 as usize, l1: 4 * l0 as usize, l2: 16 * l0 as usize };
+        let caps = TierCaps {
+            l0: l0 as usize,
+            l1: 4 * l0 as usize,
+            l2: 16 * l0 as usize,
+        };
         let base = drive(caps.clone(), REQUESTS, SHARE_PCT, 42);
         let adm = drive_admitted(caps, REQUESTS, SHARE_PCT, 42, 2);
         for (tag, r) in [("baseline", base), ("admit>=2", adm)] {
@@ -299,12 +375,21 @@ fn main() {
                 100.0 * mb as f64 / ((h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64 + wb) as f64,
                 pr,
             );
-            emit("admission_experiment", &[
-                ("l0_cap", l0), ("admitted", u64::from(tag != "baseline")),
-                ("l0_hit", h0), ("l1_hit", h1), ("l2_hit", h2),
-                ("l3_hit", h3), ("cold_miss", miss),
-                ("write_bytes", wb), ("moved_bytes", mb), ("promotes", pr),
-            ]);
+            emit(
+                "admission_experiment",
+                &[
+                    ("l0_cap", l0),
+                    ("admitted", u64::from(tag != "baseline")),
+                    ("l0_hit", h0),
+                    ("l1_hit", h1),
+                    ("l2_hit", h2),
+                    ("l3_hit", h3),
+                    ("cold_miss", miss),
+                    ("write_bytes", wb),
+                    ("moved_bytes", mb),
+                    ("promotes", pr),
+                ],
+            );
         }
     }
 
@@ -314,8 +399,13 @@ fn main() {
     let read_bytes = (h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64;
     let share = mb as f64 / (read_bytes + wb) as f64;
     eprintln!("== sync_migration_proxy(数据路径,非后台带宽池)==\n  moved/(read+write) = {:.2}% (moved={mb}, read={read_bytes}, write={wb})", share * 100.0);
-    emit("gc_proxy", &[
-        ("moved_bytes", mb), ("read_bytes", read_bytes), ("write_bytes", wb),
-        ("share_x10000", (share * 10000.0) as u64),
-    ]);
+    emit(
+        "gc_proxy",
+        &[
+            ("moved_bytes", mb),
+            ("read_bytes", read_bytes),
+            ("write_bytes", wb),
+            ("share_x10000", (share * 10000.0) as u64),
+        ],
+    );
 }

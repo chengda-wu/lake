@@ -130,10 +130,7 @@ impl Authority {
             if already_l0 {
                 continue;
             }
-            if pool
-                .placement_marks
-                .contains(&(flat.clone(), home.clone()))
-            {
+            if pool.placement_marks.contains(&(flat.clone(), home.clone())) {
                 continue;
             }
             plan.push(entry.meta.id.clone().unwrap_or_else(|| KvBlockId {
@@ -184,11 +181,7 @@ impl Authority {
             if !seen.insert((key.clone(), pk, id.block_hash.clone())) {
                 continue;
             }
-            let Some(pool) = self
-                .namespaces
-                .get(&key)
-                .and_then(|ns| ns.pools.get(&pk))
-            else {
+            let Some(pool) = self.namespaces.get(&key).and_then(|ns| ns.pools.get(&pk)) else {
                 continue;
             };
             let Some(entry) = pool.by_flat.get(&id.block_hash) else {
@@ -231,11 +224,7 @@ impl Authority {
         let mut out: Vec<KvBlockId> = Vec::new();
         let mut marks: Vec<(NamespaceKey, i32, Vec<u8>)> = Vec::new();
         for (key, pk, _, flat) in &cand {
-            let Some(pool) = self
-                .namespaces
-                .get(key)
-                .and_then(|ns| ns.pools.get(pk))
-            else {
+            let Some(pool) = self.namespaces.get(key).and_then(|ns| ns.pools.get(pk)) else {
                 continue;
             };
             let Some(entry) = pool.by_flat.get(flat) else {

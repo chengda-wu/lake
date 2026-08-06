@@ -937,7 +937,7 @@ mod tests {
         e.probe(b"hot");
         e.probe(b"hot");
         e.promote_to_l0_admitted(b"hot").unwrap(); // hot
-        // 第三个块挤占 L0(cap=2):one-shot 的 cold 先被逐,即使 hot 更久没碰。
+                                                   // 第三个块挤占 L0(cap=2):one-shot 的 cold 先被逐,即使 hot 更久没碰。
         e.put_durable(b"new", b"N").unwrap();
         e.promote_to_l0(b"new").unwrap();
         assert_eq!(e.local_tier(b"cold"), Some(LocalTier::L1), "one-shot 先逐");

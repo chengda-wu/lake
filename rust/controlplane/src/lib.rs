@@ -2678,8 +2678,16 @@ mod tests {
         assert_eq!(plan[0].block_hash, b"hot".to_vec(), "按 hit_count 降序");
 
         // hot 已在 n0 L0 → warm 到 n0 时排除。
-        auth.publish_location("m", "", PoolKind::Target as i32, b"hot", Tier::L0, "n0", true)
-            .unwrap();
+        auth.publish_location(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"hot",
+            Tier::L0,
+            "n0",
+            true,
+        )
+        .unwrap();
         let plan0 = auth.warmup_plan("n0", 10);
         assert_eq!(plan0.len(), 1);
         assert_eq!(plan0[0].block_hash, b"cold".to_vec());
@@ -2691,7 +2699,8 @@ mod tests {
         let mut auth = Authority::default();
         ensure_model(&mut auth, "m");
         let full = prefix(&[b"solo"]);
-        auth.register("n0", &full, vec![meta("m", b"solo")]).unwrap();
+        auth.register("n0", &full, vec![meta("m", b"solo")])
+            .unwrap();
         let id_of = |h: &[u8]| KvBlockId {
             model_id: "m".into(),
             block_hash: h.to_vec(),
@@ -2704,7 +2713,10 @@ mod tests {
         // 第 1 次命中:未达阈值(2)→ 无计划。
         let plans = auth.report_hits("n5", &[id_of(b"solo")]);
         assert!(plans.is_empty());
-        assert_eq!(auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"), 1);
+        assert_eq!(
+            auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"),
+            1
+        );
 
         // 第 2 次命中:达阈值 → 对 n5 触发放置。
         let plans = auth.report_hits("n5", &[id_of(b"solo")]);
@@ -2716,7 +2728,10 @@ mod tests {
         // 滞回:继续命中不重复下发。
         let plans = auth.report_hits("n5", &[id_of(b"solo")]);
         assert!(plans.is_empty(), "已下发过 (block,node) 不重复触发");
-        assert_eq!(auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"), 3);
+        assert_eq!(
+            auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"),
+            3
+        );
 
         // 同一块在另一节点独立计数/触发。
         let plans = auth.report_hits("n7", &[id_of(b"solo")]);
@@ -2769,9 +2784,18 @@ mod tests {
         let mut auth = Authority::default();
         ensure_model(&mut auth, "m");
         let full = prefix(&[b"solo"]);
-        auth.register("n0", &full, vec![meta("m", b"solo")]).unwrap();
-        auth.publish_location("m", "", PoolKind::Target as i32, b"solo", Tier::L0, "n5", true)
+        auth.register("n0", &full, vec![meta("m", b"solo")])
             .unwrap();
+        auth.publish_location(
+            "m",
+            "",
+            PoolKind::Target as i32,
+            b"solo",
+            Tier::L0,
+            "n5",
+            true,
+        )
+        .unwrap();
         let id = KvBlockId {
             model_id: "m".into(),
             block_hash: b"solo".to_vec(),
@@ -2784,7 +2808,10 @@ mod tests {
             assert!(plans.is_empty(), "已在 L0 不重复放");
         }
         let key = NamespaceKey::new("m", "");
-        assert_eq!(auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"), 3);
+        assert_eq!(
+            auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"),
+            3
+        );
     }
 
     /// P7.6(B2-a):HRW 预放置——空环无计划;ready 节点集确定家节点;

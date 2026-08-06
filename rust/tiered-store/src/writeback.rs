@@ -66,7 +66,9 @@ mod tests {
         let mut b = WritebackBatcher::new(3);
         assert!(b.push(b"a".to_vec(), b"A".to_vec()).is_none());
         assert!(b.push(b"b".to_vec(), b"B".to_vec()).is_none());
-        let batch = b.push(b"c".to_vec(), b"C".to_vec()).expect("3rd triggers flush");
+        let batch = b
+            .push(b"c".to_vec(), b"C".to_vec())
+            .expect("3rd triggers flush");
         assert_eq!(batch.len(), 3);
         assert_eq!(b.pending_len(), 0);
 
