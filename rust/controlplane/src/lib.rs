@@ -759,7 +759,7 @@ impl ControlPlaneService for ControlPlane {
                 let migration_count = migrations.len() as u32;
                 // P7 收口(方案 Z):新节点 warmup 由池侧按 hit_count 自主选块
                 // 发起;Router 只经 ReportHits 报告命中,不指挥放置。
-                let plan = auth.warmup_plan(&req.node_id, DEFAULT_WARMUP_K as usize);
+                let plan = auth.warmup_plan(&req.node_id, DEFAULT_WARMUP_K);
                 if !plan.is_empty() {
                     self.warmup_sink.warm(&req.node_id, plan);
                 }
@@ -2804,7 +2804,7 @@ mod tests {
             revision: String::new(),
         };
         for _ in 0..3 {
-            let plans = auth.report_hits("n5", &[id.clone()]);
+            let plans = auth.report_hits("n5", std::slice::from_ref(&id));
             assert!(plans.is_empty(), "已在 L0 不重复放");
         }
         let key = NamespaceKey::new("m", "");

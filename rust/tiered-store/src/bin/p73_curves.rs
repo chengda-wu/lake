@@ -360,7 +360,7 @@ fn main() {
             l1: 4 * l0 as usize,
             l2: 16 * l0 as usize,
         };
-        let base = drive(caps.clone(), REQUESTS, SHARE_PCT, 42);
+        let base = drive(caps, REQUESTS, SHARE_PCT, 42);
         let adm = drive_admitted(caps, REQUESTS, SHARE_PCT, 42, 2);
         for (tag, r) in [("baseline", base), ("admit>=2", adm)] {
             let (h0, h1, h2, h3, miss, wb, mb, pr) = r;
@@ -372,7 +372,7 @@ fn main() {
                 100.0 * (h3 + miss) as f64 / total,
                 100.0 * h3 as f64 / total,
                 mb as f64 / wb.max(1) as f64,
-                100.0 * mb as f64 / ((h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64 + wb) as f64,
+                100.0 * mb as f64 / ((h0 + h1 + h2 + h3) * BLOCK_BYTES as u64 + wb) as f64,
                 pr,
             );
             emit(
@@ -396,7 +396,7 @@ fn main() {
     // 5. 同步迁移放大(写驱逐+读回填,数据路径,≠后台 GC/defrag):
     //    后台 <10% 由 BandwidthPool::default_throttle 构造保证(10% link/1s 窗,可暂停)。
     let (h0, h1, h2, h3, _miss, wb, mb, _) = drive(TierCaps::default(), REQUESTS, SHARE_PCT, 99);
-    let read_bytes = (h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64;
+    let read_bytes = (h0 + h1 + h2 + h3) * BLOCK_BYTES as u64;
     let share = mb as f64 / (read_bytes + wb) as f64;
     eprintln!("== sync_migration_proxy(数据路径,非后台带宽池)==\n  moved/(read+write) = {:.2}% (moved={mb}, read={read_bytes}, write={wb})", share * 100.0);
     emit(
