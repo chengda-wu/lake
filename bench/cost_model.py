@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 # ---- 参数表(来源见 docs/architecture/cost-model.md §参数) ----
 
