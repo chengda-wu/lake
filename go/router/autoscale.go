@@ -164,7 +164,8 @@ func (r *nodeRegistry) readyIDs() []string {
 	return out
 }
 
-// incInFlight/decInFlight 在途记账:dispatch 前 +1、generate 完成 -1
+// incInFlight/decInFlight 在途记账:选路即占 +1、请求完成 -1(含排队与
+// 重试在途;server.go handleChatCompletions,非 dispatch 边界)
 // (调用方 defer);draining 节点在途照计(跑完才摘除)。
 func (r *nodeRegistry) incInFlight(id string) { r.slot(id).Add(1) }
 func (r *nodeRegistry) decInFlight(id string) { r.slot(id).Add(-1) }

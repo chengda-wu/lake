@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +124,52 @@ func TestAffinityHRWMinimalMigration(t *testing.T) {
 	}
 }
 
+// TestAffinityColdPathMatchesRustHRW 钉死 Go 冷路径与池侧
+// placement.rs::hrw_score 的同构选点:纯整数 argmax + 节点 id 决胜,
+// 负载未过护栏时必须逐点同家(review #69:float64 加权会在精度碰撞/
+// 负载不等时分叉)。
+func TestAffinityColdPathMatchesRustHRW(t *testing.T) {
+	s := newAffinityServer("worker-0", "worker-1", "worker-2")
+	ids := []string{"worker-0", "worker-1", "worker-2"}
+	for i := 0; i < 64; i++ {
+		key := []byte(fmt.Sprintf("conv-%d", i))
+		want, best := "", uint64(0)
+		for _, id := range ids {
+			score := fnv1a64(key, id)
+			if want == "" || score > best || (score == best && id < want) {
+				want, best = id, score
+			}
+		}
+		if got := s.pickNodeForRequest("m", nil, key); got != want {
+			t.Fatalf("key %q: 冷路径=%s,纯 HRW argmax=%s(分叉)", key, got, want)
+		}
+	}
+}
+
+// TestAffinityColdPathGuardOverflow 冷路径护栏:家节点在途 ≥ 护栏时溢到
+// 次高分节点(确定性);全部过载退无过滤纯 HRW(回到家节点)。
+func TestAffinityColdPathGuardOverflow(t *testing.T) {
+	s := newAffinityServer("worker-0", "worker-1", "worker-2") // 护栏=4
+	key := []byte("overflow-key")
+	home := s.pickNodeForRequest("m", nil, key)
+
+	s.nodes.slot(home).Store(4)
+	second := s.pickNodeForRequest("m", nil, key)
+	if second == home {
+		t.Fatalf("家节点 %s 在途达护栏仍未溢出", home)
+	}
+	if again := s.pickNodeForRequest("m", nil, key); again != second {
+		t.Fatalf("溢出选择不确定: %s → %s", second, again)
+	}
+
+	for _, id := range []string{"worker-0", "worker-1", "worker-2"} {
+		s.nodes.slot(id).Store(4)
+	}
+	if got := s.pickNodeForRequest("m", nil, key); got != home {
+		t.Fatalf("全过载应退纯 HRW 回家节点 %s,实得 %s", home, got)
+	}
+}
+
 // TestFnv1a64CrossLanguageVectors 钉死与 Rust 权威(placement.rs::hrw_score)
 // 的字节布局一致性:原语层 fnv1a 经 std lib 核对("lake" 向量与 Rust
 // fnv1a64_matches_go_reference_vectors 同值),组合层钉绝对值防回归。
@@ -172,4 +219,48 @@ func TestInFlightAccounting(t *testing.T) {
 	waitFor(t, 2*time.Second, "在途计数归零", func() bool {
 		return h.srv.nodes.inFlight(node) == 0
 	})
+}
+
+// TestInFlightVisibleWhileQueued 护栏看得见排队中的亲和负载(review #69
+// High):1 槽调度器下 req1 执行中、req2 仍排队(未 dispatch)时,req2
+// 选中节点的 in-flight 已计入——原实现 dispatch 前才 +1,排队期对护栏
+// 不可见(并发 pick 同读低载 → 涌向同一热点,TOCTOU + queue-blind)。
+func TestInFlightVisibleWhileQueued(t *testing.T) {
+	h := newP76Harness(t, 2, false)
+	// 换 1 槽调度器,req2 必排队(原 256 槽 goroutine 闲置,随 cleanup 取消)。
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	t.Cleanup(schedCancel)
+	h.srv.sched = NewPQScheduler(1, 30*time.Second)
+	go h.srv.sched.Run(schedCtx)
+
+	release := make(chan struct{})
+	var started atomic.Int32
+	h.srv.worker = fakeWorker{generate: func(_ context.Context, req *lakepb.GenerateRequest) (*lakepb.GenerateResponse, error) {
+		started.Add(1)
+		<-release
+		hashes := ChainBlockHashes(req.GetPromptTokens(), BlockSize)
+		h.cp.registerBlocks(req.GetModelId(), hashes, req.GetRequesterNodeId())
+		return &lakepb.GenerateResponse{RequestId: req.GetRequestId(), Mode: req.GetExecMode()}, nil
+	}}
+
+	body := `{"model":"m","messages":[{"role":"user","content":"队列可见性探针"}],"max_tokens":2}`
+	done := make(chan int, 2)
+	go func() { done <- postChatP76(t, h.srv, body, "").Code }()
+	waitFor(t, 2*time.Second, "req1 开始执行并卡住", func() bool { return started.Load() == 1 })
+
+	go func() { done <- postChatP76(t, h.srv, body, "").Code }()
+	// req2 已 pick 并入队(未 dispatch):全节点 in-flight 总和应升为 2。
+	waitFor(t, 2*time.Second, "排队中的请求已计入在途", func() bool {
+		return h.srv.nodes.inFlight("worker-0")+h.srv.nodes.inFlight("worker-1") == 2
+	})
+	if got := started.Load(); got != 1 {
+		t.Fatalf("req2 不应已 dispatch(started=%d)", got)
+	}
+	close(release)
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("req1 status = %d", code)
+	}
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("req2 status = %d", code)
+	}
 }

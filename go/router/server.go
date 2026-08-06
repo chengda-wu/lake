@@ -280,7 +280,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// P7.6(B1):路由键 = X-Lake-Session-Id 头优先(客户端驱动会话亲和),
 	// 否则有界深度前缀锚点(深度 1 会被全局系统前缀打成热点,见
 	// affinity.go::anchorDepth);亲和两段式 = 热路径镜像 L0 得分 + 冷路径
-	// 加权 HRW(负载均衡时与池侧 B2-a 预放置家节点一致)。
+	// 纯整数 HRW(与池侧 B2-a 预放置家节点逐点一致,负载经护栏过滤)。
 	routingKey := []byte(r.Header.Get("X-Lake-Session-Id"))
 	if len(routingKey) == 0 {
 		routingKey = prefixAnchorHash(hashes)
@@ -290,21 +290,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		pick = s.pickNodeForRequest
 	}
 	nodeID := pick(model, hashes, routingKey)
-	hint := s.prefixHint(ctx, model, hashes, len(tokens), nodeID)
-	mode := SelectExecMode(hint, len(tokens), WorkerRole(s.cfg.NodeRole), s.pathBandwidthGBps(nodeID))
-	s.modeCountsMu.Lock()
-	if s.modeCounts == nil {
-		s.modeCounts = map[string]uint64{}
+	// B1 in-flight 记账:选路即占、请求完成才释(含排队与抢占重试在途)——
+	// 亲和护栏与冷路径过滤看得见排队中的亲和负载(原在 exec 内 dispatch
+	// 前才 +1:并发 pick 同时读到低载 → 涌向同一热点,TOCTOU + queue-blind,
+	// review #69 High)。
+	if s.nodes != nil && nodeID != "" {
+		s.nodes.incInFlight(nodeID)
+		defer s.nodes.decInFlight(nodeID)
 	}
-	s.modeCounts[string(mode)]++
-	s.modeCountsMu.Unlock()
 
 	// P6.4:已准入请求进优先级调度器(排序/抢占/背压暂停;不丢请求)。
 	// 抢占重排会重跑本闭包——attempt 后缀避免 worker 侧 duplicate req_id;
 	// 被抢占者 KV 已留池,重跑命中前缀(抢占重算式,对齐 vLLM v1)。
 	// P7.6(B1):节点沿用「Submit 前选一次」(上面 nodeID 已固定),抢占重跑
-	// 不重选节点——retry 重选是未来工作(需与 F4 重路由统一设计)。
+	// 不重选节点——跨节点 retry 重选归 F4 重路由统一设计;但 hint/mode
+	// 每次 attempt 重算(镜像可能已变:预放置/驱逐/新注册),冻结三元组
+	// 会在视图变化后错模(review #69 High)。
 	var gen *lakepb.GenerateResponse
+	var lastHint PrefixHint
 	attempt := 0
 	exec := func(execCtx context.Context) error {
 		attempt++
@@ -312,11 +315,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if attempt > 1 {
 			reqID = fmt.Sprintf("%s-r%d", rid, attempt)
 		}
-		// B1 in-flight 记账:dispatch 前 +1、generate 完成(或出错返回)-1;
-		// 亲和护栏与加权 HRW 的即时负载信号(nodeRegistry,非 loadsync 出站上报)。
-		if s.nodes != nil && nodeID != "" {
-			s.nodes.incInFlight(nodeID)
-			defer s.nodes.decInFlight(nodeID)
+		hint := s.prefixHint(execCtx, model, hashes, len(tokens), nodeID)
+		lastHint = hint
+		mode := SelectExecMode(hint, len(tokens), WorkerRole(s.cfg.NodeRole), s.pathBandwidthGBps(nodeID))
+		if attempt == 1 {
+			// 模式分布按请求计一次(首次决策口径;重试重算不重复计数)。
+			s.modeCountsMu.Lock()
+			if s.modeCounts == nil {
+				s.modeCounts = map[string]uint64{}
+			}
+			s.modeCounts[string(mode)]++
+			s.modeCountsMu.Unlock()
 		}
 		// 边10:先 Dispatch 到 agent(P3 仅 ack;执行仍在 Worker.Generate)。
 		ack, err := s.agent.Dispatch(execCtx, &lakepb.DispatchRequest{
@@ -375,8 +384,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.hitBlocks.Add(uint64(gen.GetReusedBlocks()))
 	// P7.6(B3):本地命中率 = Σ本地命中块 / Σ可复用块(执行节点 HBM 命中前缀/
 	// 可复用前缀,slo.md 口径);分母为 0 的冷请求不进统计。
-	s.reusableBlocks.Add(uint64(hint.ReusedBlocks))
-	s.localHitBlocks.Add(uint64(hint.LocalHitBlocks))
+	s.reusableBlocks.Add(uint64(lastHint.ReusedBlocks))
+	s.localHitBlocks.Add(uint64(lastHint.LocalHitBlocks))
 
 	content := detokenizeMock(gen.OutputTokens)
 	resp := chatResponse{

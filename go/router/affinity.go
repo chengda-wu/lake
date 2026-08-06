@@ -15,7 +15,9 @@ package router
 //     计数(即时、精确),非最短队列近似。
 //   - Dynamo protocols.rs::stable_routing_id 注释(HRW rendezvous 使 cache
 //     assignment 在 worker churn 下最小迁移):冷路径用 rendezvous(HRW)一致性
-//     哈希,同键同节点、加节点最小迁移;权重 1/(1+inflight) 做负载倾斜。
+//     哈希,同键同节点、加节点最小迁移;纯整数 argmax + 节点 id 决胜与池侧
+//     placement.rs 严格同构,负载经护栏过滤表达(不进 score,防 u64→f64
+//     精度碰撞/负载不等时与池侧预放置家节点分叉)。
 
 import (
 	"encoding/binary"
@@ -26,7 +28,9 @@ import (
 )
 
 // defaultAffinityGuard 亲和路径单节点 in-flight 护栏默认值:命中得分最高的
-// 节点在途 ≥ 护栏则降级次优;全部过载落冷路径(加权 HRW 天然倾向低载节点)。
+// 节点在途 ≥ 护栏则降级次优,全部过载落冷路径(冷路径同用护栏过滤,
+// 全过载退纯 HRW)。in-flight 记账在 pick 时即占、请求完成才释(含排队
+// 与重试在途),护栏看得见排队中的亲和负载。
 // 原型默认 8——远小于真实 batch 容量,仅防单点饥饿;P7 校准前不做自适应。
 const defaultAffinityGuard = 8
 
@@ -70,10 +74,14 @@ func fnv1a64(key []byte, node string) uint64 {
 //     L0 的连续块数,PrefixLookup 首个 miss 截断 ⇒ 天然连续前缀语义);得分
 //     >0 的最高者胜出,其 in-flight ≥ 护栏则降级次优,全部过载落冷路径。
 //     平局按节点 id 序(与 readyIDs 排序一致,确定性)。
-//  2. 冷路径——负载权重 rendezvous(HRW):score = fnv1a64(routingKey‖node)
-//     × 1/(1+inflight),取 max。同键同节点(确定性);加节点最小迁移(HRW
-//     性质);负载越高权重越低(倾斜但不钉死,避免冷启动全 0 时退化为纯负载
-//     轮转而丢失键亲和)。
+//  2. 冷路径——纯整数 HRW(argmax + 节点 id 决胜,与池侧
+//     placement.rs::preplace_on_register 的家节点选择严格同构):
+//     score = fnv1a64(routingKey‖node),取 max,平局按节点 id 升序。
+//     负载经护栏表达而不进 score:in-flight ≥ 护栏的节点先被过滤,
+//     全部过载才退化为无过滤纯 HRW——因此负载未饱和时 Router 冷路径
+//     与池侧预放置**逐点同家**(float64 加权在 u64→f64 精度碰撞或
+//     负载不等时会分叉,恰好是最需要一致的时刻)。同键同节点、加节点
+//     最小迁移(HRW 性质);同键并发突发由护栏溢到次高分节点。
 //
 // 抢占重跑沿用「Submit 前选一次」(P6.4 现状):被抢占者重跑不重选节点,
 // retry 重选是未来工作(需与 F4 重路由统一设计)。
@@ -130,13 +138,21 @@ func (s *Server) pickNodeForRequest(model string, hashes [][]byte, routingKey []
 		// 全部命中节点过载 → 冷路径(加权 HRW 会自然绕开高载)。
 	}
 
-	// 冷路径:加权 HRW(键亲和 × 负载倾斜)。
-	var best string
-	var bestScore float64
+	// 冷路径:纯整数 HRW(负载经护栏过滤表达,不进 score;与池侧预放置同构)。
+	eligible := ids[:0:0]
 	for _, id := range ids {
-		w := 1.0 / float64(1+s.nodes.inFlight(id))
-		score := float64(fnv1a64(routingKey, id)) * w
-		if best == "" || score > bestScore {
+		if s.nodes.inFlight(id) < guard {
+			eligible = append(eligible, id)
+		}
+	}
+	if len(eligible) == 0 {
+		eligible = ids // 全过载:不过滤,纯 HRW(确定性优先于负载倾斜)
+	}
+	best := eligible[0]
+	bestScore := fnv1a64(routingKey, best)
+	for _, id := range eligible[1:] {
+		score := fnv1a64(routingKey, id)
+		if score > bestScore || (score == bestScore && id < best) {
 			best, bestScore = id, score
 		}
 	}
