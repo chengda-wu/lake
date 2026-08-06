@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from lake.engine.agents.memory import InMemoryAgent
 from lake.engine.model_runner import ModelLoadInfo, ModelRunner
 from lake.engine.pool_iface import PoolIface
@@ -14,6 +16,23 @@ from lake.runtime.scheduler_output import ForwardMode, ReqIoSet, SamplingParams,
 
 QWEN3_0_6B_MODEL_ID = os.path.expanduser(
     os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH", "Qwen/Qwen3-0.6B")
+)
+
+
+def _qwen3_available() -> bool:
+    if os.path.exists(QWEN3_0_6B_MODEL_ID):
+        return True
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        return try_to_load_from_cache("Qwen/Qwen3-0.6B", "config.json") is not None
+    except Exception:
+        return False
+
+
+requires_qwen3 = pytest.mark.skipif(
+    not _qwen3_available(),
+    reason="Qwen3-0.6B 不在本地缓存且未设 LAKE_TEST_QWEN3_MODEL_PATH(离线环境跳过)",
 )
 
 
@@ -138,6 +157,7 @@ def test_execute_model_does_not_done_failed_step() -> None:
     assert ag._ready_step == 7  # noqa: SLF001
 
 
+@requires_qwen3
 def test_load_qwen3_model_pins_weights_and_warmup_skips_pool() -> None:
     ag = InMemoryAgent()
     pool = PoolIface(ag)
