@@ -73,6 +73,19 @@ pub fn chain_anchor(prefix_hashes: &[Vec<u8>]) -> Option<&[u8]> {
     Some(&prefix_hashes[depth - 1])
 }
 
+/// HRW 家节点选择:score 大者胜,平局取节点 id **较小**者——与 Go 冷路径
+/// `score > bestScore || (score == bestScore && id < best)` 严格同向。
+/// score 注入以便单测构造平局(真实 fnv u64 平局不可构造)。
+fn pick_home<'a, I>(nodes: I, score_of: impl Fn(&str) -> u64) -> Option<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    nodes
+        .into_iter()
+        .max_by(|a, b| score_of(a).cmp(&score_of(b)).then_with(|| b.cmp(a)))
+        .cloned()
+}
+
 /// (block, node) 放置滞回标记:已下发过放置计划的对,不重复下发
 /// (真放置经 agent `PlaceBlocks` 异步完成;标记防计划风暴)。
 pub(crate) type PlacementMarks = HashSet<(Vec<u8>, String)>;
@@ -97,15 +110,9 @@ impl Authority {
         if nodes.is_empty() {
             return None;
         }
-        // 确定性平局:(score, node_id) 取 max——分数相同近乎不发生,但须确定。
-        let home = nodes
-            .into_iter()
-            .max_by(|a, b| {
-                hrw_score(&anchor, a)
-                    .cmp(&hrw_score(&anchor, b))
-                    .then_with(|| a.cmp(b))
-            })
-            .expect("ready_nodes non-empty");
+        // 确定性平局:score 取 max,平局取节点 id 较小者(与 Go 冷路径
+        // `id < best` 同向——分数相同近乎不发生,但两侧必须同向才同构)。
+        let home = pick_home(&nodes, |n| hrw_score(&anchor, n))?;
         let pk = resolve_pool_kind(pool_kind).ok()?;
         let key = NamespaceKey::new(model_id, revision);
         let pool = self.namespaces.get(&key)?.pools.get(&pk)?;
@@ -313,19 +320,9 @@ mod tests {
     #[test]
     fn hrw_minimal_migration_on_join() {
         let keys: Vec<Vec<u8>> = (0..200u32).map(|i| format!("k{i}").into_bytes()).collect();
-        let home = |nodes: &[&str], key: &[u8]| {
-            nodes
-                .iter()
-                .max_by(|a, b| {
-                    hrw_score(key, a)
-                        .cmp(&hrw_score(key, b))
-                        .then_with(|| a.cmp(b))
-                })
-                .unwrap()
-                .to_string()
-        };
-        let two = ["n0", "n1"];
-        let three = ["n0", "n1", "n2"];
+        let s = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (two, three) = (s(&["n0", "n1"]), s(&["n0", "n1", "n2"]));
+        let home = |nodes: &[String], key: &[u8]| pick_home(nodes, |n| hrw_score(key, n)).unwrap();
         let mut moved = 0usize;
         for k in &keys {
             let before = home(&two, k);
@@ -339,6 +336,18 @@ mod tests {
         assert!(
             ratio > 0.0 && ratio < 0.55,
             "理想 ≈1/3,宽松上界;ratio={ratio}"
+        );
+    }
+
+    /// 平局方向:同分取节点 id 较小者,与 Go 冷路径 `id < best` 同向
+    /// (review 发现两侧曾反向——Go 取小、Rust max_by 取大,同构声明被证伪)。
+    #[test]
+    fn pick_home_tie_prefers_smaller_node_id() {
+        let nodes = vec!["n1".to_string(), "n0".to_string()];
+        assert_eq!(pick_home(&nodes, |_| 42), Some("n0".to_string()));
+        assert_eq!(
+            pick_home(&nodes, |n| if n == "n1" { 1 } else { 0 }),
+            Some("n1".to_string())
         );
     }
 }

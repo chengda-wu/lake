@@ -269,6 +269,9 @@ impl Authority {
                     pool.handles.remove(&seq);
                     pool.global_refs.remove(&seq);
                     pool.seq_to_flat.remove(&seq);
+                    // 同 drop_inactive_victims:连带清理热度与滞回标记。
+                    pool.hit_counts.remove(&flat);
+                    pool.placement_marks.retain(|(f, _)| f != &flat);
                     let _ = pool.inactive.take(seq, bid);
                     ns.used_bytes = (ns.used_bytes - bpb).max(0);
                     view_events.push(crate::view::invalidated_event(id.clone()));

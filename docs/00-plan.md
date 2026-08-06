@@ -288,7 +288,7 @@ P1 关键篇（execution-modes + overview）已齐，够支撑 proto 起草。�
 - [x] P7.3 分层缓存命中率/成本曲线（合成 workload 驱动 `HitStats`；校准 `LocalTierEngine::estimate_promote_cost` 跳数模型；block 粒度/写回频率/GC 带宽占比）✅ PR #65（[`architecture/kv-cache-pool.md`](architecture/kv-cache-pool.md)「P7.3 校准结论」）
 - [x] P7.4 弹性冷启动时延分解（扩 P6.6 coldstart harness；「扩容决策→Ready <10s」校准）✅ PR #66（[`features/slo.md`](features/slo.md) 弹性节）
 - [x] P7.5 回填 `docs/` 与 SLO：draft → 校准值，每个 P0 假设给量化结论 ✅ PR #67（含 issue #68  churn 抑制八决策落地同步：写回 N per-agent 配置 / promote 准入 one-shot / 异步 promote D5 修订 / warmup 挪池侧）
-- [x] P7.6 本地命中闭环（slo.md「本地命中率 >40%」验证）：B2 池侧稳态预放置（per-(block,node) 计数 + 跟随流量放置/祖先共置/滞回 + HRW 预放置）✅ 并入 PR #65（Rust）；B3 本地命中率探针 + workload harness ✅ 并入 PR #67（Go `bench_p76_test.go`）；B1 亲和两段式选路（镜像 L0 得分 + in-flight 护栏降级 + 冷路径负载权重 HRW）✅ 独立 PR（Go `affinity.go`）。实测 RR 0.176–0.441 → 亲和 0.938–1.000，结论回填 [`features/slo.md`](features/slo.md)「本地命中率」P7.6 校准
+- [x] P7.6 本地命中闭环（slo.md「本地命中率 >40%」验证）：B2 池侧稳态预放置（per-(block,node) 计数 + 跟随流量放置/祖先共置/滞回 + HRW 预放置）✅ 并入 PR #65（Rust）；B3 本地命中率探针 + workload harness ✅ 并入 PR #67（Go `bench_p76_test.go`）；B1 亲和两段式选路（镜像 L0 得分 + in-flight 护栏降级 + 冷路径负载权重 HRW）✅ PR #69（Go `affinity.go`）。实测 RR 0.106–0.230 → 亲和 0.905–1.000（连续本地前缀口径复测），结论回填 [`features/slo.md`](features/slo.md)「本地命中率」P7.6 校准
 
 **完成判据**：每个 P0 假设有量化结论（成立/不成立/在何条件下成立）。阶段实施计划见 issue #61；结论表见 [`features/slo.md`](features/slo.md)「P7 校准结论」。
 

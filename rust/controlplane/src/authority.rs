@@ -174,6 +174,10 @@ impl PoolView {
             self.global_refs.remove(&seq);
             if let Some(flat) = self.seq_to_flat.remove(&seq) {
                 self.by_flat.remove(&flat);
+                // 块生命周期终结,连带清理 P7.6 的 per-(block,node) 热度与
+                // 放置滞回标记(否则池侧两张表随 GC 单调泄漏)。
+                self.hit_counts.remove(&flat);
+                self.placement_marks.retain(|(f, _)| f != &flat);
                 removed.push((seq, flat));
             }
         }

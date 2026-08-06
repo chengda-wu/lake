@@ -194,7 +194,8 @@ def waterfall_layer_async(
     pt.join()
     if prefetcher is not None and hot_blocks:
         segs.append(WaterfallSegment("kv_prefetch", kv_span[0], kv_span[1], critical=False))
-    kv_warm_at = kv_span[1]
+    # 无 prefetch 时 kv_warm 恒 0(ColdStartMetrics 字段语义),不取线程时间戳。
+    kv_warm_at = kv_span[1] if (prefetcher is not None and hot_blocks) else 0.0
     fully = max(weights_done, kv_warm_at)
     return ColdStartMetrics(
         strategy="layer_async+kv_prefetch",
