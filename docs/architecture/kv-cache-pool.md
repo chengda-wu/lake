@@ -410,16 +410,16 @@ ref 分两级,频率不同(解耦"每 step 高频"与"低频全局",避免 per-s
 复现:`LAKE_BENCH_OUT=... cargo run -p lake-tiered-store --bin p73_curves`。
 **比例类结论与介质无关;时延类为内存层原型相对值**(真介质只会放大层间差,方向稳健)。
 
-1. **命中率-容量曲线**:L0 cap 32→512 块时总命中率 37.5%→64.3%(L0 命中份额 11.3%→42.6%,L1/L2 兜底份额稳定 ~24%);miss 率随容量对数下降。**口径:miss 含 L3 命中**(L3 fetch 慢,保守视同 miss;L3 命中份额 cap32 的 28.8% → cap512 的 2.0%——若 L3 计命中,cap512 总命中 66.3%)。**SLO「KV 命中率 >60%(公共前缀场景)」在 L0≈512 块(×128 token ≈ 64K token/节点)达成**——容量规划依据。
+1. **命中率-容量曲线**:L0 cap 32→512 块时总命中率 37.5%→64.3%(L0 命中份额 11.3%→42.6%,L1/L2 兜底份额稳定 ~24%);miss 率随容量对数下降。**口径:miss 含 L3 命中**(L3 fetch 慢,保守视同 miss;L3 命中份额 cap32 的 28.8% → cap512 的 2.0%——若 L3 计命中,cap512 总命中 66.3%)。**SLO「KV 命中率 >60%(公共前缀场景)」在 L0≈512 块(×128 token ≈ 64K token/节点)达成**——zipf 合成 workload + 内存层模拟口径,作容量规划的**下界参考**而非 SLO 真理(真 workload 复用结构与真介质待 P7-hw/真机复核)。
 2. **promote cost 校准**:`estimate_promote_cost` 的 nbytes×hops 线性骨架方向正确(单调);实测 hops=3(L3 源)较 hops=1 **超 4–10×**(跨运行漂移:25–73µs vs 5–8µs;绝对 µs 不可复现,mock 内存层 hops1/hops2 同为 HashMap 操作不可区分——稳健口径只取比值)。超线性来自 L3 路径 settle/耐久检查固定开销。建议:hops≥3 加固定惩罚或权重;策略上**避免 L3 直促热块,L3→L0 走批量/异步**(决策见 issue #68)。
 3. **block 粒度**:整段前缀复用下有效复用率 64/128/256 = 97.3%/94.6%/89.2%。128 与 64 差 2.7pt(管理开销减半),256 损失明显——**维持 128 默认**。
 4. **写回频率 N**:字节量与 N 无关,ops ∝ 1/N → 按 ops 预算选 N,建议 N=2–4 块/批。
-5. **同步迁移放大(数据路径,非后台带宽池)→ 已收口(churn 抑制三件套)**:容量不足 regime 下 moved/(read+write) 实测 ≈150%,moved/write 2.0–5.2×(随 L0 容量改善)。后台 GC/整理 <10% 由 `BandwidthPool` 构造保证。数据路径放大经三件套抑制(对照组常驻 `p73_curves` `admission_experiment`):
+5. **同步迁移放大(数据路径,非后台带宽池)→ churn 抑制三件套(引擎层已落地,生产接线待 P5)**:容量不足 regime 下 moved/(read+write) 实测 ≈150%,moved/write 2.0–5.2×(随 L0 容量改善)。后台 GC/整理 <10% 由 `BandwidthPool` 构造保证。数据路径放大经三件套抑制(对照组常驻 `p73_curves` `admission_experiment`):
    - **promote 频率准入 + one-shot**(决策 B):hit_count≥2 给热块待遇;<2 照样 promote 进 L0(GPU 约束:attention 只读 HBM,不存在 Mooncake 式"不搬直读")但标 one-shot——**驱逐最优先、不挤热块**,准入砍的是一次性块引发的级联循环,不是 promote 本身。实测:churn −3~9%(容量越紧越明显)、L0 热块份额 +2~3pp、命中率无损;理想化"不 promote"上界(−17~30%)不可达。参考 SGLang `write_through_selective`(hit_count≥2)/ Mooncake `FileStorage` CountMinSketch 准入。
    - **in-flight 去重 + 异步 promote 原语**(决策 6+5 存储半边):同块在途不重复发起(Dynamo offload 去重同款);`begin_promote`/`finish_promote` 两段式——dispatch 收到预取清单即 begin(与排队/batching 重叠,SGLang prefetch-at-schedule 形态),prepare 只 finish 等残余。时延收益待 P5 真字节路径校准。
    - **L3 截断阈值**(决策 A,成本模型派生):L3 命中段 <2 块(256 token)不预取直接重算,≥2 块批量异步预取、不进同步 promote;L1/L2 加载恒胜。派生值与 SGLang 硬编码 `prefetch_threshold=256` 互证,见 [`cost-model.md`](cost-model.md) §5。
-   残留:并发去重收益与异步时延收益未测(原型单线程),归 P5。
-6. **扩容 warmup 归属(方案 Z 灰区修复)**:P6.4 的扩容 prefetch 由 Router 选块并指挥 `PlaceBlocks`,越方案 Z 边界。已挪池侧:Router 只经 `ReportHits` 上报命中(best-effort 批量),CP `join_shard_node` 后按 hit_count 自主选块(top-k,排除已在目标 L0)经 `WarmupSink` 下发。一套热度信号三用:promote 准入 / 扩容 warmup / 未来方案 Z 预放置。
+   残留:并发去重收益与异步时延收益未测(原型单线程),归 P5。**接线状态**:三件套目前在 `LocalTierEngine` 引擎层 + p73 对照实验生效;agent 生产 fill 路径尚未改调 `promote_to_l0_admitted`/`begin_promote`,`flush_every_n`(`WritebackBatcher`)未接 agent 写回——生产接线归 P5 真字节路径,届时「已收口」才成立。
+6. **扩容 warmup 归属(方案 Z 灰区修复)**:P6.4 的扩容 prefetch 由 Router 选块并指挥 `PlaceBlocks`,越方案 Z 边界。已挪池侧:Router 只经 `ReportHits` 上报命中(best-effort 批量),CP `join_shard_node` 后按 hit_count 自主选块(top-k,排除已在目标 L0)经 `WarmupSink` 下发。热度信号**两套口径**(非一套三用):引擎本地 `hit_counts`(promote 准入,单节点即时视角,不出节点)与 CP `ReportHits` 计数(扩容 warmup / 未来方案 Z 预放置,集群视角,best-effort 弱一致)——双轨无害:准入要即时本地、warmup 容忍弱一致;统一(引擎计数经 agent 汇入 CP)归 P5 之后。
 
 ## 开放问题
 

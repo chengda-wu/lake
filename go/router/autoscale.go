@@ -362,6 +362,10 @@ func (s *Server) reapDraining(ctx context.Context) {
 // autoscaleTick 一个评估周期:先收割 draining,再按指标决策执行。
 func (s *Server) autoscaleTick(ctx context.Context) {
 	s.reapDraining(ctx)
+	// P7 收口(方案 Z):命中观测批量上报 CP(radix hit_count),供池侧
+	// 扩容 warmup / 未来预放置选块;Router 只报告、不指挥放置。
+	// 先于 applyScale 上报:同 tick 的命中计数能喂进本次 Join 的 warmup_plan。
+	s.flushHotHits(ctx)
 	snap := s.sched.LoadSnapshot("router")
 	m := MetricsSnapshot{
 		QueueLen:     int(snap.GetQueueLen()),
@@ -376,9 +380,6 @@ func (s *Server) autoscaleTick(ctx context.Context) {
 			log.Printf("autoscale apply %s: %v", d, err)
 		}
 	}
-	// P7 收口(方案 Z):命中观测批量上报 CP(radix hit_count),供池侧
-	// 扩容 warmup / 未来预放置选块;Router 只报告、不指挥放置。
-	s.flushHotHits(ctx)
 }
 
 // flushHotHits 本窗命中批量上报 CP(best-effort:失败不重发,CP 计数偏弱可容忍)。
