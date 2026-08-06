@@ -310,7 +310,7 @@ fn main() {
 
     // 5. 同步迁移放大(写驱逐+读回填,数据路径,≠后台 GC/defrag):
     //    后台 <10% 由 BandwidthPool::default_throttle 构造保证(10% link/1s 窗,可暂停)。
-    let (h0, h1, h2, h3, miss, wb, mb, _) = drive(TierCaps::default(), REQUESTS, SHARE_PCT, 99);
+    let (h0, h1, h2, h3, _miss, wb, mb, _) = drive(TierCaps::default(), REQUESTS, SHARE_PCT, 99);
     let read_bytes = (h0 + h1 + h2 + h3) as u64 * BLOCK_BYTES as u64;
     let share = mb as f64 / (read_bytes + wb) as f64;
     eprintln!("== sync_migration_proxy(数据路径,非后台带宽池)==\n  moved/(read+write) = {:.2}% (moved={mb}, read={read_bytes}, write={wb})", share * 100.0);
