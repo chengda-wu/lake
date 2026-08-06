@@ -306,17 +306,18 @@ func TestAutoscaleTickDrivenBySchedulerQueue(t *testing.T) {
 	}
 }
 
-// P6.6 判据(接线):扩容新节点 Ready 后,近期命中热块经 PlaceBlocks prefetch 到其 HBM。
-func TestScaleOutPrefetchesHotBlocks(t *testing.T) {
-	type placeCall struct {
-		target string
-		ids    int
-		hash0  string
-	}
-	placeCh := make(chan placeCall, 4)
+// P7 收口判据(方案 Z):扩容后 Router **不再**指挥放置(无 PlaceBlocks);
+// 命中观测经 autoscale tick 批量上报 CP(ReportHits),warmup 选块/发起归池侧。
+func TestScaleOutReportsHitsNotPlacement(t *testing.T) {
+	placeCalled := make(chan struct{}, 1)
+	hitCh := make(chan []*lakepb.KVBlockID, 4)
 	srv := dialFakeCP(t, fakeCP{
 		joinShardNode: func(_ context.Context, req *lakepb.JoinShardNodeRequest) (*lakepb.JoinShardNodeResponse, error) {
 			return &lakepb.JoinShardNodeResponse{Ok: true, Map: &lakepb.ShardMap{Generation: 2}}, nil
+		},
+		reportHits: func(_ context.Context, req *lakepb.ReportHitsRequest) (*lakepb.Ack, error) {
+			hitCh <- req.GetIds()
+			return &lakepb.Ack{Ok: true}, nil
 		},
 	})
 	defer srv.Close()
@@ -324,11 +325,7 @@ func TestScaleOutPrefetchesHotBlocks(t *testing.T) {
 	srv.hot = newHotSet(16)
 	srv.agent = fakeAgent{
 		placeBlocks: func(_ context.Context, req *lakepb.PlaceBlocksRequest) (*lakepb.Ack, error) {
-			c := placeCall{target: req.GetTargetNodeId(), ids: len(req.GetIds())}
-			if c.ids > 0 {
-				c.hash0 = string(req.GetIds()[0].GetBlockHash())
-			}
-			placeCh <- c
+			placeCalled <- struct{}{}
 			return &lakepb.Ack{Ok: true}, nil
 		},
 	}
@@ -349,15 +346,19 @@ func TestScaleOutPrefetchesHotBlocks(t *testing.T) {
 	if err := srv.applyScale(context.Background(), DecideScaleOut); err != nil {
 		t.Fatal(err)
 	}
+	srv.flushHotHits(context.Background()) // autoscale tick 尾部的命中上报
+
 	select {
-	case c := <-placeCh:
-		if c.target != "worker-1" {
-			t.Fatalf("prefetch target = %q, want worker-1(新节点)", c.target)
-		}
-		if c.ids != 1 || c.hash0 != string(hashes[0]) {
-			t.Fatalf("prefetch ids = %d hash0 = %q, want 1/%q(命中热块)", c.ids, c.hash0, hashes[0])
+	case ids := <-hitCh:
+		if len(ids) != 1 || string(ids[0].GetBlockHash()) != string(hashes[0]) {
+			t.Fatalf("reported ids = %d, want 1/%q(命中热块)", len(ids), hashes[0])
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for scale-out prefetch PlaceBlocks")
+		t.Fatal("timeout waiting for ReportHits")
+	}
+	select {
+	case <-placeCalled:
+		t.Fatal("Router 不得再指挥放置(PlaceBlocks 归池侧)")
+	default:
 	}
 }
