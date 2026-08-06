@@ -42,23 +42,35 @@ const (
 type PrefixHint struct {
 	ComputedTokens int  // 已可复用 token 数(半开上界语义)
 	ReusedBlocks   int  // 命中 block 数
-	LocalHitBlocks int  // P7.6(B3):命中前缀中在 requester 本机 L0 的块数(本地命中率分子)
-	LocalHit       bool // 命中含 requester 本机 L0(含部分;D-direct 条件)
+	LocalHitBlocks int  // P7.6(B3):命中前缀中从首块连续在 requester 本机 L0 的块数(本地命中率分子)
+	LocalHit       bool // 连续本地前缀 ≥1 块(D-direct 条件;非连续本地块不算——中段有空洞不构成零传输前缀)
 }
 
 // SelectExecMode 移植 select_exec_mode:
 //   - 本地命中(前缀已在本机 L0,含部分)→ D-direct,零/极小传输;
+//   - 池命中但路径有效带宽 < 阈值 → 混部(重算比传输便宜,features.md 决策树);
 //   - 无本地命中 + 专用 Prefill/Decode 角色 → PD 分离;
 //   - 否则混部。失败不设 mode-to-mode fallback(F4 重决策)。
-func SelectExecMode(hint PrefixHint, promptLen int, role WorkerRole) ExecMode {
+//
+// bwGBps 是候选路径的有效带宽(P7.6/issue #68 条目 4,三层结构见
+// cost-model.md §6):≤0 = 未配置/未知,跳过带宽闸(回退 P6.3 行为);
+// 当前为 per-路径类静态配置,真机 P5 换池侧带宽视图(EWMA 被动测量)。
+func SelectExecMode(hint PrefixHint, promptLen int, role WorkerRole, bwGBps float64) ExecMode {
 	if promptLen > 0 && hint.LocalHit && hint.ComputedTokens > 0 {
 		return ExecModeDDirect
+	}
+	if hint.ReusedBlocks > 0 && bwGBps > 0 && bwGBps < TransferBWThresholdGBps {
+		return ExecModeColocated
 	}
 	if role == RolePrefill || role == RoleDecode {
 		return ExecModePDDisagg
 	}
 	return ExecModeColocated
 }
+
+// TransferBWThresholdGBps 传 vs 算的分界带宽(v1 = 1 GB/s,features.md 执行模式节;
+// 成本模型交叉点 ≈0.57 GB/s,留 ~2x 保守余量,见 cost-model.md §1/§6)。
+const TransferBWThresholdGBps = 1.0
 
 // prefixHint 构造请求的前缀命中提示:先查本地镜像(零-RPC),
 // 整段 miss 时回退 CP 权威查询(P6.1 LookupPrefixOnAuthority)。
@@ -94,47 +106,47 @@ func (s *Server) prefixHint(
 			return PrefixHint{} // 权威不可达按冷请求处理,不阻塞执行
 		}
 		s.recordHot(requesterNodeID, resp.GetBlocks())
+		localBlocks := contiguousLocalHitBlocks(resp.GetBlocks())
 		return PrefixHint{
 			ComputedTokens: minInt(int(resp.GetHitLength())*BlockSize, promptLen),
 			ReusedBlocks:   int(resp.GetHitLength()),
-			LocalHitBlocks: countLocalHitBlocks(resp.GetBlocks()),
-			LocalHit:       anyLocalHit(resp.GetBlocks()),
+			LocalHitBlocks: localBlocks,
+			LocalHit:       localBlocks > 0,
 		}
 	}
 	s.recordHotIDs(requesterNodeID, modelID, prefixHashes[:hitLen])
-	localHit := false
-	localHitBlocks := 0
-	for _, b := range blocks {
-		if b.LocalHit {
-			localHit = true
-			localHitBlocks++
-		}
-	}
+	localBlocks := contiguousLocalHitMirror(blocks)
 	return PrefixHint{
 		ComputedTokens: minInt(int(hitLen)*BlockSize, promptLen),
 		ReusedBlocks:   int(hitLen),
-		LocalHitBlocks: localHitBlocks,
-		LocalHit:       localHit,
+		LocalHitBlocks: localBlocks,
+		LocalHit:       localBlocks > 0,
 	}
 }
 
-// anyLocalHit:命中块任一在 requester 本机 L0(含部分命中;对齐 PrefixHint.local_hit 语义)。
-func anyLocalHit(blocks []*lakepb.ReusableBlock) bool {
-	for _, b := range blocks {
-		if b.GetLocalHit() {
-			return true
-		}
-	}
-	return false
-}
-
-// countLocalHitBlocks:命中块中在 requester 本机 L0 的块数(本地命中率分子)。
-func countLocalHitBlocks(blocks []*lakepb.ReusableBlock) int {
+// contiguousLocalHitBlocks:命中前缀中从首块起连续在 requester 本机 L0 的块数
+// (本地命中率分子 + D-direct 条件)。连续口径与亲和热路径打分
+// (affinity.go 镜像首个非本地截断)及 slo.md「命中前缀」措辞一致——
+// 非连续本地块(中段有空洞)不构成零传输前缀,不计入。
+func contiguousLocalHitBlocks(blocks []*lakepb.ReusableBlock) int {
 	n := 0
 	for _, b := range blocks {
-		if b.GetLocalHit() {
-			n++
+		if !b.GetLocalHit() {
+			break
 		}
+		n++
+	}
+	return n
+}
+
+// contiguousLocalHitMirror:镜像路径同口径变体(MirrorBlock 值类型)。
+func contiguousLocalHitMirror(blocks []MirrorBlock) int {
+	n := 0
+	for _, b := range blocks {
+		if !b.LocalHit {
+			break
+		}
+		n++
 	}
 	return n
 }
