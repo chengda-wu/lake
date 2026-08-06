@@ -52,9 +52,11 @@ fn fnv1a64_update(mut h: u64, bytes: &[u8]) -> u64 {
 }
 
 /// HRW(rendezvous)打分:`fnv1a64(key_len(u64 LE) ‖ key ‖ node_id)`。
-/// 字节布局与 Go Router `pickNodeForRequest` 冷路径严格一致——负载均衡
-/// (各节点 in-flight 权重相等)时,池侧预放置目标与 Router 冷路径选点
-/// 指向同一节点。
+/// 字节布局与 Go Router `pickNodeForRequest` 冷路径严格一致——Go 侧同为
+/// 纯整数 argmax + 节点 id 决胜(负载经护栏过滤表达,不进 score),故
+/// 家节点未过载(过护栏)时,池侧预放置目标与 Router 冷路径选点**逐点
+/// 相同**;家节点过载时 Go 溢到次高分节点(有意分叉,放置为建议性,
+/// follow_traffic 随流量修正)。
 pub fn hrw_score(key: &[u8], node: &str) -> u64 {
     let mut h = FNV_OFFSET;
     h = fnv1a64_update(h, &(key.len() as u64).to_le_bytes());

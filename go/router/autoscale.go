@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lakepb "github.com/chengda-wu/lake/go/pb"
@@ -133,18 +135,57 @@ type nodeRegistry struct {
 	draining map[string]bool
 	seq      int // 已分配的最大节点序号(worker-N)
 	rr       int // pick 轮询游标
+	// P7.6(B1):per-node 在途请求数(atomic,免锁读)——亲和护栏与加权 HRW
+	// 的负载信号。注意区别于 loadsync.go 的出站上报:那是 Router→agent 的
+	// 集群级遥测,这里的计数是选路热路径的即时本地信号。
+	inflight map[string]*atomic.Int64
 }
 
 func newNodeRegistry(initial ...string) *nodeRegistry {
-	r := &nodeRegistry{draining: make(map[string]bool)}
+	r := &nodeRegistry{draining: make(map[string]bool), inflight: make(map[string]*atomic.Int64)}
 	for _, id := range initial {
 		r.ready = append(r.ready, id)
+		r.inflight[id] = &atomic.Int64{}
 		var n int
 		if _, err := fmt.Sscanf(id, "worker-%d", &n); err == nil && n > r.seq {
 			r.seq = n
 		}
 	}
 	return r
+}
+
+// readyIDs ready 节点有序快照(排序保证亲和扫描/HRW tie-break 与池侧
+// rust/controlplane ready_nodes 同序,跨语言确定性一致)。
+func (r *nodeRegistry) readyIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := append([]string(nil), r.ready...)
+	sort.Strings(out)
+	return out
+}
+
+// incInFlight/decInFlight 在途记账:选路即占 +1、请求完成 -1(含排队与
+// 重试在途;server.go handleChatCompletions,非 dispatch 边界)
+// (调用方 defer);draining 节点在途照计(跑完才摘除)。
+func (r *nodeRegistry) incInFlight(id string) { r.slot(id).Add(1) }
+func (r *nodeRegistry) decInFlight(id string) { r.slot(id).Add(-1) }
+
+func (r *nodeRegistry) inFlight(id string) int64 { return r.slot(id).Load() }
+
+func (r *nodeRegistry) slot(id string) *atomic.Int64 {
+	r.mu.RLock()
+	s, ok := r.inflight[id]
+	r.mu.RUnlock()
+	if ok {
+		return s
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok = r.inflight[id]; !ok {
+		s = &atomic.Int64{}
+		r.inflight[id] = s
+	}
+	return s
 }
 
 // pick 轮询取 ready 节点(空表兜底 worker-0)——P6.5 review:扩缩后请求
@@ -222,14 +263,22 @@ func (r *nodeRegistry) lastReady() (string, bool) {
 	return r.ready[len(r.ready)-1], true
 }
 
-// hotSet 命中观测窗(有界 FIFO,窗内去重)——P7 收口(方案 Z):Router 只作
-// 热度传感器,命中批量上报 CP(ReportHits → radix hit_count);扩容 warmup /
-// 预放置的选块与发起归池侧,Router 不指挥放置。
+// hotSet 命中观测窗(按服务节点分桶,有界 FIFO,窗内去重)——P7 收口(方案 Z):
+// Router 只作热度传感器,命中批量上报 CP(ReportHits → radix hit_count);
+// 扩容 warmup / 预放置的选块与发起归池侧,Router 不指挥放置。
+// P7.6(B2):命中按服务节点分桶——ReportHits.node_id = 命中流量的服务节点
+// (跟随流量放置的目标节点),不再笼统上报 "router"。
 type hotSet struct {
 	mu      sync.Mutex
 	cap     int
-	seen    map[string]struct{} // model\x00hex(hash),窗内去重
-	pending []*lakepb.KVBlockID // 自上次 drain 以来的新命中
+	seen    map[string]struct{} // node\x00model\x00hash,窗内去重
+	pending []hotHit            // 自上次 drain 以来的新命中
+}
+
+// hotHit 一条待上报命中:服务节点 + 命中块。
+type hotHit struct {
+	node string
+	id   *lakepb.KVBlockID
 }
 
 func newHotSet(cap int) *hotSet {
@@ -239,33 +288,36 @@ func newHotSet(cap int) *hotSet {
 	return &hotSet{cap: cap, seen: make(map[string]struct{})}
 }
 
-func hotKey(id *lakepb.KVBlockID) string {
-	return id.GetModelId() + "\x00" + string(id.GetBlockHash())
+func hotKey(node string, id *lakepb.KVBlockID) string {
+	return node + "\x00" + id.GetModelId() + "\x00" + string(id.GetBlockHash())
 }
 
-func (h *hotSet) add(ids ...*lakepb.KVBlockID) {
+func (h *hotSet) add(node string, ids ...*lakepb.KVBlockID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, id := range ids {
-		k := hotKey(id)
+		k := hotKey(node, id)
 		if _, ok := h.seen[k]; ok {
 			continue
 		}
 		h.seen[k] = struct{}{}
-		h.pending = append(h.pending, id)
+		h.pending = append(h.pending, hotHit{node: node, id: id})
 	}
 	// 窗有界:超 cap 摘最旧(未上报也丢——best-effort,CP 计数偏弱可容忍)。
 	for len(h.pending) > h.cap {
-		delete(h.seen, hotKey(h.pending[0]))
+		delete(h.seen, hotKey(h.pending[0].node, h.pending[0].id))
 		h.pending = h.pending[1:]
 	}
 }
 
-// drain 取出本窗命中并开窗新窗。上报丢失不重发(best-effort)。
-func (h *hotSet) drain() []*lakepb.KVBlockID {
+// drain 取出本窗命中并按服务节点分桶,开窗新窗。上报丢失不重发(best-effort)。
+func (h *hotSet) drain() map[string][]*lakepb.KVBlockID {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := h.pending
+	out := make(map[string][]*lakepb.KVBlockID)
+	for _, hit := range h.pending {
+		out[hit.node] = append(out[hit.node], hit.id)
+	}
 	h.pending = nil
 	h.seen = make(map[string]struct{})
 	return out
@@ -385,17 +437,20 @@ func (s *Server) autoscaleTick(ctx context.Context) {
 	}
 }
 
-// flushHotHits 本窗命中批量上报 CP(best-effort:失败不重发,CP 计数偏弱可容忍)。
+// flushHotHits 本窗命中按服务节点分桶批量上报 CP(best-effort:失败不重发,
+// CP 计数偏弱可容忍)。NodeId = 命中流量的服务节点(P7.6 B2 跟随流量放置目标)。
 func (s *Server) flushHotHits(ctx context.Context) {
 	if s.hot == nil {
 		return
 	}
-	ids := s.hot.drain()
-	if len(ids) == 0 {
-		return
-	}
-	if _, err := s.cp.ReportHits(ctx, &lakepb.ReportHitsRequest{NodeId: "router", Ids: ids}); err != nil {
-		log.Printf("report hits: %v", err)
+	byNode := s.hot.drain()
+	for node, ids := range byNode {
+		if node == "" || len(ids) == 0 {
+			continue
+		}
+		if _, err := s.cp.ReportHits(ctx, &lakepb.ReportHitsRequest{NodeId: node, Ids: ids}); err != nil {
+			log.Printf("report hits: %v", err)
+		}
 	}
 }
 
