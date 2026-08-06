@@ -421,6 +421,9 @@ func (s *Server) autoscaleTick(ctx context.Context) {
 	// 扩容 warmup / 未来预放置选块;Router 只报告、不指挥放置。
 	// 先于 applyScale 上报:同 tick 的命中计数能喂进本次 Join 的 warmup_plan。
 	s.flushHotHits(ctx)
+	if !s.cfg.Autoscale {
+		return // 命中上报不随扩缩容开关;评估/执行才被开关门控
+	}
 	snap := s.sched.LoadSnapshot("router")
 	m := MetricsSnapshot{
 		QueueLen:     int(snap.GetQueueLen()),
@@ -454,7 +457,7 @@ func (s *Server) flushHotHits(ctx context.Context) {
 	}
 }
 
-// runAutoscale 后台评估循环(LAKE_AUTOSCALE=1 时由 New 启动)。
+// runAutoscale 后台周期循环(New 无条件启动):命中上报常做,扩缩容评估/执行由 Config.Autoscale 门控。
 func (s *Server) runAutoscale(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

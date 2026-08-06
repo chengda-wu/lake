@@ -30,7 +30,7 @@ type Config struct {
 	CPAddr      string // ControlPlaneService(权威回退查询),默认 127.0.0.1:50051
 	NodeRole    string // 候选执行节点角色(hybrid/prefill/decode,LAKE_NODE_ROLE),P6.3 选路输入;单节点原型默认 hybrid
 	MaxInFlight int    // P6.4:单节点并发执行上限(P6.5 起总并发=×ready 节点数;非准入控制——队列无界不拒请求);单 worker mock 默认 1
-	Autoscale   bool   // P6.5:基于指标的弹性扩缩(LAKE_AUTOSCALE=1);默认关——单进程原型不起真实 worker
+	Autoscale   bool   // P6.5:弹性扩缩评估/执行开关(LAKE_AUTOSCALE=1),默认关;后台循环常开——命中上报(ReportHits)不随本开关
 	// P7.6(B1):亲和路径单节点 in-flight 护栏(命中得分最高者在途 ≥ 护栏
 	// 则降级次优,全部过载落冷路径加权 HRW);≤0 走默认 8。
 	AffinityInFlightGuard int
@@ -142,9 +142,9 @@ func New(cfg Config) (*Server, error) {
 	s.nodes = newNodeRegistry("worker-0")
 	s.scaler = NewAutoscaler(AutoscaleConfig{})
 	s.hot = newHotSet(256)
-	if cfg.Autoscale {
-		go s.runAutoscale(schedCtx, 2*time.Second)
-	}
+	// 后台周期循环常开:命中上报(flushHotHits)是 B2 跟随流量放置与 join
+	// warmup 的 Router 喂数源,不随扩缩容开关;Autoscale 只门评估/执行段。
+	go s.runAutoscale(schedCtx, 2*time.Second)
 	return s, nil
 }
 

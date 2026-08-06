@@ -275,6 +275,7 @@ func TestAutoscaleTickDrivenBySchedulerQueue(t *testing.T) {
 		ScaleOutQueueLen: 2, SustainPeriods: 1, Cooldown: 0,
 	})
 	srv.sched = NewPQScheduler(1, time.Second)
+	srv.cfg.Autoscale = true // tick 的扩缩段由开关门控(命中上报段不门控)
 	schedCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go srv.sched.Run(schedCtx)
@@ -303,6 +304,45 @@ func TestAutoscaleTickDrivenBySchedulerQueue(t *testing.T) {
 	}
 	if srv.nodes.count() != 2 {
 		t.Fatalf("nodes = %d, want 2", srv.nodes.count())
+	}
+}
+
+// 回归(bugbot #62):Autoscale 关(默认)时 tick 仍须上报命中——ReportHits 是
+// B2 跟随流量放置/join warmup 的 Router 喂数源,不随扩缩容开关;且 scaler 为
+// nil 也不得触碰(门控在评估段之前)。
+func TestTickReportsHitsWhenAutoscaleOff(t *testing.T) {
+	hitCh := make(chan string, 1)
+	srv := dialFakeCP(t, fakeCP{
+		reportHits: func(_ context.Context, req *lakepb.ReportHitsRequest) (*lakepb.Ack, error) {
+			hitCh <- req.GetNodeId()
+			return &lakepb.Ack{Ok: true}, nil
+		},
+	})
+	defer srv.Close()
+	srv.nodes = newNodeRegistry("worker-0")
+	srv.hot = newHotSet(16)
+	srv.scaler = nil // Autoscale 关时评估段不得执行
+	srv.cfg.Autoscale = false
+
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	hashes := ChainBlockHashes(tokens, BlockSize)
+	if err := srv.Mirror().Apply(&lakepb.ViewUpdate{Seq: 0, Events: []*lakepb.ViewEvent{
+		regEvent("m", string(hashes[0]), l0on("worker-0")),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if hint := srv.prefixHint(context.Background(), "m", hashes, len(tokens), "worker-0"); hint.ReusedBlocks != 1 {
+		t.Fatalf("hint = %+v, want 1 reused block", hint)
+	}
+
+	srv.autoscaleTick(context.Background()) // 不炸(scaler nil)+ 命中已上报
+	select {
+	case node := <-hitCh:
+		if node != "worker-0" {
+			t.Fatalf("ReportHits node = %q, want worker-0", node)
+		}
+	default:
+		t.Fatal("Autoscale 关时 tick 未上报命中(ReportHits 断供)")
 	}
 }
 
