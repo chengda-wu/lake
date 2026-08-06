@@ -6,6 +6,8 @@ import os
 import threading
 import time
 
+import pytest
+
 from lake.engine.model_runner import ModelRunner
 from lake.runtime.lifecycle import WorkerLifecycle, WorkerState
 from lake.runtime.node_scheduler import build_req_from_generate
@@ -15,6 +17,25 @@ from lake.runtime.worker_engine import WorkerEngine, _Inbound
 
 QWEN3_0_6B_MODEL_ID = os.path.expanduser(
     os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH", "Qwen/Qwen3-0.6B")
+)
+
+
+def _qwen3_available() -> bool:
+    """离线环境检测:显式路径存在,或默认 hub id 已在本地缓存(否则跳过,不翻墙拉取)。"""
+    override = os.environ.get("LAKE_TEST_QWEN3_MODEL_PATH")
+    if override:
+        return os.path.exists(os.path.expanduser(override))
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        return try_to_load_from_cache("Qwen/Qwen3-0.6B", "config.json") is not None
+    except Exception:
+        return False
+
+
+requires_qwen3 = pytest.mark.skipif(
+    not _qwen3_available(),
+    reason="Qwen3-0.6B 不在本地缓存且未设 LAKE_TEST_QWEN3_MODEL_PATH(离线环境跳过)",
 )
 
 
@@ -45,6 +66,7 @@ def test_lifecycle_forward_and_drain() -> None:
     assert not life.accepts_new_requests()
 
 
+@requires_qwen3
 def test_engine_capacity_signal() -> None:
     pool = FakePool()
     runner = ModelRunner(pool)  # type: ignore[arg-type]

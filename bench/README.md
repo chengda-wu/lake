@@ -24,6 +24,7 @@
 |------|------|------|------|
 | `router_e2e_latency` / `router_queue_wait` / `router_mode_distribution` | Go | `go/router/bench_p71_test.go` | bufconn 驱动真 handler+PQ：e2e / 队列等待 p50/p99 / 选路模式分布 |
 | `tier_promote_l0` / `tier_put_durable` / `tier_hit_stats` | Rust | `rust/tiered-store/src/bin/p71_probe.rs` | 分层 promote/put 时延 + HitStats 分层命中 |
+| `hit_curve` / `promote_calibration` / `block_granularity` / `writeback_scan` / `gc_proxy` | Rust | `rust/tiered-store/src/bin/p73_curves.rs` | P7.3:zipf workload 命中率-容量曲线、promote hops 校准、粒度/写回扫描、迁移放大 |
 | `coldstart_sequential` / `coldstart_layer_async` / `engine_e2e_mock` | Python | `python/lake/runtime/bench.py` | 冷启动分段（P6.6 harness）+ mock 引擎 e2e |
 
 ## 跑法
