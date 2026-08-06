@@ -2,7 +2,8 @@ package router
 
 // P7.1 测量基座:Go 探针。
 // 经 bufconn fake worker/agent 驱动真实 handler + PQScheduler,采集:
-//   - e2e 时延(客户端视角 TTFT 代理:POST → 响应)
+//   - e2e 时延(POST → 完整响应,含 mock generate;不是 TTFT——首 token 与
+//     完整响应在 mock 下不可分,勿当 TTFT 喂 P7.2/P7.4 模型)
 //   - 队列等待采样(PQScheduler.WaitSamples)
 //   - 选路模式分布(Server.ModeCounts)
 // 设 LAKE_BENCH_OUT 时写 JSONL(schema 见 bench/README.md);否则只跑健全性断言。

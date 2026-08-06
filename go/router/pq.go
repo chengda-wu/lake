@@ -263,25 +263,28 @@ func (s *PQScheduler) finishOne(req *pqRequest) {
 	s.mu.Lock()
 	delete(s.inFlight, req)
 	abandoned := req.abandoned
-	if !abandoned {
-		// 环形采样:满了丢弃最旧(探针只看近期分布)
-		if len(s.waitSamples) >= 4096 {
-			s.waitSamples = s.waitSamples[1:]
-		}
-		s.waitSamples = append(s.waitSamples, req.queueWait)
-	}
 	s.mu.Unlock()
 
 	if abandoned {
-		return // 无人等待:不重排(防僵尸 Generate)、不投递
+		return // 无人等待:不重排(防僵尸 Generate)、不投递、不采样
 	}
 	if req.err != nil && errors.Is(context.Cause(req.execCtx), errPreempted) {
 		s.mu.Lock()
+		// 重排重新计时:queueWait 只量「本次入队 → 启动」,不把前次执行算进排队;
+		// 被抢占者不入 waitSamples(样本语义 = 完成请求的排队等待,抢占不是完成)。
+		req.enqueuedAt = time.Now()
 		s.insertLocked(req)
 		s.mu.Unlock()
 		s.signal()
 		return
 	}
+	s.mu.Lock()
+	// 环形采样:满了丢弃最旧(探针只看近期分布)
+	if len(s.waitSamples) >= 4096 {
+		s.waitSamples = s.waitSamples[1:]
+	}
+	s.waitSamples = append(s.waitSamples, req.queueWait)
+	s.mu.Unlock()
 	req.done <- req.err
 }
 
