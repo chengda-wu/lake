@@ -283,6 +283,16 @@ mod tests {
         assert_eq!(fnv1a64_update(FNV_OFFSET, b"lake"), 0x0471d1ad906f0dde);
     }
 
+    /// 跨语言镜像向量:与 Go `affinity_test.go::TestFnv1a64CrossLanguageVectors`
+    /// 钉**同一组** (key,node)→score 绝对值——任一侧改字节布局/字节序,对方
+    /// 测试都会报错(方案 Z「冷路径与池侧预放置逐点同家」的回归保险;裸 FNV
+    /// 向量只钉原语,钉不住 hrw_score 的布局)。
+    #[test]
+    fn hrw_score_matches_go_mirror_vectors() {
+        assert_eq!(hrw_score(b"anchor-0", "n0"), 0xc8e4e7b063e4ef7f);
+        assert_eq!(hrw_score(b"key!", "worker-1"), 0xd485e7e9b3d80a5f);
+    }
+
     #[test]
     fn hrw_score_deterministic_and_node_sensitive() {
         let key = b"anchor-0";

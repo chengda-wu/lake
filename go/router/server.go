@@ -414,7 +414,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// pickNode 选目标执行节点(单节点原型 = worker-0;P6.5 扩缩后读路由表首节点)。
+// pickNode 轮询选节点(nodeRegistry 的 rr 计数)。**非生产路径**:生产
+// handler 走 pickNodeForRequest(P7.6 亲和两段式);本函数仅作
+// bench_p76_test.go 的 RR 对照基线保留。
 func (s *Server) pickNode() string {
 	if s.nodes == nil {
 		return "worker-0"

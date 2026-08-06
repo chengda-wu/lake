@@ -54,9 +54,10 @@ func prefixAnchorHash(hashes [][]byte) []byte {
 }
 
 // fnv1a64 FNV-1a 64(key_len_u64_le ‖ key ‖ node)——字节布局与 Rust 权威
-// rust/controlplane/src/placement.rs::hrw_score 完全一致(同测试向量
-// fnv1a64("lake") = 0xCE697C88B1B1D97E),保证池侧 HRW 预放置的家节点与
-// 本函数在负载全 0 时一致。标准库 fnv.New64a 常数相同,仅补长度前缀。
+// rust/controlplane/src/placement.rs::hrw_score 完全一致,两侧互钉同一组
+// (key,node)→score 镜像向量(Go: TestFnv1a64CrossLanguageVectors;Rust:
+// hrw_score_matches_go_mirror_vectors)——任一侧改布局/字节序,对方测试都会
+// 报错。标准库 fnv.New64a 常数相同,仅补长度前缀。
 func fnv1a64(key []byte, node string) uint64 {
 	h := fnv.New64a()
 	var lb [8]byte

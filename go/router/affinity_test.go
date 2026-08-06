@@ -67,12 +67,12 @@ func TestAffinityGuardDowngradesOverloaded(t *testing.T) {
 		t.Fatalf("护栏降级应选次优 worker-2, got %s", got)
 	}
 
-	// 全部命中节点过载 → 冷路径加权 HRW(worker-0 在途 0,权重 1)。
+	// 全部命中节点过载 → 冷路径:护栏过滤后只剩 worker-0 eligible(在途 0)。
 	for i := 0; i < 4; i++ {
 		s.nodes.incInFlight("worker-2")
 	}
 	if got := s.pickNodeForRequest("m", hashes, []byte("key-x")); got != "worker-0" {
-		t.Fatalf("全过载应落冷路径(在途 0 的 worker-0 权重最高), got %s", got)
+		t.Fatalf("全过载应落冷路径(worker-1/2 被护栏过滤,只剩 worker-0), got %s", got)
 	}
 }
 
