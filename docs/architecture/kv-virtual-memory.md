@@ -91,8 +91,8 @@ PagedAttention 解耦了“逻辑 token 序列 ↔ 物理 block”，但只在�
 - **vLLM：发明了分页，停在实例内。** 设计核心是每个 sequence 一张 block table，加一套读散落 block 的 paged attention kernel。跨实例留了 `KVConnectorBase_V1` 接口，例如 NIXL、Mooncake 的 connector 都从这里接入。但接入的是传输，不是所有权：前缀索引（APC）仍是引擎自维护的易失结构，实例死了，索引和 KV 一起死（见 [`../research/vllm/compute.md`](../research/vllm/compute.md)）。
 - **SGLang HiCache：单机内把分层做全了，索引停在实例私有。** 它的 `HiRadixTree` 节点同时记录 L1（device）位置、L2（host）位置和链式哈希（当 L3 key）——已经是“带位置的页表项”的形状。例如它的 prefetch 有三个终止策略（best_effort / wait_complete / timeout，按 token 数给超时预算），write-back 也分三档（命中即回写 / 命中两次才回写 / 驱逐时才回写）。但这棵树长在每个引擎实例内；L3 命中靠实时向后端查询，没有全局权威（见 [`../research/sglang/hicache.md`](../research/sglang/hicache.md)）。
 - **Mooncake：铺好了高速公路，没有建车管所。** 设计分两半：transfer-engine 负责 RDMA 零拷贝搬运，内存按 segment 注册，块按 `(segment_id, offset, len)` 寻址；store 是对象级 blob 池，按 `tenant+key` 字符串存取。例如它的 master 用一张哈希表记录全部对象元数据——没有内容寻址，没有前缀树。引擎要复用前缀，得自己在池子上面再长一份索引（见 [`../research/mooncake/transfer-engine.md`](../research/mooncake/transfer-engine.md)、[`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md)）。
-- **LMCache：有一个中央协调器，但它只管“谁有”，不管“配不配得上”。** 内容寻址、多后端、实例间直传都有；例如它的协调器维护一份清单，记录“哪个实例的哪个位置存了哪些块”，实例可以查它，也可以让它帮着搬。但两件关键的事不在它手上：一是匹配——一个请求带着几千个 token 进来，“这段前缀在缓存里有多少”，还得每个引擎自己从第 0 块起挨个问，问到哪断了就停；二是一致——清单和实例实际存的东西靠消息加心跳慢慢对账，任何时候都可能对不上。有账本，但账本不一定准，记账的也不管匹配（见 [`../research/lmcache/sharing-and-backends.md`](../research/lmcache/sharing-and-backends.md)）。
-- **Dynamo KVBM：离“KV 虚拟内存”最近，但 KV 仍归引擎。** 设计上分三层：逻辑层管“有哪些块、块的身份与变更事件”，物理层管“块怎么排布、怎么搬运”，引擎层管运行时与对接推理引擎，offload 路径从 GPU 一路到远端对象存储；它的 `StorageTier` 按介质分（Device / HostPinned / Disk / External）——即“层”按介质划，不按“在本机还是远端”划，同一块 DRAM 放哪台机器都算同一层。例如 1.0 版本加了集群级 KV 事件，让 router 能看到全集群的缓存分布。但 KVBM 的定位是引擎缓存的 offload 层：KV 归 engine 持有，事件走 NATS，没有强一致位置视图（见 [`../research/dynamo/overview.md`](../research/dynamo/overview.md)）。
+- **LMCache：有中央协调器，也有索引——但索引是“点查”的，匹配仍归引擎。** 内容寻址、多后端、实例间直传都有；例如它的协调器维护一份清单，记录“哪个实例的哪个位置存了哪些块”。索引当然是有的：每 256 个 token 算一个链式哈希当 key，“这个块在不在、在谁手上”随时能按 key 点查。但那是块级点查，不是前缀匹配——没有一棵把前缀关系展开的树，于是“这段 prompt 的最长已缓存前缀有多长”只能拆成一串点查：第 0 块在不在、第 1 块在不在，逐块探到断链为止；引擎侧那棵真正做匹配的 radix 树，又是实例私有的。再加上清单靠消息加心跳对账、随时可能对不上——全局的只有块级账本，没有全局的前缀索引（见 [`../research/lmcache/sharing-and-backends.md`](../research/lmcache/sharing-and-backends.md)）。
+- **Dynamo KVBM：离“KV 虚拟内存”最近，但 KV 仍归引擎。** 设计上分三层：逻辑层管“有哪些块、块的身份与变更事件”，物理层管“块怎么排布、怎么搬运”，引擎层管运行时与对接推理引擎，offload 路径从 GPU 一路到远端对象存储；它的 `StorageTier` 按介质分（Device / HostPinned / Disk / External）——即“层”按介质划，不按“在本机还是远端”划，同一块 DRAM 放哪台机器都算同一层。例如 1.0 版本加了集群级 KV 事件，让 router 能看到全集群的缓存分布。但 KVBM 的定位是引擎缓存的 offload 层：KV 归 engine 持有，事件走 NATS，没有强一致位置视图（见 [`../research/dynamo/overview.md`](../research/dynamo/overview.md)）。lake 参考了这套分层——存储层同样按元数据、传输、运行时组织，“权威存储与事件面分离”的通信取舍也受它启发——但没有复用它的代码；而且它缺的正是 lake 的核心：全局副本一致性（目录）与写回屏障，dynamo 不需要（KV 归引擎），lake 必须自补（见 [`consistency.md`](consistency.md) §8.6）。
 - **Ascend MemCache / UCM：同层的另两种形态。** 前者是昇腾的分布式 KV 对象池，MetaService 管元数据、LocalService 管本机介质；后者是可插拔缓存框架，KVStore 后端可换，挂在引擎插件层。两者都不是以前缀树为权威的设计（见 [`../research/memcache/overview.md`](../research/memcache/overview.md)、[`../research/ucm/overview.md`](../research/ucm/overview.md)）。
 
 五站看下来，问题收敛成一个：谁来当那个全局的、懂前缀的、管生死的车管所？这正是 lake 要建的东西。
@@ -116,7 +116,7 @@ lake 的核心想法只有一句话：**把“页表”从引擎私有，升级�
 | 虚拟地址 | block 的身份哈希（`KVBlockID`），与在哪无关 |
 | 页表 | 池维护的“前缀 → 位置”权威视图（radix + 位置视图） |
 | TLB | Router 和各节点手里的只读镜像，本地一查就有，零 RPC |
-| 缺页中断 | 不在本地就从池里现搬——可能是下一层介质，也可能是另一台节点的 HBM（D-direct） |
+| 缺页中断 | 不在本地就从池里现搬——下一层介质、另一台节点的 HBM，哪里持有就从哪里搬，KV 在池内自由流动 |
 | swap 分区 | NVMe 层是恢复点，对象存储是最终后盾 |
 | 脏页先写回，再复用页框 | 先落盘，再让别人看见（durable-first） |
 | LRU 置换 | 按冷热驱逐，公共前缀多一分保护 |
