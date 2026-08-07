@@ -1491,6 +1491,15 @@ impl Authority {
             None
         };
         if let Some(ev) = view_ev {
+            tracing::debug!(
+                model_id,
+                revision,
+                pool_kind,
+                tier = ?tier,
+                node_id,
+                present,
+                "publish_location"
+            );
             self.pending_view_events.push(ev);
         }
         Ok(())

@@ -100,9 +100,10 @@ pub trait WarmupSink: Send + Sync {
 struct LogWarmup;
 impl WarmupSink for LogWarmup {
     fn warm(&self, target_node_id: &str, ids: Vec<KvBlockId>) {
-        eprintln!(
-            "warmup plan: {} hot blocks → {target_node_id} (bytes P5)",
-            ids.len()
+        tracing::info!(
+            target_node = target_node_id,
+            blocks = ids.len(),
+            "warmup plan (bytes P5)"
         );
     }
 }
@@ -117,9 +118,12 @@ pub trait DefragSink: Send + Sync {
 struct LogDefrag;
 impl DefragSink for LogDefrag {
     fn defrag_plan(&self, model_id: &str, revision: &str, pool_kind: i32, moves: Vec<DefragMove>) {
-        eprintln!(
-            "auto defrag plan: {} moves for {model_id}/{revision}/pool_kind={pool_kind} (bytes P5)",
-            moves.len()
+        tracing::info!(
+            model_id,
+            revision,
+            pool_kind,
+            moves = moves.len(),
+            "auto defrag plan (bytes P5)"
         );
     }
 }
@@ -214,10 +218,11 @@ impl ControlPlane {
             .authority_poisoned_reported
             .swap(true, Ordering::Relaxed)
         {
-            // TODO(#74 S7): 引入 tracing/log 后替换为结构化日志(日志框架选型待用户定);
-            // 暂用 key=value 形态,便于将来采集管线直接解析。
-            eprintln!(
-                "event=mutex_poisoned component=controlplane lock=authority action=return_internal_until_restart"
+            tracing::warn!(
+                event = "mutex_poisoned",
+                component = "controlplane",
+                lock = "authority",
+                action = "return_internal_until_restart",
             );
         }
     }
@@ -295,6 +300,11 @@ impl ControlPlaneService for ControlPlane {
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeViewStream>, Status> {
         let req = request.into_inner();
+        tracing::debug!(
+            subscriber_id = %req.subscriber_id,
+            resume_from_seq = req.resume_from_seq,
+            "subscribe_view connected"
+        );
         let mut rx = self.view_tx.subscribe();
         let (initial, anchor) = {
             let auth = self.read_authority().map_err(Self::lock_authority_status)?;
@@ -409,14 +419,24 @@ impl ControlPlaneService for ControlPlane {
                 err: String::new(),
                 backpressure: None,
             })),
-            Ok(RegisterStatus::RejectedHardQuota(bp)) => Ok(Response::new(Ack {
-                ok: false,
-                err: format!(
-                    "AdmitRegisterBlocks: admission rejected reason={} deficit={}",
-                    bp.reason, bp.deficit_bytes
-                ),
-                backpressure: Some(bp),
-            })),
+            Ok(RegisterStatus::RejectedHardQuota(bp)) => {
+                tracing::warn!(
+                    model_id = %keys.model_id,
+                    revision = %keys.revision,
+                    pool_kind = keys.pool_kind,
+                    reason = %bp.reason,
+                    deficit_bytes = bp.deficit_bytes,
+                    "admission rejected: hard quota backpressure"
+                );
+                Ok(Response::new(Ack {
+                    ok: false,
+                    err: format!(
+                        "AdmitRegisterBlocks: admission rejected reason={} deficit={}",
+                        bp.reason, bp.deficit_bytes
+                    ),
+                    backpressure: Some(bp),
+                }))
+            }
             Err(e) => Ok(Response::new(Ack {
                 ok: false,
                 err: e,
@@ -430,6 +450,11 @@ impl ControlPlaneService for ControlPlane {
         request: Request<RegisterBlocksRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
+        tracing::debug!(
+            node_id = %req.node_id,
+            blocks = req.blocks.len(),
+            "register_blocks"
+        );
         let mut auth = self
             .write_authority()
             .map_err(Self::lock_authority_status)?;
@@ -465,14 +490,22 @@ impl ControlPlaneService for ControlPlane {
                 err: String::new(),
                 backpressure: None,
             })),
-            Ok(RegisterStatus::RejectedHardQuota(bp)) => Ok(Response::new(Ack {
-                ok: false,
-                err: format!(
-                    "RegisterBlocks: admission rejected reason={} deficit={}",
-                    bp.reason, bp.deficit_bytes
-                ),
-                backpressure: Some(bp),
-            })),
+            Ok(RegisterStatus::RejectedHardQuota(bp)) => {
+                tracing::warn!(
+                    node_id = %req.node_id,
+                    reason = %bp.reason,
+                    deficit_bytes = bp.deficit_bytes,
+                    "register_blocks rejected: hard quota backpressure"
+                );
+                Ok(Response::new(Ack {
+                    ok: false,
+                    err: format!(
+                        "RegisterBlocks: admission rejected reason={} deficit={}",
+                        bp.reason, bp.deficit_bytes
+                    ),
+                    backpressure: Some(bp),
+                }))
+            }
             Err(e) => Ok(Response::new(Ack {
                 ok: false,
                 err: e,
@@ -490,6 +523,7 @@ impl ControlPlaneService for ControlPlane {
         while let Some(delta) = stream.message().await? {
             deltas.push(delta);
         }
+        tracing::debug!(deltas = deltas.len(), "report_ref");
         let mut auth = self
             .write_authority()
             .map_err(Self::lock_authority_status)?;
@@ -499,11 +533,15 @@ impl ControlPlaneService for ControlPlane {
                 err: String::new(),
                 backpressure: None,
             })),
-            Err(e) => Ok(Response::new(Ack {
-                ok: false,
-                err: e,
-                backpressure: None,
-            })),
+            Err(e) => {
+                // S4:underflow/overflow 全有或全无拒绝——账本不一致信号,告警可见。
+                tracing::warn!(err = %e, "report_ref rejected");
+                Ok(Response::new(Ack {
+                    ok: false,
+                    err: e,
+                    backpressure: None,
+                }))
+            }
         }
     }
 
@@ -555,6 +593,11 @@ impl ControlPlaneService for ControlPlane {
                 backpressure: None,
             }));
         };
+        tracing::info!(
+            model_id = %model.model_id,
+            revision = %model.revision,
+            "register_model"
+        );
         let mut auth = self
             .write_authority()
             .map_err(Self::lock_authority_status)?;
@@ -577,6 +620,11 @@ impl ControlPlaneService for ControlPlane {
         request: Request<DeregisterModelRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
+        tracing::info!(
+            model_id = %req.model_id,
+            revision = %req.revision,
+            "deregister_model"
+        );
         let mut auth = self
             .write_authority()
             .map_err(Self::lock_authority_status)?;
@@ -655,7 +703,28 @@ impl ControlPlaneService for ControlPlane {
         let result = auth.reconcile_orphans(&req);
         self.commit_and_broadcast(&mut auth);
         match result {
-            Ok(resp) => Ok(Response::new(resp)),
+            Ok(resp) => {
+                tracing::info!(
+                    dead_node_id = %req.dead_node_id,
+                    discarded = resp.discarded.len(),
+                    cold_stripped = resp.cold_stripped.len(),
+                    refs_cleared = resp.refs_cleared,
+                    "reconcile_orphans"
+                );
+                if !resp.discarded.is_empty()
+                    || !resp.cold_stripped.is_empty()
+                    || resp.refs_cleared > 0
+                {
+                    tracing::warn!(
+                        dead_node_id = %req.dead_node_id,
+                        discarded = resp.discarded.len(),
+                        cold_stripped = resp.cold_stripped.len(),
+                        refs_cleared = resp.refs_cleared,
+                        "reconcile found orphans/dead-node holdings"
+                    );
+                }
+                Ok(Response::new(resp))
+            }
             Err(e) => Ok(Response::new(ReconcileOrphansResponse {
                 discarded: vec![],
                 cold_stripped: vec![],
@@ -779,6 +848,14 @@ impl ControlPlaneService for ControlPlane {
         ) {
             Ok(moves) => {
                 let planned_moves = moves.len() as u32;
+                tracing::info!(
+                    model_id = %req.model_id,
+                    revision = %req.revision,
+                    pool_kind = req.pool_kind,
+                    mode = ?mode,
+                    planned_moves,
+                    "trigger_defrag"
+                );
                 Ok(Response::new(TriggerDefragResponse {
                     moves,
                     planned_moves,
@@ -801,6 +878,7 @@ impl ControlPlaneService for ControlPlane {
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
         self.set_background_paused(req.paused);
+        tracing::info!(paused = req.paused, "pause_background");
         Ok(Response::new(Ack {
             ok: true,
             err: String::new(),
@@ -831,6 +909,12 @@ impl ControlPlaneService for ControlPlane {
         match auth.join_shard_node(&req.node_id, req.vnode_count) {
             Ok((map, migrations)) => {
                 let migration_count = migrations.len() as u32;
+                tracing::info!(
+                    node_id = %req.node_id,
+                    vnode_count = req.vnode_count,
+                    migration_count,
+                    "join_shard_node"
+                );
                 // P7 收口(方案 Z):新节点 warmup 由池侧按 hit_count 自主选块
                 // 发起;Router 只经 ReportHits 报告命中,不指挥放置。
                 let plan = auth.warmup_plan(&req.node_id, DEFAULT_WARMUP_K);
@@ -895,6 +979,11 @@ impl ControlPlaneService for ControlPlane {
         request: Request<ReportHitsRequest>,
     ) -> Result<Response<Ack>, Status> {
         let req = request.into_inner();
+        tracing::debug!(
+            node_id = %req.node_id,
+            ids = req.ids.len(),
+            "report_hits"
+        );
         let mut auth = self
             .write_authority()
             .map_err(Self::lock_authority_status)?;
@@ -918,11 +1007,14 @@ impl ControlPlaneService for ControlPlane {
             .write_authority()
             .map_err(Self::lock_authority_status)?;
         match auth.remove_shard_node(&req.node_id) {
-            Ok(()) => Ok(Response::new(Ack {
-                ok: true,
-                err: String::new(),
-                backpressure: None,
-            })),
+            Ok(()) => {
+                tracing::info!(node_id = %req.node_id, "remove_shard_node");
+                Ok(Response::new(Ack {
+                    ok: true,
+                    err: String::new(),
+                    backpressure: None,
+                }))
+            }
             Err(e) => Ok(Response::new(Ack {
                 ok: false,
                 err: e,
