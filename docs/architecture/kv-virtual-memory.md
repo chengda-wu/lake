@@ -10,7 +10,7 @@
 
 这个谎言不是新发明。它第一次登场是 1959 年,名字叫虚拟内存。lake 做的事情,是把这个讲了六十多年的故事,在 KV cache 上重新讲一遍——并且这一次,把它讲完。
 
-本文讲这个故事:虚拟内存当年解决了什么,PagedAttention 怎么把同一招搬进推理引擎,它停在了哪,以及 lake 为什么要再往前走一步。设计细节不在此展开,分别指向对应架构文档;总立地见 [`../00-plan.md`](../00-plan.md)。
+本文讲这个故事:虚拟内存当年解决了什么,PagedAttention 怎么把同一招搬进推理引擎,它停在了哪,业界各自走到了哪一站,以及 lake 为什么还要再往前走一步。设计细节不在此展开,分别指向对应架构文档;总立地见 [`../00-plan.md`](../00-plan.md)。
 
 ## 六十年前的那个谎
 
@@ -44,73 +44,95 @@ KV cache 是推理的中间产物:每算一个 token,就要把它的 Key/Value �
 
 vLLM 的 PagedAttention 就是 KV 世界的 Atlas 时刻——论文开宗明义,受操作系统虚拟内存与分页启发(见 [`../research/vllm/overview.md`](../research/vllm/overview.md)):KV 按定长 block 切页(默认 16 token),每条 sequence 一张 block table,映射逻辑页到物理 block。
 
-三招也原样搬了过来。取消连续性:一条请求的 KV 散落各处,HBM 浪费压到个位数百分比。映射:不同 sequence 的 block table 指向同一个物理 block,公共前缀、并行采样共享同一份 KV,显存占用随扇出线性下降;写时复制让 fork 采样只复制表项。虚实不挂钩:显存紧张时,冷 block 换出到 CPU(vLLM 的 `SharedOffloadRegion` / `swap_blocks_triton`,置换策略 lru/arc)——KV 有了自己的 swap。
+三招也原样搬了过来:
 
-## 一个流传很广的误诊
+第一,**取消连续性**。一条请求的 KV 不必连续存放,block table 把散落的块串成逻辑上连续的序列,HBM 浪费压到个位数百分比。
 
-既然 PagedAttention 是"软件页表",一个自然的疑问是:为什么不用 GPU 的硬件 MMU 直接接管?
+第二,**映射与共享**。不同 sequence 的 block table 可以指向同一个物理 block——公共前缀、并行采样共享同一份 KV,显存占用随扇出线性下降;写时复制让 fork 采样只复制表项,谁真正改写了,才复制数据。
 
-流传最广的解释是"KV block 太细,会打爆 GPU 的 TLB"。这个说法经不起一笔账:`block_size` 是 token 数,与 head 维度完全无关;主流模型每 token 的 KV 约 128–320KB,16 个 token 的 block 是 MB 级——比 GPU 硬件 MMU 的 2MB 大页还大。整个 KV arena 几十个大页就映射完了,TLB 毫无压力。何况 GPU 早就有硬件 demand paging(UVM),要用早用了。
+第三,**虚实不挂钩**。显存紧张时,冷 block 换出到 CPU,需要时再换回来(vLLM 的 `SharedOffloadRegion` / `swap_blocks_triton`,置换策略 lru/arc)——KV 有了自己的 swap。
 
-工业界刻意不用它,真正的原因有三个:
+## 为什么不用 GPU 的硬件 MMU
+
+既然 PagedAttention 是"软件页表",一个自然的疑问是:为什么不交给 GPU 的硬件 MMU 直接接管?GPU 又不是没有 MMU——统一虚拟寻址、demand paging(UVM)都是现成的。
+
+一个乍看合理的猜测是粒度:KV block 是不是太细,会把硬件 TLB 打爆?算一笔账就知道不成立。`block_size` 是 token 数,与 head 维度无关;主流模型每 token 的 KV 约 128–320KB,16 个 token 的 block 是 MB 级——比 GPU 硬件 MMU 的 2MB 大页还大。整个 KV arena 几十个大页就映射完,TLB 毫无压力。
+
+真正的原因在别处:
 
 1. **分配动态性**。driver 级映射/解除映射是微秒到毫秒级、且带同步的操作;而 block 的分配释放是毫秒级的高频动作,走驱动等于给调度器上镣铐。
-2. **缺页延迟不可控**。UVM 的 page fault 是一次 host 往返,decode 热路径(ITL 预算以毫秒计)根本不能接受。所以引擎宁可自己写 offload 调度,也不把换页交给硬件。
+2. **缺页延迟不可控**。UVM 的 page fault 是一次 host 往返,decode 热路径(ITL 预算以毫秒计)根本不能接受。
 3. **策略必须懂语义**。KV 可重算——驱逐时不需要像内存页那样保证数据不丢;KV 按内容共享、有冷热之分。这些语义硬件页表根本不暴露,策略只能活在软件里。
 
-与这个误诊同源的还有一个说法:"attention kernel 显式读 block table,说明内存管理和计算缝在一起,需要 GPU 内置专用的 AI MMU 才能彻底解耦。"kernel 那条缝其实不痛:attention 是访存 bound,每读一个 MB 级的 block 才查一次索引,翻译开销可以忽略,FlashAttention / FlashInfer / Triton 也早已把 paged KV 做成标准接口。真正昂贵的缝在别处——而它恰恰是任何单卡硬件 MMU 都解决不了的。
+证据就写在引擎自己的代码里:vLLM 宁可自己实现一套 block 粒度的 CPU offload——独立的置换策略、专门的 swap kernel(见 [`../research/vllm/compute.md`](../research/vllm/compute.md))——也不把换页交给 UVM。
+
+顺着"软硬件分工"往下想,还会得到另一个方案:既然 attention kernel 要显式读 block table,是不是该给 GPU 造一颗专用的"AI MMU",让 kernel 面对一个虚拟连续的 KV 张量,由硬件负责打散与聚合?这个方案解决的是一个不痛的问题:attention 是访存 bound,每读一个 MB 级的 block 才查一次索引,翻译开销可以忽略;FlashAttention / FlashInfer / Triton 也早已把 paged KV 做成标准接口。真正昂贵的那条缝,单卡之内的硬件翻译根本够不着——下一节就说它。
 
 ## PagedAttention 停在了哪
 
 那条昂贵的缝是:**KV 归产生它的引擎进程私有。**
 
-PagedAttention 解耦了"逻辑 token 序列 ↔ 物理 block",但只在单实例内。把视线拉到集群层面,你会发现虚拟内存出现之前的景象原样摆着:
+PagedAttention 解耦了"逻辑 token 序列 ↔ 物理 block",但只在单实例内。把视线拉到集群层面,虚拟内存出现之前的景象原样摆着:
 
 - **状态即人质**。worker 崩溃,KV 随之销毁,上面对应的请求从头重算;反过来说,一个持有热点 KV 的实例不能随便下线,扩缩容被状态钉死。
-- **共享出不了进程**。前缀复用是单实例的内部福利;另一个节点上的请求带着同样的前缀来,只能重新算一遍。
+- **路修好了,车管所没有**。跨实例共享并非没人做——Mooncake、LMCache 这类系统已经能通过 connector 把 KV 在实例间传来传去。但传的是字节,不是账本:池不懂前缀,每个实例仍要各自维护一份前缀索引、各自做匹配;某块 KV 在哪、还在不在,靠实时探测或弱一致协调;生命周期、传输发起,仍要引擎亲自参与。共享有了,共享的账本仍碎在每个引擎手里。
 - **搬砖回来了**。跨实例传 KV,要两个引擎的 connector 两两握手、自己发起、自己管理——每个引擎开发者都在干当年 overlay 程序员的活。
 
 换言之:实例之内已经有了虚拟内存,集群层面还停在直连物理内存的时代。每个引擎实例自己当自己的操作系统——自己的页表、自己的 swap、自己的回收,实例之间靠点对点协议互相搬运。
+
+## 业界停在哪一站
+
+在 lake 之前,"KV 与引擎解耦"这条路上已经站着不少系统。一个一个看它们的设计,能看清每一站停在了哪。逐层对应与代码索引见 [`../research/3rdparty-reference.md`](../research/3rdparty-reference.md)。
+
+- **vLLM:发明了分页,停在实例内。** 设计核心是每个 sequence 一张 block table,加一套读散落 block 的 paged attention kernel。跨实例留了 `KVConnectorBase_V1` 接口,例如 NIXL、Mooncake 的 connector 都从这里接入。但接入的是传输,不是所有权:前缀索引(APC)仍是引擎自维护的易失结构,实例死了,索引和 KV 一起死(见 [`../research/vllm/compute.md`](../research/vllm/compute.md))。
+- **SGLang HiCache:单机内把分层做全了,停在实例私有。** 它的 `HiRadixTree` 节点同时记录 L1(device)位置、L2(host)位置和链式哈希(当 L3 key)——已经是"带位置的页表项"的形状。例如它的 prefetch 有三个终止策略(best_effort / wait_complete / timeout,按 token 数给超时预算),write-back 也分三档(命中即回写 / 命中两次才回写 / 驱逐时才回写)。但 L1/L2 归引擎实例私有,L3 命中靠实时向后端查询,没有全局权威(见 [`../research/sglang/hicache.md`](../research/sglang/hicache.md))。
+- **Mooncake:铺好了高速公路,没有建车管所。** 设计分两半:transfer-engine 负责 RDMA 零拷贝搬运,内存按 segment 注册,块按 `(segment_id, offset, len)` 寻址;store 是对象级 blob 池,按 `tenant+key` 字符串存取。例如它的 master 用一张哈希表记录全部对象元数据——没有内容寻址,没有前缀树。引擎要复用前缀,得自己在池子上面再长一份索引(见 [`../research/mooncake/transfer-engine.md`](../research/mooncake/transfer-engine.md)、[`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md))。
+- **LMCache:把跨实例复用工程化,元数据停在弱一致。** 内容寻址、多存储后端、实例间直传都有,例如它可以把一台 GPU 上的 KV 直接搬到另一台。但全局"谁有什么、在哪"靠控制器弱一致协调,没有强一致的位置权威(见 [`../research/lmcache/overview.md`](../research/lmcache/overview.md))。
+- **Dynamo KVBM:离"KV 虚拟内存"最近,但 KV 仍归引擎。** 设计上分 logical / physical / engine 三层,offload 路径从 GPU 一路到远端对象存储;它的 `StorageTier` 按介质分(Device / HostPinned / Disk / External),和"层=介质非位置"是同一种看法。例如 1.0 版本加了集群级 KV 事件,让 router 能看到全集群的缓存分布。但 KVBM 的定位是引擎缓存的 offload 层:KV 归 engine 持有,事件走 NATS,没有强一致位置视图(见 [`../research/dynamo/overview.md`](../research/dynamo/overview.md))。
+- **Ascend MemCache / UCM:同层的另两种形态。** 前者是昇腾的分布式 KV 对象池,MetaService 管元数据、LocalService 管本机介质;后者是可插拔缓存框架,KVStore 后端可换,挂在引擎插件层。两者都不是以前缀树为权威的设计(见 [`../research/memcache/overview.md`](../research/memcache/overview.md)、[`../research/ucm/overview.md`](../research/ucm/overview.md))。
+
+五站看下来,问题收敛成一个:谁来当那个全局的、懂前缀的、管生死的车管所?这正是 lake 要建的东西。
 
 ## lake 把谎言讲到集群级
 
 lake 的核心想法只有一句话:**把"页表"从引擎私有,升级为独立的基础设施。**
 
-所有有状态物——权重、KV、调度队列——从算力路径剥离,归一个长期存续、模型无关的存储池统一管理;算力节点不拥有任何内存,可随时销毁、随时拉起(特性清单见 [`../features/features.md`](../features/features.md))。当年 Atlas 的三招,在集群尺度上重新落地:
+所有有状态物——权重、KV、调度队列——从算力路径剥离,归一个长期存续、模型无关的存储池统一管理;算力节点不拥有任何内存,可随时销毁、随时拉起(特性清单见 [`../features/features.md`](../features/features.md))。当年 Atlas 的三招,在集群尺度上重新落地。
 
-**取消连续性,并且取消"所有权"。** block 的身份是 `KVBlockID = (model_id, revision, block_hash, …)`,不含任何位置;位置是另一份数据:`Location{tier, node_id, segment_id, offset}`(见 [`../../proto/schema.proto`](../../proto/schema.proto))。HBM、DRAM、NVMe、对象存储统一编址为 L0–L3,层=介质而非位置——连 HBM 都是池的物理载体,计算节点零私有内存,不存在引擎自维护的易失前缀索引(见 [`storage-layer.md`](storage-layer.md))。这一步比操作系统更彻底:VM 里内存好歹归 OS、进程只是租用;lake 里 worker 连"租"都不租。
+**第一招,取消连续性——顺便取消"所有权"。** block 的身份不再是"哪个进程的第几号块",而是从内容算出来的哈希:同一段前缀,谁算都是同一个身份。位置是另一份独立的数据:哪层介质、哪个节点、哪段偏移。HBM、DRAM、NVMe、对象存储编成 L0–L3 四层,层与层的区别只是介质——连 HBM 都是池的物理载体(见 [`storage-layer.md`](storage-layer.md))。于是 worker 连"租"内存的资格都没有:它只是池选中的计算场所,崩溃时烧掉的只是自己,烧不到 KV。
 
-**映射与隔离,由池的权威来执行。** "页表"是 radix 树加位置视图——`block_hash → 位置`,权威在 Rust 控制面的进程内存里(见 [`control-plane.md`](control-plane.md));"TLB"是 Router 和 agent 手里的只读镜像,选路查本地、零 RPC,守住 5ms 模式选择的 SLO 预算(见 [`../features/slo.md`](../features/slo.md))。隔离也比 MMU 更进一步:MMU 是"你访问错了就杀你",lake 里引擎零地址、不组装 block table、不知道对端存在——它根本没有访问错的手段。
+**第二招,映射与隔离——页表的权威在池,不在引擎。** 查"这段前缀的 KV 在哪",查的是池维护的前缀树加位置视图,权威在控制面进程内存里(见 [`control-plane.md`](control-plane.md));Router 和每个节点上的 agent 手里各持一份只读镜像,绝大多数时候本地一查就有,零 RPC,守住 5ms 的选路预算(见 [`../features/slo.md`](../features/slo.md))。隔离也比 MMU 更彻底:MMU 是"访问错了就杀你",lake 里引擎根本拿不到地址——不组装 block table,不知道对端是谁,想踩都没处踩。
 
-**虚实不挂钩,连带超发。** 读 miss 从 L1/L2/L3 回填;冷热按 LFU-Aging 加前缀亲和,在层间 promote/demote;满块先落 L2 durable 才注册 radix 发布视图——脏页没落盘之前,不许被看见。L0/L1 驱逐不丢数据(L2/L3 有后盾),于是池可以向整个集群呈现一个比所有 HBM 加起来大得多的 KV 工作集,这和云厂商超卖内存是同一种会计手法。
+**第三招,虚实不挂钩——连带超发。** 要用的时候不在本地,就从池里现搬;池按冷热主动搬家,热的往上搬,冷的往下沉,公共前缀多一分保护。新产出的块先在 NVMe 落稳,才允许被别人看见——脏页没落盘之前不许发布。因为下面两层永远是后盾,HBM/DRAM 里的副本说扔就扔:池敢向整个集群呈现一个比所有 HBM 加起来大得多的 KV 工作集。这和云厂商超卖内存,是同一种会计手法。
 
 整套对应关系列出来是这样:
 
 | OS 虚拟内存 | lake |
 |---|---|
-| 虚拟地址(与物理位置解耦的逻辑身份) | `KVBlockID`,身份不含位置 |
-| 页表(VA→PA) | radix + 位置视图,权威在控制面进程内存 |
-| TLB | Router/agent 只读 mirror,零 RPC;不可信时回查权威树 |
-| 缺页中断 | 读 miss 从下层回填;prefetch ≈ prepaging |
-| swap 分区 | L2 NVMe 池(F4 恢复点);L3 对象存储 ≈ file-backed 页 |
-| 脏页先写回再复用页框 | durable-first:先落 L2,才注册 radix 发布视图 |
-| 置换算法(LRU/Clock) | LFU-Aging 热度分 + 前缀亲和加权 |
-| 页被 pin 不可换出 | ref>0 冻结(请求引用 / 在途传输引用 / writeback ref) |
-| kswapd / compactd | GC + 碎片整理共享后台带宽池(<10%,可暂停) |
-| 内存超发 | L0/L1 驱逐不丢数据 → KV 工作集可以远超 HBM 总量 |
+| 虚拟地址 | block 的身份哈希(`KVBlockID`),与在哪无关 |
+| 页表 | 池维护的"前缀 → 位置"权威视图(radix + 位置视图) |
+| TLB | Router 和各节点手里的只读镜像,本地一查就有,零 RPC |
+| 缺页中断 | 不在本地,就从池的下一层现搬 |
+| swap 分区 | NVMe 层是恢复点,对象存储是最终后盾 |
+| 脏页先写回,再复用页框 | 先落盘,再让别人看见(durable-first) |
+| LRU 置换 | 按冷热驱逐,公共前缀多一分保护 |
+| 页被 pin 住不可换出 | 正在算、正在传的块,谁也不许动 |
+| kswapd 后台回收 | 后台回收与整理,限速、可暂停 |
+| 内存超发 | 副本说扔就扔 → KV 工作集可以远超 HBM 总量 |
 
 ```mermaid
-flowchart TB
-    subgraph osvm["OS 虚拟内存"]
-        va["程序发出虚拟地址"] --> mmu["MMU 逐次访存翻译\n页表 + TLB"]
-        mmu --> ram{"物理页框在 RAM?"}
-        ram -->|"缺页"| swapin["swap 回填"]
+flowchart LR
+    subgraph os["OS 虚拟内存:一次访存"]
+        direction TB
+        a1["程序:读地址 X"] --> a2{"TLB / 页表:\n物理页在内存吗?"}
+        a2 -->|"在"| a3["直接读"]
+        a2 -->|"不在"| a4["缺页:从磁盘换入,再读"]
     end
-    subgraph lakesys["lake"]
-        prompt["prompt 前缀"] --> hash["链式哈希\nhash(parent ‖ tokens)"]
-        hash --> view["radix + 位置视图\nCP 权威 / Router·agent mirror"]
-        view --> loc["Location:tier + node + segment + offset"]
-        loc -->|"miss"| backfill["L1/L2/L3 回填 + promote"]
+    subgraph lk["lake:一次请求"]
+        direction TB
+        b1["请求:这段 prompt 的 KV 呢?"] --> b2{"查位置镜像:\n前缀 KV 在本节点 HBM 吗?"}
+        b2 -->|"在"| b3["直接算(本地命中)"]
+        b2 -->|"不在"| b4["从池里拉过来,再算"]
     end
 ```
 
@@ -123,19 +145,6 @@ flowchart TB
 3. **没有硬件执行者,失败是显式的分布式问题。** 缺页是同步异常,指令级恢复;lake 的 miss 是软件异步 RDMA 搬运加 fence,还要处理镜像最终一致(误判 → 回查权威 → 回填)、在途传输源端冻结(ref 钉住,防半传覆写)这类 MMU 根本不存在的问题。它最近的亲戚是 TLB shootdown,而不是 page fault(见 [`consistency.md`](consistency.md))。
 4. **池懂页与页的关系,MMU 不懂。** MMU 眼里页与页毫无关联;lake 的 radix 记着每个 block 的前缀谱系,前缀亲和保护、模型下线级联删除、碎片整理把同序列 block 共置,全部建立在这份谱系上。这也是池必须自长 radix 的原因——一个不懂前缀的 blob 池,支撑不了前缀复用、DualPath、D-direct 中的任何一个(见 [`kv-cache-pool.md`](kv-cache-pool.md)「为何池必须自长 radix」)。
 5. **连"物理内存"本身也是租来的。** 统一编址的终点是 memory disaggregation 的极端版:worker 崩溃烧不到 KV,因为恢复点在 L2 NVMe,与位置无关;节点下线只是池把它的介质收回。这层图景更接近 CXL 内存池化,而不是单机虚拟内存(见 [`kv-cache-pool.md`](kv-cache-pool.md)「故障恢复」)。
-
-## 业界停在哪一站
-
-"KV 与引擎解耦"这件事,业界都在走,区别是停在哪一站。逐层对应与代码索引见 [`../research/3rdparty-reference.md`](../research/3rdparty-reference.md)。
-
-- **vLLM** 发明了 KV 的分页,停在实例内:KV 引擎私有,前缀索引(APC)是引擎自维护的易失结构;`KVConnectorBase_V1` 留出了存算分离的接入口,但接入不改变所有权(见 [`../research/vllm/compute.md`](../research/vllm/compute.md))。
-- **SGLang HiCache** 把单机内的一整套做全了:L1(device)/ L2(host)/ L3(后端)分层,`HiRadixTree` 的 `TreeNode` 同时记 L1/L2 位置和链式哈希——已经是"带位置的页表项"的形状;prefetch 三策略和 write-back 三策略就是 KV 的 prepaging 与 swap。但它停在实例私有:L1/L2 归引擎,L3 命中靠实时查后端,弱一致(见 [`../research/sglang/hicache.md`](../research/sglang/hicache.md))。
-- **Mooncake** 铺好了高速公路:transfer-engine 的 RDMA 零拷贝、segment 寻址 `(segment_id, offset, len)`,lake 的数据面直接以它为原型。但它的 store 是 dumb blob 池,无内容寻址、无 radix——有路,没有车管所。lake 借数据面,控制面自长(见 [`../research/mooncake/transfer-engine.md`](../research/mooncake/transfer-engine.md)、[`../research/mooncake/kv-store.md`](../research/mooncake/kv-store.md))。
-- **LMCache** 把跨请求、跨实例复用和内容寻址工程化了,但元数据是弱一致协调,没有全局强一致的位置权威(见 [`../research/lmcache/overview.md`](../research/lmcache/overview.md))。
-- **Dynamo KVBM** 是工业界离"KV 虚拟内存"最近的一站:GPU→CPU→SSD→远端三层 offload,`StorageTier` 按介质分层,与 lake 的"层=介质非位置"一致。但 KV 归 engine 持有,KVBM 是 offload 层——引擎私有缓存的延伸,而不是池;事件走 NATS,无强一致位置视图(见 [`../research/dynamo/overview.md`](../research/dynamo/overview.md))。
-- **Ascend MemCache / UCM** 分别是昇腾的分布式 KV 对象池和可插拔缓存框架,作同层对照(见 [`../research/memcache/overview.md`](../research/memcache/overview.md)、[`../research/ucm/overview.md`](../research/ucm/overview.md))。
-
-lake 的位置,是把这条路线推到头:存储池不是某个引擎的附属层,而是长期存续、模型无关的独立基础设施——连 HBM 都在池内。
 
 ## 回到间接层
 
