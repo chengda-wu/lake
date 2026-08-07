@@ -388,6 +388,9 @@ func runP76Workload(
 // X5 收口为回归门禁);RR 基线是陪跑对照,不断言比率。
 func TestBenchP76LocalHitRate(t *testing.T) {
 	const (
+		// localHitSLOGate 与 docs/features/slo.md「本地命中率 >40%」耦合,
+		// SLO 收紧时须手动同步(门禁不会自动跟随)。
+		localHitSLOGate = 0.4
 		// 会话数取质数(7):避免 S%N==0 时 RR 把会话钉死在同一节点的混叠
 		// 伪亲和(那会把 RR 基线测成隐式亲和);质数会话数让 RR 真正轮转。
 		sessions = 7
@@ -435,9 +438,11 @@ func TestBenchP76LocalHitRate(t *testing.T) {
 		// 场景),此断言将其从 t.Log 测量值升级为 CI 回归门禁。实测亲和全配置
 		// 0.905–1.000、RR 基线 ≤0.471,0.4 线区分度干净且余量充足(>2x)。
 		// RR 是陪跑对照,不断言;mock 绝对时延/吞吐仍非门禁。
-		if cfg.policy == "affinity" && rate < 0.4 {
-			t.Fatalf("亲和本地命中率 = %.3f < 0.4(slo.md SLO 回归门禁,nodes=%d drift=%.1f placement=%v)",
-				rate, cfg.nodes, cfg.drift, cfg.placeOn)
+		// 耦合注意:门禁值与 slo.md「本地命中率 >40%」手写同步——SLO 收紧时
+		// 本常量不会自动跟随,改 SLO 须同步改这里。
+		if cfg.policy == "affinity" && rate < localHitSLOGate {
+			t.Fatalf("亲和本地命中率 = %.3f < %.1f(slo.md SLO 回归门禁,nodes=%d drift=%.1f placement=%v)",
+				rate, localHitSLOGate, cfg.nodes, cfg.drift, cfg.placeOn)
 		}
 	}
 }

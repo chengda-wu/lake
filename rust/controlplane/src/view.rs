@@ -78,6 +78,11 @@ impl ViewLog {
     /// 本实例从未签发的 seq——CP 已重启(next_seq 归 1)或权威重建,其镜像状态
     /// 无法用重放证明有效,必须回退快照。「已最新」重连(from_seq == last_seq)
     /// 不命中该分支,仍走 `Some([])` 空重放,语义不变。
+    ///
+    /// 前提:`next_seq` 不跨重启持久化(进程重启归 1)。若将来经 CheckpointStore
+    /// 恢复序号使 next_seq 跨重启连续,本分支语义须重估(届时 from_seq >= next_seq
+    /// 不再蕴含「客户端见过未签发 seq」)。另:`restore_checkpoint` 的 reset() 保留
+    /// next_seq 属 P6.2 已知边界,与本守卫正交。
     pub(crate) fn replay_after(&self, from_seq: u64) -> Option<Vec<ViewUpdate>> {
         if from_seq == 0 || from_seq + 1 < self.floor() {
             return None;
