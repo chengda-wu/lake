@@ -262,6 +262,23 @@ UCM 与 **LMCache 同层**：挂在 vLLM 等引擎上的 **KVStore + connector +
 
 - **A 不管「这块 KV 算不算前缀命中」**；**B 不管「跨节点怎么 RDMA 搬字节」**。
 - Dynamo `kvbm-physical::TransferManager` 是**抽象**，生产数据面仍优先接 A（Mooncake TE），避免两套传输栈。
+
+**A 行补充：为什么是 TE 而不是 NIXL**（dynamo 的 KV 传输生产后端是 NIXL，真正的备选是它，不是 dynamo 自有的东西）：
+
+- TE 是 KV 搬迁 purpose-built 引擎（segment 注册/slice 切分/拓扑选 NIC/多 NIC 聚合/故障重传/TCP 退化）；NIXL 是"统一 API + 可插后端"的抽象层。lake 已有自己的抽象（`rust/transfer` 的 `Transport` trait），再 vendor 一层抽象无增量。
+- TE 的 `(SegmentID, offset, len)` 与 lake `Location{segment_id, offset}` 同构，零翻译；NIXL 的 agent/descriptor 风格对不上。
+- 多 NIC 聚合/NUMA 拓扑开箱（`Topology::selectDevice`）；NIXL 侧多 NIC 需自配 `UCX_NET_DEVICES`。
+- 生产实证（Kimi PD）+ 生态共同语言：SGLang HiCache / vLLM `MooncakeConnector` / LMCache / TileRT 都接 TE，将来与任何引擎对接它是共同语言。
+- 非终身绑定：P5 若 FFI 成本超预期，NIXL 可作 `Transport` trait 的另一实现。
+
+**B 行补充：为什么 physical/engine 不可 vendor**（logical 可 vendor 的对照）：
+
+- logical 与"KV 归谁"**正交**（纯元数据结构：块池/链式哈希/presence/驱逐索引），vendor 纯赚（~500 单测直接继承）；physical/engine 是"KV 归引擎、引擎发起、demote-only"假设的**具身**。
+- kvbm-physical 的 transfer 由引擎内 leader 在 offload 编排里驱动；lake 是池调度、agent 执行、双向流动（promote/预放置/回填/直传）。**physical 能不能用取决于 engine 的控制模型**，而 engine 层（leader/collectives/per-instance 协调）是 [`../architecture/control-plane.md`](../architecture/control-plane.md) 明确拒绝的。
+- layout 假设也不合：lake page-first（整块所有层连续、单条 `(ptr,len)` 传引擎）对齐 SGLang，与 dynamo 布局不同。
+- 测试价值继承不到：physical/engine 的正确性依赖真实环境（NIXL/RDMA NIC/GPU/S3），vendor 过来单测跑不起来，只剩钉工具链与 re-vendor 合并的成本。
+- 语言边界：engine 层对接推理引擎，lake 的引擎对接在 Python 计算层，不经过 Rust engine 层。
+- 推论：即便传输底座改选 NIXL，也只救回 physical 的 transfer 半边，engine 层依旧不可用——真正的决策点是"KV 归谁、谁发起传输"，传输底座是它的下游。
 - 其余（SGLang HiCache 策略、LMCache 后端思路、vLLM `KVConnectorBase_V1`、Dynamo kv-router 选路公式）继续以**借鉴/对照**为主，默认不链进依赖树；计算层（P5）再评估 vLLM/SGLang 引擎经 connector 接入。
 
 **现状（P4.2 合入 / P4.3）**：复用 **B** vendor + controlplane radix/驱逐。**P4.3**：`LocalTierEngine`（写回**只 L2**；L3 仅 demote/cap XOR；`pin`≈`lock_ref`；`TierSideEffects`）+ `TierPipeline` + `apply_location_events`；PutEnd=Mooncake COMPLETE。对齐 `storage-layer.md` 写回路径与 SGLang demotion-only L1。真 NVMe/跨机 defer P5；满块顺便写 L1 留 P7。

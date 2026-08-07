@@ -108,6 +108,22 @@ submitTransfer(BatchID, {TransferRequest{WRITE, source=local_kv_addr,
 
 **关键差异**:抄 API/生命周期与 TCP 退化语义,**不**接入 Mooncake CMake/FFI;位置视图/radix 仍在 controlplane,不在 TE。
 
+### 为何 P4 不接 FFI、P5 才接(阶段论)
+
+FFI 成本恒定(CMake 进 Rust workspace、工具链双重钉死、CI 面、FFI 崩溃调试面),收益只在两个条件成立时存在:**有 RDMA 硬件,且传输性能是被验证的变量**。
+
+- **P4 两个条件都不成立**:验证的是池语义(radix/位置视图/ref 冻结/durable-first),对字节怎么搬不敏感;原型机无 HCA,真接 TE 也走 `MC_FORCE_TCP`/无 HCA 的 TCP 退化——花全部成本买到已有的 TCP 兜底。
+- **P5 两个条件都成立**:存算分离验证的核心变量就是传输时间(D-direct 零传输收益、5ms 模式选择预算核算、DualPath 带宽分配),TCP 进程内拷贝量不出来 → FFI 进场。
+- **P5 为什么不继续自写**:性能路径要的是硬件原语工程(verbs/QP/CQ 轮询/DMA-BUF 注册 GPU 内存/拓扑多 NIC),自写 = 再造一个 TE;此时 FFI 比自研便宜,还白拿上游维护。
+- **顺序的意义**:先自写 `Transport` trait 把"湖需要传输层长什么样"钉死,P5 让 TE 适配我们的形状;若 P4 就 FFI,池语义会被 TE 的 C++ 接口形状(注册/错误/batch 生命周期)拖着走。
+
+### 三件套:接口 + 原型实现 + 未来第二实现
+
+- `Transport` trait = **永久资产/防腐层**,业务代码(storage-agent/kv-pool)只面对它。
+- `TcpTransport` = **不扔的 fallback**:P5 后仍作无 RDMA 环境的兜底(对应 TE 自己的 TCP 退化),不是一次性脚手架。
+- `RdmaTransport`(P5)= 同 trait 的**第二个实现**,FFI 适配 TE;动作是"加一个实现 + 按环境选择",不是"换掉原型"。
+- 备选保持开放:NIXL 可作 trait 另一实现;`TransferService` gRPC 形状也允许 TE 以 sidecar 进程外接入——FFI 与进程外两条路都留着。
+
 ## 代码索引
 
 > 沿代码回溯用。符号名锚定,行号会漂移——找不到时 `grep -n "符号名" <文件>`。
