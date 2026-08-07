@@ -257,22 +257,29 @@ impl ControlPlane {
     /// 已知原型边界:计划下发到 agent 执行 `RelocateBlocks` 回报之间,后续
     /// register 会重复触发同碎段计划——执行幂等(同坐标 relocate 为坐标刷新),
     /// 生产化时由执行侧去重/节流。
-    fn maybe_auto_defrag(&self, auth: &Authority, model_id: &str, revision: &str, pool_kind: i32) {
-        let Some(threshold) = self.auto_defrag_threshold else {
-            return;
-        };
+    /// 锁内只**生成**计划:返回 `(model_id, revision, pool_kind, moves)` 供锁外
+    /// 投递。DefragSink 是外部边界(生产实现可能等待 agent 或回调 CP 如 Locate/
+    /// 迁移回报)——写锁内同步调用会阻塞全局 CP 读写,回调即死锁(PR #77 review)。
+    fn plan_auto_defrag(
+        &self,
+        auth: &Authority,
+        model_id: &str,
+        revision: &str,
+        pool_kind: i32,
+    ) -> Option<(String, String, i32, Vec<DefragMove>)> {
+        let threshold = self.auto_defrag_threshold?;
         if self.background_paused() {
-            return;
+            return None;
         }
         let ratio = auth.l2_fragmentation_ratio(model_id, revision, pool_kind, 0);
         if ratio < threshold {
-            return;
+            return None;
         }
-        if let Ok(moves) = auth.plan_defrag(model_id, revision, pool_kind, DefragMode::Both, 0) {
-            if !moves.is_empty() {
-                self.defrag_sink
-                    .defrag_plan(model_id, revision, pool_kind, moves);
+        match auth.plan_defrag(model_id, revision, pool_kind, DefragMode::Both, 0) {
+            Ok(moves) if !moves.is_empty() => {
+                Some((model_id.to_string(), revision.to_string(), pool_kind, moves))
             }
+            _ => None,
         }
     }
 }
@@ -455,34 +462,44 @@ impl ControlPlaneService for ControlPlane {
             blocks = req.blocks.len(),
             "register_blocks"
         );
-        let mut auth = self
-            .write_authority()
-            .map_err(Self::lock_authority_status)?;
         // P7.6(B2-a):HRW 预放置需链所属命名空间,register 移动 blocks 前取出。
         let ns_identity = req
             .blocks
             .iter()
             .find_map(|m| m.id.as_ref())
             .map(|i| (i.model_id.clone(), i.revision.clone(), i.pool_kind));
-        let result = auth.register(&req.node_id, &req.prefix_hashes, req.blocks);
-        // P7.6(B2-a):register 成功后按 HRW(链锚点, ready 节点集)预放置
-        // (稳态常见情形=生产节点即家节点,计划为空零动作)。
-        let preplace = if matches!(result, Ok(RegisterStatus::Accepted)) {
-            ns_identity.as_ref().and_then(|(mid, rev, pk)| {
-                auth.preplace_on_register(mid, rev, *pk, &req.prefix_hashes)
-            })
-        } else {
-            None
+        // 锁内只做视图读写与计划生成;外部 sink(WarmupSink/DefragSink)一律锁外
+        // 投递——实现可能等待 agent 或回调 CP,锁内调用会全局阻塞/死锁(PR #77 review)。
+        let (result, preplace, defrag) = {
+            let mut auth = self
+                .write_authority()
+                .map_err(Self::lock_authority_status)?;
+            let result = auth.register(&req.node_id, &req.prefix_hashes, req.blocks);
+            // P7.6(B2-a):register 成功后按 HRW(链锚点, ready 节点集)预放置
+            // (稳态常见情形=生产节点即家节点,计划为空零动作)。
+            let preplace = if matches!(result, Ok(RegisterStatus::Accepted)) {
+                ns_identity.as_ref().and_then(|(mid, rev, pk)| {
+                    auth.preplace_on_register(mid, rev, *pk, &req.prefix_hashes)
+                })
+            } else {
+                None
+            };
+            // S3(issue #74):配置门控自动 defrag 评估(默认关;暂停期不触发)。
+            let defrag = if matches!(result, Ok(RegisterStatus::Accepted)) {
+                ns_identity
+                    .as_ref()
+                    .and_then(|(mid, rev, pk)| self.plan_auto_defrag(&auth, mid, rev, *pk))
+            } else {
+                None
+            };
+            self.commit_and_broadcast(&mut auth);
+            (result, preplace, defrag)
         };
-        self.commit_and_broadcast(&mut auth);
         if let Some((home, plan)) = preplace {
             self.warmup_sink.warm(&home, plan);
         }
-        // S3(issue #74):配置门控自动 defrag 评估(默认关;暂停期不触发)。
-        if matches!(result, Ok(RegisterStatus::Accepted)) {
-            if let Some((mid, rev, pk)) = &ns_identity {
-                self.maybe_auto_defrag(&auth, mid, rev, *pk);
-            }
+        if let Some((mid, rev, pk, moves)) = defrag {
+            self.defrag_sink.defrag_plan(&mid, &rev, pk, moves);
         }
         match result {
             Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
@@ -903,40 +920,51 @@ impl ControlPlaneService for ControlPlane {
         request: Request<JoinShardNodeRequest>,
     ) -> Result<Response<JoinShardNodeResponse>, Status> {
         let req = request.into_inner();
-        let mut auth = self
-            .write_authority()
-            .map_err(Self::lock_authority_status)?;
-        match auth.join_shard_node(&req.node_id, req.vnode_count) {
-            Ok((map, migrations)) => {
-                let migration_count = migrations.len() as u32;
-                tracing::info!(
-                    node_id = %req.node_id,
-                    vnode_count = req.vnode_count,
-                    migration_count,
-                    "join_shard_node"
-                );
-                // P7 收口(方案 Z):新节点 warmup 由池侧按 hit_count 自主选块
-                // 发起;Router 只经 ReportHits 报告命中,不指挥放置。
-                let plan = auth.warmup_plan(&req.node_id, DEFAULT_WARMUP_K);
-                if !plan.is_empty() {
-                    self.warmup_sink.warm(&req.node_id, plan);
+        // 锁内 join + 生成 warmup 计划;WarmupSink 锁外投递(同 register_blocks
+        // 的锁外投递约束,PR #77 review)。
+        let (resp, warm) = {
+            let mut auth = self
+                .write_authority()
+                .map_err(Self::lock_authority_status)?;
+            match auth.join_shard_node(&req.node_id, req.vnode_count) {
+                Ok((map, migrations)) => {
+                    let migration_count = migrations.len() as u32;
+                    tracing::info!(
+                        node_id = %req.node_id,
+                        vnode_count = req.vnode_count,
+                        migration_count,
+                        "join_shard_node"
+                    );
+                    // P7 收口(方案 Z):新节点 warmup 由池侧按 hit_count 自主选块
+                    // 发起;Router 只经 ReportHits 报告命中,不指挥放置。
+                    let plan = auth.warmup_plan(&req.node_id, DEFAULT_WARMUP_K);
+                    (
+                        JoinShardNodeResponse {
+                            map: Some(map),
+                            migrations,
+                            migration_count,
+                            ok: true,
+                            err: String::new(),
+                        },
+                        if plan.is_empty() { None } else { Some(plan) },
+                    )
                 }
-                Ok(Response::new(JoinShardNodeResponse {
-                    map: Some(map),
-                    migrations,
-                    migration_count,
-                    ok: true,
-                    err: String::new(),
-                }))
+                Err(e) => (
+                    JoinShardNodeResponse {
+                        map: None,
+                        migrations: vec![],
+                        migration_count: 0,
+                        ok: false,
+                        err: e,
+                    },
+                    None,
+                ),
             }
-            Err(e) => Ok(Response::new(JoinShardNodeResponse {
-                map: None,
-                migrations: vec![],
-                migration_count: 0,
-                ok: false,
-                err: e,
-            })),
+        };
+        if let Some(plan) = warm {
+            self.warmup_sink.warm(&req.node_id, plan);
         }
+        Ok(Response::new(resp))
     }
 
     async fn drain_shard_node(
@@ -984,10 +1012,14 @@ impl ControlPlaneService for ControlPlane {
             ids = req.ids.len(),
             "report_hits"
         );
-        let mut auth = self
-            .write_authority()
-            .map_err(Self::lock_authority_status)?;
-        let plans = auth.report_hits(&req.node_id, &req.ids);
+        // 锁内只累计命中并生成跟随流量计划;WarmupSink 锁外投递(同
+        // register_blocks 的锁外投递约束,PR #77 review)。
+        let plans = {
+            let mut auth = self
+                .write_authority()
+                .map_err(Self::lock_authority_status)?;
+            auth.report_hits(&req.node_id, &req.ids)
+        };
         for (node, plan) in plans {
             self.warmup_sink.warm(&node, plan);
         }
@@ -3014,6 +3046,62 @@ mod tests {
         let calls = sink3.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "达阈值应触发一次");
         assert!(calls[0] > 0, "触发的计划必须非空");
+    }
+
+    /// PR #77 review(高):DefragSink 必须在 Authority 写锁**外**投递——sink
+    /// 回调 CP(读锁)或等待 agent 时,锁内调用即全局阻塞/死锁。本测试 sink 内
+    /// 立刻取 CP 读锁;RPC 放独立阻塞线程 + 超时,回归(锁内投递)时超时失败
+    /// 而非挂死 CI。WarmupSink 三处调用点(register_blocks/join_shard_node/
+    /// report_hits)同修法、同约束。
+    #[tokio::test]
+    async fn s3_defrag_sink_delivered_outside_authority_lock() {
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+
+        struct ReentrantSink(StdMutex<Option<ControlPlane>>);
+        impl DefragSink for ReentrantSink {
+            fn defrag_plan(&self, _m: &str, _r: &str, _pk: i32, moves: Vec<DefragMove>) {
+                assert!(!moves.is_empty());
+                let cp = self.0.lock().unwrap().clone().unwrap();
+                // 锁内投递(回归)时:调用方持写锁,此处读锁同线程死锁。
+                let _guard = cp.read_authority().expect("read authority");
+            }
+        }
+
+        let sink = Arc::new(ReentrantSink(StdMutex::new(None)));
+        let cp = ControlPlane::default()
+            .with_defrag_sink(sink.clone())
+            .with_auto_defrag_threshold(Some(0.5));
+        *sink.0.lock().unwrap() = Some(cp.clone());
+        {
+            let mut auth = cp.write_authority().unwrap();
+            ensure_model(&mut auth, "m");
+        }
+
+        let cp2 = cp.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                cp2.register_blocks(Request::new(RegisterBlocksRequest {
+                    node_id: "n0".into(),
+                    prefix_hashes: prefix(&[b"a", b"b"]),
+                    blocks: vec![
+                        meta_l2_at("m", b"a", 1, 0),
+                        meta_l2_at("m", b"b", 1, 8192), // seg1 有洞 → 碎片率 1/1 ≥ 0.5
+                    ],
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+            })
+        });
+        let ack = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("超时:DefragSink 在写锁内投递(死锁回归)")
+            .unwrap();
+        assert!(ack.ok, "{}", ack.err);
     }
 
     /// PauseBackground 期间不触发(与 promote/demote/GC 共享暂停语义)。

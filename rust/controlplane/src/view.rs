@@ -84,10 +84,14 @@ impl ViewLog {
     /// 不再蕴含「客户端见过未签发 seq」)。另:`restore_checkpoint` 的 reset() 保留
     /// next_seq 属 P6.2 已知边界,与本守卫正交。
     pub(crate) fn replay_after(&self, from_seq: u64) -> Option<Vec<ViewUpdate>> {
-        if from_seq == 0 || from_seq + 1 < self.floor() {
+        // 先做零值/上界判断(无算术运算):`from_seq + 1` 在 from_seq = u64::MAX
+        // 时 debug 构建溢出 panic、release 依赖 wrap(PR #77 review)。过本守卫后
+        // from_seq ∈ [1, next_seq-1],后续 +1 不溢出。两个 None 分支是并集语义,
+        // 换序不改变任何输入的返回。
+        if from_seq == 0 || from_seq >= self.next_seq {
             return None;
         }
-        if from_seq >= self.next_seq {
+        if from_seq + 1 < self.floor() {
             return None;
         }
         Some(
@@ -200,5 +204,15 @@ mod tests {
             log.replay_after(100).is_none(),
             "from_seq >> next_seq → 快照"
         );
+    }
+
+    /// PR #77 review:恶意/损坏客户端传 u64::MAX 时,`from_seq + 1` 不得溢出
+    /// (debug 构建 panic);上界守卫先命中 → None(回退快照)。
+    #[test]
+    fn view_log_replay_max_seq_no_overflow() {
+        let mut log = ViewLog::default();
+        log.commit(vec![ev(1)]);
+        assert!(log.replay_after(u64::MAX).is_none());
+        assert!(log.replay_after(u64::MAX - 1).is_none());
     }
 }
