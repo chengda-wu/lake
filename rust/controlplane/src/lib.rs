@@ -107,6 +107,23 @@ impl WarmupSink for LogWarmup {
     }
 }
 
+/// S3(issue #74):自动 defrag 计划的出口(与 `WarmupSink` 同型)。
+/// 生产接执行侧(agent 按 moves 搬字节 + `RelocateBlocks` 回报,带宽池节流归 P5);
+/// 原型默认日志实现,测试注入记录器。
+pub trait DefragSink: Send + Sync {
+    fn defrag_plan(&self, model_id: &str, revision: &str, pool_kind: i32, moves: Vec<DefragMove>);
+}
+
+struct LogDefrag;
+impl DefragSink for LogDefrag {
+    fn defrag_plan(&self, model_id: &str, revision: &str, pool_kind: i32, moves: Vec<DefragMove>) {
+        eprintln!(
+            "auto defrag plan: {} moves for {model_id}/{revision}/pool_kind={pool_kind} (bytes P5)",
+            moves.len()
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct ControlPlane {
     /// P6.1: `Mutex → RwLock`——lookup/locate/admit/defrag/shard_map 读路径
@@ -121,6 +138,10 @@ pub struct ControlPlane {
     view_tx: broadcast::Sender<ViewUpdate>,
     /// P7 收口:扩容 warmup 池侧出口。
     warmup_sink: Arc<dyn WarmupSink>,
+    /// S3(issue #74):自动 defrag 阈值(L2 碎片率,None=关,原型保守默认)。
+    auto_defrag_threshold: Option<f64>,
+    /// S3:自动 defrag 计划出口。
+    defrag_sink: Arc<dyn DefragSink>,
 }
 
 impl Default for ControlPlane {
@@ -133,6 +154,8 @@ impl Default for ControlPlane {
             authority_poisoned_reported: Arc::new(AtomicBool::new(false)),
             view_tx,
             warmup_sink: Arc::new(LogWarmup),
+            auto_defrag_threshold: None,
+            defrag_sink: Arc::new(LogDefrag),
         }
     }
 }
@@ -151,11 +174,24 @@ impl ControlPlane {
             authority_poisoned_reported: Arc::new(AtomicBool::new(false)),
             view_tx,
             warmup_sink: Arc::new(LogWarmup),
+            auto_defrag_threshold: None,
+            defrag_sink: Arc::new(LogDefrag),
         }
     }
 
     pub fn with_warmup_sink(mut self, sink: Arc<dyn WarmupSink>) -> Self {
         self.warmup_sink = sink;
+        self
+    }
+
+    /// S3:配置自动 defrag 阈值(`Some(0..=1)` L2 碎片率;`None` 关闭)。
+    pub fn with_auto_defrag_threshold(mut self, threshold: Option<f64>) -> Self {
+        self.auto_defrag_threshold = threshold.filter(|t| (0.0..=1.0).contains(t));
+        self
+    }
+
+    pub fn with_defrag_sink(mut self, sink: Arc<dyn DefragSink>) -> Self {
+        self.defrag_sink = sink;
         self
     }
 
@@ -178,7 +214,11 @@ impl ControlPlane {
             .authority_poisoned_reported
             .swap(true, Ordering::Relaxed)
         {
-            eprintln!("controlplane authority lock poisoned; returning INTERNAL until restart");
+            // TODO(#74 S7): 引入 tracing/log 后替换为结构化日志(日志框架选型待用户定);
+            // 暂用 key=value 形态,便于将来采集管线直接解析。
+            eprintln!(
+                "event=mutex_poisoned component=controlplane lock=authority action=return_internal_until_restart"
+            );
         }
     }
 
@@ -200,6 +240,34 @@ impl ControlPlane {
         if let Some(u) = auth.commit_view_events() {
             // 无订阅者时 send 返回 Err,忽略;慢订阅者 Lagged 由订阅任务快照重同步。
             let _ = self.view_tx.send(u);
+        }
+    }
+
+    /// S3(issue #74):配置门控的自动 defrag 评估(当前挂 register_blocks 写路径——
+    /// L2 布局随注册增长的主入口;relocate/evict 路径的评估挂点留待生产化)。
+    ///
+    /// 碎片率 ≥ 阈值 → 生成 defrag plan 经 `DefragSink` 下发。遵守
+    /// `PauseBackground` 暂停语义(与 promote/demote/GC 共享后台暂停旗标;
+    /// 字节级带宽节流归 P5 `BandwidthPool`,此处只出计划)。
+    /// 已知原型边界:计划下发到 agent 执行 `RelocateBlocks` 回报之间,后续
+    /// register 会重复触发同碎段计划——执行幂等(同坐标 relocate 为坐标刷新),
+    /// 生产化时由执行侧去重/节流。
+    fn maybe_auto_defrag(&self, auth: &Authority, model_id: &str, revision: &str, pool_kind: i32) {
+        let Some(threshold) = self.auto_defrag_threshold else {
+            return;
+        };
+        if self.background_paused() {
+            return;
+        }
+        let ratio = auth.l2_fragmentation_ratio(model_id, revision, pool_kind, 0);
+        if ratio < threshold {
+            return;
+        }
+        if let Ok(moves) = auth.plan_defrag(model_id, revision, pool_kind, DefragMode::Both, 0) {
+            if !moves.is_empty() {
+                self.defrag_sink
+                    .defrag_plan(model_id, revision, pool_kind, moves);
+            }
         }
     }
 }
@@ -375,8 +443,8 @@ impl ControlPlaneService for ControlPlane {
         // P7.6(B2-a):register 成功后按 HRW(链锚点, ready 节点集)预放置
         // (稳态常见情形=生产节点即家节点,计划为空零动作)。
         let preplace = if matches!(result, Ok(RegisterStatus::Accepted)) {
-            ns_identity.and_then(|(mid, rev, pk)| {
-                auth.preplace_on_register(&mid, &rev, pk, &req.prefix_hashes)
+            ns_identity.as_ref().and_then(|(mid, rev, pk)| {
+                auth.preplace_on_register(mid, rev, *pk, &req.prefix_hashes)
             })
         } else {
             None
@@ -384,6 +452,12 @@ impl ControlPlaneService for ControlPlane {
         self.commit_and_broadcast(&mut auth);
         if let Some((home, plan)) = preplace {
             self.warmup_sink.warm(&home, plan);
+        }
+        // S3(issue #74):配置门控自动 defrag 评估(默认关;暂停期不触发)。
+        if matches!(result, Ok(RegisterStatus::Accepted)) {
+            if let Some((mid, rev, pk)) = &ns_identity {
+                self.maybe_auto_defrag(&auth, mid, rev, *pk);
+            }
         }
         match result {
             Ok(RegisterStatus::Accepted) => Ok(Response::new(Ack {
@@ -1283,6 +1357,104 @@ mod tests {
         assert!(auth.complete_barrier("r", "").is_err());
     }
 
+    /// S4(issue #74):RefKind 分账——WRITEBACK/REQUEST 分别入账、按 kind 回冲,
+    /// 冻结/驱逐语义仍看总数。
+    #[test]
+    fn s4_ref_accounts_split_by_kind() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"k"]);
+        auth.register("n0", &full, vec![meta("m", b"k")]).unwrap();
+        let pk = PoolKind::Target as i32;
+
+        let req = delta("m", b"k", 1); // REQUEST+1
+        let mut wb = delta("m", b"k", 1);
+        wb.kind = RefKind::Writeback as i32; // WRITEBACK+1
+        auth.report_ref(&req).unwrap();
+        auth.report_ref(&wb).unwrap();
+        assert_eq!(auth.global_ref_by_kind("m", "", pk, b"k"), (1, 1));
+        assert_eq!(auth.global_ref("m", "", pk, b"k"), 2);
+
+        // WRITEBACK-1 只减 writeback 账簿,request 不动。
+        let mut wb_minus = wb.clone();
+        wb_minus.delta = -1;
+        auth.report_ref(&wb_minus).unwrap();
+        assert_eq!(auth.global_ref_by_kind("m", "", pk, b"k"), (1, 0));
+        assert_eq!(
+            auth.inactive_len("m", "", pk),
+            0,
+            "总数仍 >0 → 冻结语义不变"
+        );
+
+        // REQUEST-1 → 总数归零 → 回到 inactive(驱逐候选)。
+        let mut req_minus = req.clone();
+        req_minus.delta = -1;
+        auth.report_ref(&req_minus).unwrap();
+        assert_eq!(auth.global_ref_by_kind("m", "", pk, b"k"), (0, 0));
+        assert_eq!(auth.inactive_len("m", "", pk), 1, "总数归零仍标驱逐候选");
+    }
+
+    /// S4:kind 级 underflow 报错并指明 kind;IN_FLIGHT/UNSPECIFIED 显式拒绝;
+    /// 批内非法 kind 全有或全无。
+    #[test]
+    fn s4_ref_underflow_scoped_by_kind() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"u"]);
+        auth.register("n0", &full, vec![meta("m", b"u")]).unwrap();
+        let pk = PoolKind::Target as i32;
+
+        // writeback 账簿有 1;REQUEST-1 必须 kind 级 underflow(总数 1 不抵)。
+        let mut wb = delta("m", b"u", 1);
+        wb.kind = RefKind::Writeback as i32;
+        auth.report_ref(&wb).unwrap();
+        let mut req_minus = delta("m", b"u", -1);
+        req_minus.node_id = String::new(); // 置空 node 聚焦全局账簿(node 账簿先行校验)
+        let err = auth.report_ref(&req_minus).unwrap_err();
+        assert!(err.contains("ref_count underflow"), "{err}");
+        assert!(err.contains("REQUEST"), "{err}");
+        assert_eq!(
+            auth.global_ref_by_kind("m", "", pk, b"u"),
+            (0, 1),
+            "underflow 拒绝后不落账"
+        );
+
+        // IN_FLIGHT 预留未接线 → 显式报错(不静默入账)。
+        let mut inflight = delta("m", b"u", 1);
+        inflight.kind = RefKind::InFlight as i32;
+        let err = auth.report_ref(&inflight).unwrap_err();
+        assert!(err.contains("unsupported ref_kind"), "{err}");
+
+        // 批内混非法 kind → 整批拒绝,前缀 delta 不落账。
+        let err = auth
+            .report_refs(&[delta("m", b"u", 1), inflight])
+            .unwrap_err();
+        assert!(err.contains("unsupported ref_kind"), "{err}");
+        assert_eq!(auth.global_ref_by_kind("m", "", pk, b"u"), (0, 1));
+    }
+
+    /// S4:死节点 reconcile 按 kind 分别回冲(清账语义不变——总数归零可驱逐)。
+    #[test]
+    fn s4_dead_node_reconcile_clears_each_kind() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"z"]);
+        auth.register("n0", &full, vec![meta("m", b"z")]).unwrap();
+        let pk = PoolKind::Target as i32;
+        let req = delta("m", b"z", 1); // REQUEST+1 @n0
+        let mut wb = delta("m", b"z", 1);
+        wb.kind = RefKind::Writeback as i32; // WRITEBACK+1 @n0
+        auth.report_ref(&req).unwrap();
+        auth.report_ref(&wb).unwrap();
+        assert_eq!(auth.global_ref_by_kind("m", "", pk, b"z"), (1, 1));
+        assert_eq!(auth.evict_n("m", "", pk, 1), 0, "任一 kind 持有即冻结");
+
+        let (cleared, _) = auth.reconcile_dead_node("n0").unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(auth.global_ref_by_kind("m", "", pk, b"z"), (0, 0));
+        assert_eq!(auth.evict_n("m", "", pk, 1), 1, "两本账清零后可驱逐");
+    }
+
     #[test]
     fn report_ref_underflow_is_rejected() {
         let mut auth = Authority::default();
@@ -1572,6 +1744,33 @@ mod tests {
         assert_eq!(first.events.len(), 4, "快照携带全量现存 block");
         let anchor = recv_update(&mut stream).await;
         assert_eq!(anchor.seq, 4);
+    }
+
+    /// S2(issue #74):resume 点超过已发序号上界(CP 重启场景)→ 回退快照,
+    /// 而非空重放(空重放会让客户端带着旧镜像静默发散,见 Go mirror D1)。
+    #[tokio::test]
+    async fn subscribe_view_resume_ahead_of_issued_seq_falls_back_to_snapshot() {
+        let cp = ControlPlane::default();
+        {
+            let mut auth = cp.write_authority().unwrap();
+            ensure_model(&mut auth, "m");
+            let full = prefix(&[b"h0"]);
+            auth.register("n0", &full, vec![meta("m", b"h0")]).unwrap();
+            auth.commit_view_events(); // seq=1,已发上界 last=1
+        }
+        let mut stream = cp
+            .subscribe_view(Request::new(SubscribeRequest {
+                subscriber_id: "r0".into(),
+                resume_from_seq: 100, // 旧 CP 世代的序号,本实例从未签发
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let first = recv_update(&mut stream).await;
+        assert_eq!(first.seq, 0, "超前 resume 必须回退快照");
+        assert_eq!(first.events.len(), 1, "快照携带现存 block");
+        let anchor = recv_update(&mut stream).await;
+        assert_eq!(anchor.seq, 1, "锚点同步本实例权威 seq");
     }
 
     /// 变更路径事件覆盖:register→REGISTERED / publish→MOVED(全量位置) /
@@ -2604,6 +2803,168 @@ mod tests {
         }
     }
 
+    // --- S3(issue #74):自动 defrag 阈值(配置门控) ---
+
+    /// 碎片率度量:致密 → 0;有洞 → 1;混合按比例;冻结段不计入。
+    #[test]
+    fn s3_l2_fragmentation_ratio_metric() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let pk = PoolKind::Target as i32;
+        let slot = 100u64;
+        // seg1 致密(0,100);seg2 有洞(0,200)。
+        auth.register(
+            "n0",
+            &prefix(&[b"a", b"b", b"c", b"d"]),
+            vec![
+                meta_l2_at("m", b"a", 1, 0),
+                meta_l2_at("m", b"b", 1, 100),
+                meta_l2_at("m", b"c", 2, 0),
+                meta_l2_at("m", b"d", 2, 200),
+            ],
+        )
+        .unwrap();
+        let ratio = auth.l2_fragmentation_ratio("m", "", pk, slot);
+        assert_eq!(ratio, 0.5, "1 致密 + 1 有洞 → 1/2;got {ratio}");
+
+        // 冻结 seg2(其上任一块 ref>0)→ 该段不计入,只剩致密 seg1 → 0。
+        auth.report_ref(&delta("m", b"c", 1)).unwrap();
+        assert_eq!(auth.l2_fragmentation_ratio("m", "", pk, slot), 0.0);
+    }
+
+    /// 门控语义:默认关;阈值未达不触发;达到触发且计划非空。
+    #[tokio::test]
+    async fn s3_auto_defrag_threshold_gated() {
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct DefragRec {
+            calls: StdMutex<Vec<usize>>,
+        }
+        impl DefragSink for DefragRec {
+            fn defrag_plan(&self, _m: &str, _r: &str, _pk: i32, moves: Vec<DefragMove>) {
+                self.calls.lock().unwrap().push(moves.len());
+            }
+        }
+
+        let fragmented = || {
+            vec![
+                meta_l2_at("m", b"a", 1, 0),
+                meta_l2_at("m", b"b", 1, 8192), // 非致密(slot=4096)
+            ]
+        };
+        let register = |cp: &ControlPlane, blocks: Vec<BlockMeta>| {
+            let cp = cp.clone();
+            async move {
+                cp.register_blocks(Request::new(RegisterBlocksRequest {
+                    node_id: "n0".into(),
+                    prefix_hashes: prefix(&[b"a", b"b"]),
+                    blocks,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+            }
+        };
+
+        // 默认 None=关:碎片布局也不触发。
+        let sink = Arc::new(DefragRec::default());
+        let cp = ControlPlane::default().with_defrag_sink(sink.clone());
+        {
+            let mut auth = cp.write_authority().unwrap();
+            ensure_model(&mut auth, "m");
+        }
+        assert!(register(&cp, fragmented()).await.ok);
+        assert_eq!(sink.calls.lock().unwrap().len(), 0, "默认关闭不得触发");
+
+        // 阈值未达(1/3 < 0.5)不触发。
+        let sink2 = Arc::new(DefragRec::default());
+        let cp2 = ControlPlane::default()
+            .with_defrag_sink(sink2.clone())
+            .with_auto_defrag_threshold(Some(0.5));
+        {
+            let mut auth = cp2.write_authority().unwrap();
+            ensure_model(&mut auth, "m");
+        }
+        let ack = cp2
+            .register_blocks(Request::new(RegisterBlocksRequest {
+                node_id: "n0".into(),
+                prefix_hashes: prefix(&[b"a", b"b", b"c", b"d", b"e", b"f"]),
+                blocks: vec![
+                    meta_l2_at("m", b"a", 1, 0),
+                    meta_l2_at("m", b"b", 1, 8192), // seg1 有洞
+                    meta_l2_at("m", b"c", 2, 0),
+                    meta_l2_at("m", b"d", 2, 4096), // seg2 致密
+                    meta_l2_at("m", b"e", 3, 0),
+                    meta_l2_at("m", b"f", 3, 4096), // seg3 致密
+                ],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ack.ok, "{}", ack.err);
+        assert_eq!(
+            sink2.calls.lock().unwrap().len(),
+            0,
+            "碎片率 1/3 < 阈值 0.5 不得触发"
+        );
+
+        // 达到阈值(1/1 ≥ 0.5)→ 触发一次且计划非空。
+        let sink3 = Arc::new(DefragRec::default());
+        let cp3 = ControlPlane::default()
+            .with_defrag_sink(sink3.clone())
+            .with_auto_defrag_threshold(Some(0.5));
+        {
+            let mut auth = cp3.write_authority().unwrap();
+            ensure_model(&mut auth, "m");
+        }
+        assert!(register(&cp3, fragmented()).await.ok);
+        let calls = sink3.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "达阈值应触发一次");
+        assert!(calls[0] > 0, "触发的计划必须非空");
+    }
+
+    /// PauseBackground 期间不触发(与 promote/demote/GC 共享暂停语义)。
+    #[tokio::test]
+    async fn s3_auto_defrag_paused_skipped() {
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct DefragRec {
+            calls: StdMutex<Vec<usize>>,
+        }
+        impl DefragSink for DefragRec {
+            fn defrag_plan(&self, _m: &str, _r: &str, _pk: i32, moves: Vec<DefragMove>) {
+                self.calls.lock().unwrap().push(moves.len());
+            }
+        }
+
+        let sink = Arc::new(DefragRec::default());
+        let cp = ControlPlane::default()
+            .with_defrag_sink(sink.clone())
+            .with_auto_defrag_threshold(Some(0.5));
+        {
+            let mut auth = cp.write_authority().unwrap();
+            ensure_model(&mut auth, "m");
+        }
+        cp.set_background_paused(true);
+        let ack = cp
+            .register_blocks(Request::new(RegisterBlocksRequest {
+                node_id: "n0".into(),
+                prefix_hashes: prefix(&[b"a", b"b"]),
+                blocks: vec![meta_l2_at("m", b"a", 1, 0), meta_l2_at("m", b"b", 1, 8192)],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ack.ok, "{}", ack.err);
+        assert_eq!(
+            sink.calls.lock().unwrap().len(),
+            0,
+            "PauseBackground 期间不得触发"
+        );
+    }
+
     // --- P4.9: consistent-hash sharding ---
 
     #[test]
@@ -2812,6 +3173,51 @@ mod tests {
             auth.hit_count_on(&key, PoolKind::Target as i32, b"solo", "n5"),
             3
         );
+    }
+
+    /// S1(issue #74):计划→放置→L0 驱逐→同块同节点可再触发(自愈回归)。
+    /// 修复前 `publish_location_at` 剥 L0 不清滞回标记,已计划块永远无法再触发
+    /// 对该节点的放置;修复后 L0 驱逐(present=false)连带清 (flat,node) 标记。
+    #[test]
+    fn s1_l0_evict_clears_placement_mark_and_retriggers() {
+        let mut auth = Authority::default();
+        ensure_model(&mut auth, "m");
+        let full = prefix(&[b"solo"]);
+        auth.register("n0", &full, vec![meta("m", b"solo")])
+            .unwrap();
+        let pk = PoolKind::Target as i32;
+        let id = KvBlockId {
+            model_id: "m".into(),
+            block_hash: b"solo".to_vec(),
+            pool_kind: pk,
+            scope: "public".into(),
+            revision: String::new(),
+        };
+
+        // 过阈值 → 下发计划(记滞回标记);再命中 → 滞回不重复。
+        assert!(auth.report_hits("n5", std::slice::from_ref(&id)).is_empty());
+        let plans = auth.report_hits("n5", std::slice::from_ref(&id));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].0, "n5");
+        assert!(auth.report_hits("n5", std::slice::from_ref(&id)).is_empty());
+
+        // 放置完成(agent PlaceBlocks → PublishLocation)→ 之后 L0 被驱逐。
+        auth.publish_location("m", "", pk, b"solo", Tier::L0, "n5", true)
+            .unwrap();
+        auth.publish_location("m", "", pk, b"solo", Tier::L0, "n5", false)
+            .unwrap();
+
+        // 自愈:滞回标记已随驱逐清除,再次命中(计数仍 ≥ 阈值)可再触发。
+        let plans = auth.report_hits("n5", std::slice::from_ref(&id));
+        assert_eq!(
+            plans.len(),
+            1,
+            "L0 驱逐后滞回标记必须清除,同块同节点可再触发"
+        );
+        assert_eq!(plans[0].0, "n5");
+        assert_eq!(plans[0].1[0].block_hash, b"solo".to_vec());
+        // 再触发后滞回重建:继续命中不重复下发。
+        assert!(auth.report_hits("n5", std::slice::from_ref(&id)).is_empty());
     }
 
     /// P7.6(B2-a):HRW 预放置——空环无计划;ready 节点集确定家节点;
