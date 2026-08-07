@@ -804,6 +804,30 @@ mod tests {
         assert!(e.is_l2_durable(b"x") && e.l3_present(b"y"));
     }
 
+    /// PR #77 review:两阶段 `ensure_l2_cap` 的有意语义变更钉测——pinned 块在
+    /// L2 压力下保持 LRU 原位,不再像旧实现 pop/rotate 到队尾(pin 是冻结语义,
+    /// 不应让块变热)。若有人改回 rotate,本测试失败。
+    #[test]
+    fn s6_pinned_victim_keeps_l2_lru_position() {
+        let mut e = LocalTierEngine::with_caps(TierCaps {
+            l0: 4,
+            l1: 8,
+            l2: 3,
+        });
+        e.put_durable(b"x", b"X").unwrap();
+        e.put_durable(b"a", b"A").unwrap();
+        e.put_durable(b"b", b"B").unwrap();
+        e.pin(b"x"); // 最冷块 pinned:扫描必经,旧实现会把它 rotate 到队尾
+        e.put_durable(b"c", b"C").unwrap(); // 压力:demote 最冷 unpinned(a)
+        assert!(e.l3_present(b"a") && !e.is_l2_durable(b"a"));
+        let order: Vec<&[u8]> = e.l2_order.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            order,
+            [b"x".as_slice(), b"b".as_slice(), b"c".as_slice()],
+            "pinned x 必须保持队首原位(旧实现 rotate 后为 [b, x, c])"
+        );
+    }
+
     #[test]
     fn all_pinned_l2_over_cap_errors_and_rolls_back() {
         let mut e = LocalTierEngine::with_caps(TierCaps {

@@ -257,6 +257,9 @@ impl ControlPlane {
     /// 已知原型边界:计划下发到 agent 执行 `RelocateBlocks` 回报之间,后续
     /// register 会重复触发同碎段计划——执行幂等(同坐标 relocate 为坐标刷新),
     /// 生产化时由执行侧去重/节流。
+    /// 挂点边界(PR #77 review):评估只挂 `register_blocks` 写路径——稳态触发
+    /// 依赖 register 频次;只 relocate/evict 不再 re-register 的负载永不触发,
+    /// relocate/evict 路径的评估挂点留生产化。
     /// 锁内只**生成**计划:返回 `(model_id, revision, pool_kind, moves)` 供锁外
     /// 投递。DefragSink 是外部边界(生产实现可能等待 agent 或回调 CP 如 Locate/
     /// 迁移回报)——写锁内同步调用会阻塞全局 CP 读写,回调即死锁(PR #77 review)。
@@ -3031,6 +3034,15 @@ mod tests {
             sink2.calls.lock().unwrap().len(),
             0,
             "碎片率 1/3 < 阈值 0.5 不得触发"
+        );
+        // 「阈值未达」分支自证:直接钉比值(3 段 1 段有洞 → 1/3)。
+        let ratio = cp2
+            .read_authority()
+            .unwrap()
+            .l2_fragmentation_ratio("m", "", 0, 0);
+        assert!(
+            (ratio - 1.0 / 3.0).abs() < 1e-9,
+            "碎片率应为 1/3,实得 {ratio}"
         );
 
         // 达到阈值(1/1 ≥ 0.5)→ 触发一次且计划非空。
