@@ -3,7 +3,8 @@
 //! 协议(`docs/architecture/control-plane.md`「粒度与协议」的单权威单流序号版):
 //! - `seq = 0` 的 `ViewUpdate` = 全量快照;接收方**重置**镜像后应用。
 //! - `seq >= 1` 单调递增;每次写调用提交一批事件(单写者持写锁提交,提交序即权威序)。
-//! - `resume_from_seq = N`:重放 `(N, ...]` 的缓冲批;`N+1` 早于 buffer floor → 回退快照。
+//! - `resume_from_seq = N`:重放 `(N, ...]` 的缓冲批;`N+1` 早于 buffer floor → 回退快照;
+//!   `N` 达到/超过已发序号上界(CP 重启 next_seq 归 1、buffer 空)→ 同样回退快照(S2)。
 //! - REGISTERED/MOVED 携带变更后**全量** locations + l3_present,接收方按 id upsert;
 //!   INVALIDATED 只带 id,接收方删除。不推 ref_count(proto B1 注释);block_kind 仅
 //!   REGISTERED 携带,接收方对 MOVED 忽略该字段。
@@ -70,8 +71,18 @@ impl ViewLog {
     }
 
     /// 重放 `(from_seq, ...]` 的缓冲批;`from_seq + 1 < floor()` → None(回退快照)。
+    ///
+    /// S2(issue #74):`from_seq >= next_seq`(resume 点达到/超过本实例已发序号
+    /// 上界,含重启后 buffer 空)→ None(回退快照)。单写者序号 1..next_seq 单调,
+    /// 正确客户端的 resume 点必 ≤ last_seq = next_seq-1;超出上界说明客户端见过
+    /// 本实例从未签发的 seq——CP 已重启(next_seq 归 1)或权威重建,其镜像状态
+    /// 无法用重放证明有效,必须回退快照。「已最新」重连(from_seq == last_seq)
+    /// 不命中该分支,仍走 `Some([])` 空重放,语义不变。
     pub(crate) fn replay_after(&self, from_seq: u64) -> Option<Vec<ViewUpdate>> {
         if from_seq == 0 || from_seq + 1 < self.floor() {
+            return None;
+        }
+        if from_seq >= self.next_seq {
             return None;
         }
         Some(
@@ -160,5 +171,29 @@ mod tests {
         assert!(log.replay_after(0).is_none());
         // 已最新 → 空重放(非回退)
         assert_eq!(log.replay_after(4).expect("current").len(), 0);
+    }
+
+    /// S2(issue #74):resume 点达到/超过已发序号上界 → None(回退快照)。
+    /// CP 重启后 next_seq 归 1、buffer 空,旧 resume_from_seq(如 100)必须
+    /// 触发快照,而不是 `Some([])` 空重放(那会让镜像带着旧状态静默发散)。
+    #[test]
+    fn view_log_replay_resume_ahead_of_issued_seq() {
+        // 重启态:空 buffer、next_seq=1;任何非零 resume 都超上界。
+        let log = ViewLog::default();
+        assert!(log.replay_after(100).is_none());
+        assert!(log.replay_after(1).is_none());
+
+        // 有事件:窗口内正常重放;已最新仍空重放;超上界 → None。
+        let mut log = ViewLog::default();
+        for i in 1..=3u8 {
+            log.commit(vec![ev(i)]);
+        }
+        assert_eq!(log.replay_after(1).expect("in window").len(), 2);
+        assert_eq!(log.replay_after(3).expect("current").len(), 0);
+        assert!(log.replay_after(4).is_none(), "from_seq == next_seq → 快照");
+        assert!(
+            log.replay_after(100).is_none(),
+            "from_seq >> next_seq → 快照"
+        );
     }
 }
